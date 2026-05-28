@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from goblin_watcher.errors import GoblinError, MissingDependencyError
@@ -30,6 +31,60 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
 
 
 _PR_URL_RE = re.compile(r"https://github\.com/[^\s]+/pull/\d+")
+
+
+@dataclass(frozen=True)
+class PrInfo:
+    """A PR's identity as reported by `gh pr view --json`."""
+
+    number: int
+    head_ref: str
+    base_ref: str
+    url: str
+    title: str
+    state: str
+    is_cross_repository: bool
+
+
+def pr_view(pr: str, *, cwd: Path) -> PrInfo:
+    """Look up a PR by number or URL via `gh pr view`.
+
+    `pr` may be a bare number (resolved against the repo at `cwd`) or a full
+    PR URL (which `gh` resolves regardless of `cwd`).
+    """
+    res = _run(
+        [
+            "pr",
+            "view",
+            pr,
+            "--json",
+            "number,headRefName,baseRefName,url,title,state,isCrossRepository",
+        ],
+        cwd=cwd,
+    )
+    if res.returncode != 0:
+        raise GoblinError(
+            f"No PR {pr!r} found.",
+            hint=(res.stderr or res.stdout).strip() or None,
+        )
+    import json
+
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError as e:
+        raise GoblinError(
+            f"`gh pr view {pr}` returned output that wasn't valid JSON.",
+            hint=res.stdout.strip() or None,
+        ) from e
+    return PrInfo(
+        number=int(data.get("number", 0)),
+        head_ref=data.get("headRefName", ""),
+        base_ref=data.get("baseRefName", ""),
+        url=data.get("url", ""),
+        title=data.get("title", ""),
+        state=data.get("state", ""),
+        is_cross_repository=bool(data.get("isCrossRepository", False)),
+    )
 
 
 def create_pr(

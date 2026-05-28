@@ -1,10 +1,11 @@
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import click
 import typer
 
-from goblin_watcher import config, git, paths, secrets, state
+from goblin_watcher import config, gh, git, paths, secrets, state
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
 from goblin_watcher.completion_enumerators import complete_projects
@@ -115,10 +116,13 @@ def _source_label(
     branch_name: str | None,
     branch_auto: bool,
     directory: Path | None,
+    pr: str | None,
     task: Task,
 ) -> str:
     if linear is not None:
         return f"--linear {linear}"
+    if pr is not None:
+        return f"--pr {pr}"
     if branch is not None:
         return f"--branch {branch}"
     if branch_name is not None:
@@ -142,6 +146,11 @@ def new(
         False,
         "--branch-auto",
         help="New branch with an auto-generated name (e.g. goblin-watcher-falcon).",
+    ),
+    pr: str | None = typer.Option(
+        None,
+        "--pr",
+        help="GitHub PR number or URL to check out (head branch + its base).",
     ),
     from_: str | None = typer.Option(
         None,
@@ -192,7 +201,7 @@ def new(
         help="Seed the session with `/codex:adversarial-review`. Forces --agent claude.",
     ),
 ) -> None:
-    """Create a task from a source (Linear, branch, new branch, or directory)."""
+    """Create a task from a source (Linear, GitHub PR, branch, new branch, or directory)."""
     if prompt is not None and no_launch:
         raise GoblinError(
             "--prompt has no effect with --no-launch (no session is started).",
@@ -216,18 +225,20 @@ def new(
                 hint=f"Drop --agent {agent}, or drop --adversarial-review.",
             )
         agent = "claude"
-    sources: list[object] = [s for s in (linear, branch, branch_name, dir) if s is not None]
+    sources: list[object] = [s for s in (linear, branch, branch_name, dir, pr) if s is not None]
     if branch_auto:
         sources.append("auto")
     if len(sources) != 1:
         raise GoblinError(
             "Specify exactly one source: --linear, --branch, --branch-name, "
-            "--branch-auto, or --dir.",
-            hint="e.g. `gw new --branch-auto` or `gw new --branch-name spike/foo`.",
+            "--branch-auto, --dir, or --pr.",
+            hint="e.g. `gw new --branch-auto` or `gw new --pr 42`.",
         )
 
     if linear is not None:
         task = _from_linear(linear, project, repo, title, from_)
+    elif pr is not None:
+        task = _from_pr(pr, project, repo, title)
     elif dir is not None:
         task = _from_existing_dir(dir, title)
     elif branch is not None:
@@ -247,7 +258,7 @@ def new(
     agent_name = agent or (cfg.defaults.agent) or "claude"
     windowing_mode = windowing or cfg.defaults.windowing
     unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
-    source_label = _source_label(linear, branch, branch_name, branch_auto, dir, task)
+    source_label = _source_label(linear, branch, branch_name, branch_auto, dir, pr, task)
 
     print_success(f"Created task {task.id!r} on branch {task.branch!r}")
     settings: list[tuple[str, str]] = [
@@ -261,6 +272,8 @@ def new(
         settings.append(("title", title))
     if task.linear is not None:
         settings.append(("linear", f"{task.linear.identifier}: {task.linear.title}"))
+    if pr is not None and task.pr_url:
+        settings.append(("pr", task.pr_url))
     settings += [
         ("agent", agent_name),
         ("windowing", windowing_mode),
@@ -341,6 +354,122 @@ def _from_existing_branch(proj: Project, branch: str, title: str | None) -> Task
         branch=branch,
         worktree_path=worktree_dir,
         base_branch=proj.default_branch,
+        created_at=_now(),
+    )
+
+
+_PR_URL_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/\d+")
+_SSH_REMOTE_RE = re.compile(r"git@github\.com:(?P<repo>.+)")
+
+
+def _parse_pr_url(pr: str) -> str | None:
+    """Return the lowercased `owner/repo` from a GitHub PR URL, else None.
+
+    None means `pr` is a bare number (or otherwise not a PR URL) and the
+    project must be resolved via `--project` or the picker.
+    """
+    m = _PR_URL_RE.match(pr.strip())
+    if m is None:
+        return None
+    return m.group("repo").removesuffix(".git").lower()
+
+
+def _normalize_repo(url: str | None) -> str | None:
+    """Reduce a git remote URL to its lowercased `owner/repo`, else None.
+
+    Handles `https://github.com/owner/repo(.git)` and
+    `git@github.com:owner/repo.git`.
+    """
+    if not url:
+        return None
+    url = url.strip()
+    https = re.match(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    if https is not None:
+        return https.group("repo").lower()
+    ssh = _SSH_REMOTE_RE.match(url)
+    if ssh is not None:
+        return ssh.group("repo").removesuffix(".git").lower()
+    return None
+
+
+def _project_for_repo(owner_repo: str) -> Project | None:
+    """Find a registered project whose remote resolves to `owner/repo`."""
+    needle = owner_repo.lower()
+    for name in state.load_global().projects:
+        try:
+            proj = state.get_project(name)
+        except ProjectNotFoundError:
+            continue
+        if _normalize_repo(proj.repo_url) == needle:
+            return proj
+    return None
+
+
+def _resolve_pr_project(pr: str, project_override: str | None) -> Project:
+    """Resolve the project for a PR-driven task.
+
+    Precedence: --project → repo match from a PR URL → project picker (bare
+    number).
+    """
+    if project_override:
+        return state.get_project(project_override.strip().lower())
+
+    owner_repo = _parse_pr_url(pr)
+    if owner_repo is not None:
+        matched = _project_for_repo(owner_repo)
+        if matched is not None:
+            return matched
+        raise GoblinError(
+            f"No registered project matches the PR's repo {owner_repo!r}.",
+            hint=(
+                "Register it first (`gw project new <name> --repo <url>`), or "
+                "pass --project <name> to pick one."
+            ),
+        )
+
+    # Bare PR number: fall back to --project / the picker.
+    return resolve_project(project_override)
+
+
+def _from_pr(
+    pr: str,
+    project_override: str | None,
+    repo_url: str | None,
+    title: str | None,
+) -> Task:
+    del repo_url, title  # PR title/branch supersede; auto-clone is out of scope.
+    proj = _resolve_pr_project(pr, project_override)
+    info = gh.pr_view(pr, cwd=proj.root)
+
+    if info.is_cross_repository:
+        raise GoblinError(
+            f"PR #{info.number} is from a fork (cross-repository).",
+            hint="Cross-repo PRs aren't supported yet; check the branch out manually.",
+        )
+
+    task_id = _task_id_from_branch(info.head_ref)
+    if _load_existing_task(proj, task_id) is not None:
+        _raise_task_exists(proj, task_id)
+
+    _refresh_base(proj.root, info.head_ref)
+    if not git.branch_exists(proj.root, info.head_ref):
+        raise GoblinError(
+            f"PR head branch {info.head_ref!r} does not exist locally or on origin.",
+            hint="The branch may have been deleted, or origin needs a fetch.",
+        )
+
+    worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
+    if not worktree_dir.exists():
+        git.worktree_add(proj.root, worktree_dir, info.head_ref)
+
+    return Task(
+        id=task_id,
+        project=proj.name,
+        branch=info.head_ref,
+        worktree_path=worktree_dir,
+        base_branch=info.base_ref,
+        pr_url=info.url,
+        status="pr-open",
         created_at=_now(),
     )
 

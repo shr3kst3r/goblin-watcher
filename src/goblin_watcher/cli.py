@@ -76,7 +76,7 @@ app.add_typer(history_cmd.app, name="history", help="Show and prune the gw comma
 
 app.command(
     "new",
-    help="Create a task from a Linear ticket, existing branch, new branch, or directory.",
+    help="Create a task from a Linear ticket, GitHub PR, branch, new branch, or directory.",
 )(new_cmd.new)
 app.command(
     "cd",

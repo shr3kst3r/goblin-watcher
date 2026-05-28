@@ -7,7 +7,7 @@ Onboarding for AI coding agents (Claude Code, Codex, Gemini) and humans.
 **goblin-watcher** (`gw`) is a CLI that orchestrates AI coding agents in git worktrees. It replaces tools like Conductor and Superset. Three entry points:
 
 - `gw <LINEAR-ID>` — auto-pilot: clone/find repo, create branch + worktree from a Linear ticket, spawn the agent.
-- `gw new [--linear|--branch|--branch-name|--dir]` — explicit task creation from any of four sources.
+- `gw new [--linear|--pr|--branch|--branch-name|--dir]` — explicit task creation from any source. `--pr` takes a GitHub PR number or URL and checks out its head branch (a URL also auto-resolves the project by repo).
 - `gw run [PATH|TASK-ID]` — open a session picker for an existing task.
 
 Multiple sessions per task are allowed (e.g. two claude conversations on the same Linear ticket). Each session carries a rolling summary derived from the agent's transcript.

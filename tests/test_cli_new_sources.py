@@ -290,6 +290,147 @@ def test_new_adversarial_review_rejects_non_claude_agent(
     assert "requires --agent claude" in str(res.exception)
 
 
+def _clone_with_pr_branch(tmp_path: Path, *, head: str = "feat/pr-42", base: str = "main") -> Path:
+    """Build an upstream carrying a PR head branch, clone it, return the clone."""
+    upstream = tmp_path / "upstream"
+    _init_repo(upstream, branch=base)
+    subprocess.run(["git", "-C", str(upstream), "checkout", "-q", "-b", head], check=True)
+    (upstream / "pr-work.txt").write_text("pr work")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-qm", "pr work"], check=True)
+    subprocess.run(["git", "-C", str(upstream), "checkout", "-q", base], check=True)
+
+    repo = tmp_path / "alpha"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "tester"], check=True)
+    return repo
+
+
+def test_new_pr_creates_worktree_from_head(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from goblin_watcher.gh import PrInfo
+
+    repo = _clone_with_pr_branch(tmp_path)
+    _register_project(repo)
+
+    info = PrInfo(
+        number=42,
+        head_ref="feat/pr-42",
+        base_ref="main",
+        url="https://github.com/org/repo/pull/42",
+        title="Add a thing",
+        state="OPEN",
+        is_cross_repository=False,
+    )
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.gh.pr_view", return_value=info) as pr_view:
+        res = runner.invoke(app, ["new", "--pr", "42", "--project", "alpha", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    assert pr_view.call_args.args[0] == "42"
+
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.branch == "feat/pr-42"
+    assert task.base_branch == "main"
+    assert task.pr_url == "https://github.com/org/repo/pull/42"
+    assert task.status == "pr-open"
+    assert (task.worktree_path / "pr-work.txt").exists()
+
+
+def test_new_pr_resolves_project_from_url(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from goblin_watcher.gh import PrInfo
+
+    repo = _clone_with_pr_branch(tmp_path)
+    # Materialize the head branch locally, then point origin at a GitHub URL so
+    # the PR URL resolves to this project. (The later fetch against the fake
+    # URL fails harmlessly since the branch already exists locally.)
+    subprocess.run(
+        ["git", "-C", str(repo), "branch", "feat/pr-42", "origin/feat/pr-42"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "set-url", "origin", "https://github.com/org/repo.git"],
+        check=True,
+    )
+    _register_project(repo)
+
+    info = PrInfo(
+        number=42,
+        head_ref="feat/pr-42",
+        base_ref="main",
+        url="https://github.com/org/repo/pull/42",
+        title="Add a thing",
+        state="OPEN",
+        is_cross_repository=False,
+    )
+    runner = CliRunner()
+    # No --project: the repo must be inferred from the PR URL.
+    with patch("goblin_watcher.commands.new.gh.pr_view", return_value=info):
+        res = runner.invoke(
+            app,
+            ["new", "--pr", "https://github.com/org/repo/pull/42", "--no-launch"],
+        )
+    assert res.exit_code == 0, res.output
+
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.branch == "feat/pr-42"
+    assert task.pr_url == "https://github.com/org/repo/pull/42"
+
+
+def test_new_pr_rejects_fork(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from goblin_watcher.gh import PrInfo
+
+    repo = _clone_with_pr_branch(tmp_path)
+    _register_project(repo)
+
+    info = PrInfo(
+        number=7,
+        head_ref="feat/forked",
+        base_ref="main",
+        url="https://github.com/org/repo/pull/7",
+        title="From a fork",
+        state="OPEN",
+        is_cross_repository=True,
+    )
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.gh.pr_view", return_value=info):
+        res = runner.invoke(app, ["new", "--pr", "7", "--project", "alpha", "--no-launch"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "fork" in str(res.exception).lower()
+    assert not state.list_tasks(state.get_project("alpha"))
+
+
+def test_new_pr_url_without_matching_project_errors(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = _clone_with_pr_branch(tmp_path)
+    _register_project(repo)  # origin is a local path, not the PR's github repo
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["new", "--pr", "https://github.com/org/other/pull/9", "--no-launch"],
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "org/other" in str(res.exception)
+
+
+def test_new_pr_conflicts_with_other_source(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["new", "--pr", "42", "--branch", "main", "--no-launch"])
+    assert res.exit_code != 0
+
+
 def test_new_rejects_zero_or_multiple_sources(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = tmp_path / "alpha"
     _init_repo(repo)
