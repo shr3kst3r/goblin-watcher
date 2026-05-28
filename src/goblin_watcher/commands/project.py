@@ -154,12 +154,16 @@ def rm(
     ),
     force: bool = typer.Option(False, "--force", help="Skip the confirmation prompt."),
 ) -> None:
-    """Unregister a project. Does NOT delete files on disk."""
+    """Unregister a project. Does NOT delete files on disk.
+
+    Only the global registry entry (name → root) is required, so a project whose
+    directory no longer exists on disk can still be removed.
+    """
     name_norm = _normalize_name(name)
-    proj = state.get_project(name_norm)
+    root = state.project_root_for(name_norm)
     if not force:
         confirmed = typer.confirm(
-            f"Unregister project {proj.name!r} at {proj.root}? (Files on disk will NOT be deleted)",
+            f"Unregister project {name_norm!r} at {root}? (Files on disk will NOT be deleted)",
             default=False,
         )
         if not confirmed:

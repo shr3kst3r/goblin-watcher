@@ -87,3 +87,17 @@ def test_project_rm_with_force(isolated_xdg: Path, tmp_path: Path) -> None:
     result = runner.invoke(app, ["project", "rm", "alpha", "--force"])
     assert result.exit_code == 0, result.output
     assert "alpha" not in state.load_global().projects
+
+
+def test_project_rm_when_directory_missing(isolated_xdg: Path, tmp_path: Path) -> None:
+    import shutil
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    # Project directory (and its .goblin metadata) no longer exists on disk.
+    shutil.rmtree(repo)
+    result = runner.invoke(app, ["project", "rm", "alpha", "--force"])
+    assert result.exit_code == 0, result.output
+    assert "alpha" not in state.load_global().projects
