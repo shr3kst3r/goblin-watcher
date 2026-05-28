@@ -1,0 +1,78 @@
+"""User config at $XDG_CONFIG_HOME/goblin-watcher/config.toml.
+
+Schema is intentionally small. Unknown keys are tolerated.
+"""
+
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+from typing import Any, Literal
+
+import tomli_w
+from pydantic import BaseModel, Field
+
+from goblin_watcher import paths
+
+Windowing = str  # "inline" | "tmux" — validated where used, not here.
+
+# Orientation of additional panes opened by `tmux split-window` for second+
+# sessions on the same task. "vertical" stacks panes top-over-bottom (tmux
+# `-v`); "horizontal" places them side-by-side (tmux `-h`).
+SplitDirection = Literal["vertical", "horizontal"]
+
+
+class LinearConfig(BaseModel):
+    api_key: str | None = None  # literal key or "op://..." reference
+
+
+class TmuxConfig(BaseModel):
+    session_name: str = "goblin"
+    attach_on_spawn: bool = True
+    split: SplitDirection = "vertical"
+    # When true, set tmux `monitor-silence` on each goblin task window so it
+    # gets a `~` marker in the status bar when its pane sees no output for N
+    # seconds. Detects "agent done / waiting for input" without stealing focus.
+    mark_idle: bool = False
+    mark_idle_seconds: int = 5
+
+
+class DefaultsConfig(BaseModel):
+    agent: str | None = None  # "claude" | "codex" | "gemini"
+    windowing: Windowing = "inline"
+    summary_ttl_seconds: int = 30
+    unsafe: bool = True  # Default to bypass-permission mode; set `unsafe = false` to opt out.
+    # LLM-generated session descriptions (lazy, background-refreshed).
+    description_ttl_seconds: int = 900  # 15 minutes
+    description_agent: str = "claude"  # "claude" | "codex" | "off"
+    description_model: str = "claude-haiku-4-5"
+    # Whole-transcript char cap for the description prompt. Claude is asked to
+    # characterize the entire session; very long transcripts are truncated
+    # head + tail with a marker in between. ~80k chars ≈ 20k input tokens ≈
+    # $0.02 per Haiku refresh.
+    description_max_transcript_chars: int = 80_000
+
+
+class Config(BaseModel):
+    defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
+    linear: LinearConfig = Field(default_factory=LinearConfig)
+    tmux: TmuxConfig = Field(default_factory=TmuxConfig)
+
+
+def load() -> Config:
+    f = paths.config_file()
+    if not f.exists():
+        return Config()
+    raw: dict[str, Any] = tomllib.loads(f.read_text())
+    return Config.model_validate(raw)
+
+
+def save(cfg: Config) -> None:
+    f = paths.config_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    # TOML doesn't accept None; emit only the keys the user has set.
+    f.write_bytes(tomli_w.dumps(cfg.model_dump(exclude_none=True)).encode())
+
+
+def config_path() -> Path:
+    return paths.config_file()

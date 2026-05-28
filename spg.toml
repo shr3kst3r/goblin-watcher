@@ -1,0 +1,47 @@
+[project]
+name = "goblin-watcher"
+
+[commands.gw]
+run = "uv run gw"
+description = "goblin-watcher: parallel AI coding agents in git worktrees."
+# Delegate tab completion to gw's own Click tree walker. spg's static
+# `args = [...]` model can't represent gw's nested subcommands and
+# value-taking flags (--project / --task / --session). See
+# src/goblin_watcher/completion_spg.py for the hook contract.
+complete_hook = "uv run gw __complete spg"
+
+[commands.gw-verify]
+run = "just verify"
+description = "Run the full CI gate: ruff check + ruff format --check + ty + pytest."
+
+[commands.gw-format]
+run = "just format"
+description = "Auto-format the codebase with ruff."
+
+[commands.gw-test]
+run = "uv run pytest -q"
+description = "Run pytest. Optional path args are passed through (e.g. tests/test_cli.py)."
+args = [
+    { name = "path", description = "test file or directory", type = "files" },
+]
+
+# Shell-function wrappers around `gw cd`. A subprocess can't change its
+# parent shell's cwd, so these must be defined in the user's interactive
+# shell — spg sources them in via `source <(spg completion zsh)`.
+[commands.gwcd]
+description = "cd into a goblin-watcher task worktree (interactive shells only)."
+shell_function = '''
+  local target
+  target="$(gw cd "$@")" || return $?
+  cd "$target"
+'''
+complete_hook = "uv run gw __complete spg-cd"
+
+[commands.gwcode]
+description = "open a goblin-watcher task worktree in VS Code (interactive shells only)."
+shell_function = '''
+  local target
+  target="$(gw cd "$@")" || return $?
+  code "$target"
+'''
+complete_hook = "uv run gw __complete spg-cd"

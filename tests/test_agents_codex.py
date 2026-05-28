@@ -1,0 +1,215 @@
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+from goblin_watcher.agents.codex import CodexAgent
+
+
+def _meta_line(session_id: str, cwd: Path, timestamp: str = "2026-05-20T00:37:39Z") -> str:
+    payload = {"id": session_id, "cwd": str(cwd), "timestamp": timestamp}
+    return json.dumps({"timestamp": timestamp, "type": "session_meta", "payload": payload})
+
+
+def _user_msg_line(message: str, timestamp: str = "2026-05-20T00:38:00Z") -> str:
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": message},
+        }
+    )
+
+
+def _agent_msg_line(message: str, timestamp: str = "2026-05-20T00:38:05Z") -> str:
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": message},
+        }
+    )
+
+
+def _write_rollout(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        for line in lines:
+            f.write(line + "\n")
+
+
+def test_spawn_command_uses_prompt_positionally() -> None:
+    a = CodexAgent()
+    assert a.spawn_command(prompt="hi there", cwd=Path("/tmp")) == ["codex", "hi there"]
+
+
+def test_resume_ignores_synthetic_session_id() -> None:
+    a = CodexAgent()
+    assert a.resume_command(session_id="some-fake-id", cwd=Path("/tmp")) == ["codex", "resume"]
+    assert a.resume_command(session_id=None, cwd=Path("/tmp")) == ["codex", "resume"]
+
+
+def test_unsafe_prepends_bypass_flag() -> None:
+    a = CodexAgent()
+    assert a.spawn_command(prompt="hi", cwd=Path("/tmp"), unsafe=True) == [
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "hi",
+    ]
+    assert a.resume_command(session_id="anything", cwd=Path("/tmp"), unsafe=True) == [
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "resume",
+    ]
+
+
+def test_capture_session_id_picks_newest_for_cwd(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    fake_sessions = tmp_path / "codex" / "sessions"
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "19" / "rollout-old.jsonl",
+        [_meta_line("uuid-old", cwd, timestamp="2026-05-19T10:00:00Z")],
+    )
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "rollout-new.jsonl",
+        [_meta_line("uuid-new", cwd, timestamp="2026-05-20T10:00:00Z")],
+    )
+    # A transcript in a different cwd must be ignored.
+    other_cwd = tmp_path / "other-wt"
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "rollout-other.jsonl",
+        [_meta_line("uuid-other", other_cwd, timestamp="2026-05-20T11:00:00Z")],
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        assert a.capture_session_id(cwd) == "uuid-new"
+
+
+def test_capture_session_id_returns_none_when_empty(tmp_path: Path) -> None:
+    a = CodexAgent()
+    with patch.object(CodexAgent, "sessions_root", return_value=tmp_path / "noop"):
+        assert a.capture_session_id(tmp_path) is None
+
+
+def test_list_sessions_returns_newest_first(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    fake_sessions = tmp_path / "codex" / "sessions"
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "19" / "old.jsonl",
+        [
+            _meta_line("uuid-old", cwd, timestamp="2026-05-19T10:00:00Z"),
+            _user_msg_line("old session"),
+        ],
+    )
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "new.jsonl",
+        [
+            _meta_line("uuid-new", cwd, timestamp="2026-05-20T10:00:00Z"),
+            _user_msg_line("new session"),
+        ],
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        sessions = a.list_sessions(cwd)
+    assert [s.session_id for s in sessions] == ["uuid-new", "uuid-old"]
+    assert sessions[0].first_message_snippet == "new session"
+
+
+def test_read_transcript_counts_user_turns_via_event_msg(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    fake_sessions = tmp_path / "codex" / "sessions"
+    rollout = fake_sessions / "2026" / "05" / "20" / "r.jsonl"
+    _write_rollout(
+        rollout,
+        [
+            _meta_line("uuid-1", cwd),
+            # Auto-injected response_item user noise should NOT count.
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "# AGENTS.md instructions ..."}],
+                    },
+                }
+            ),
+            _user_msg_line("Do a code review"),
+            _agent_msg_line("Reviewing now."),
+            _user_msg_line("Anything blocking?"),
+            _agent_msg_line("One scheduling issue."),
+        ],
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        summary = a.read_transcript("uuid-1", cwd)
+    assert summary.turn_count == 2
+    assert summary.last_user_snippet == "Anything blocking?"
+    assert summary.last_assistant_snippet == "One scheduling issue."
+    assert summary.first_user_snippet == "Do a code review"
+    assert summary.recent_user_snippets == ["Do a code review", "Anything blocking?"]
+    assert summary.recent_assistant_snippets == ["Reviewing now.", "One scheduling issue."]
+
+
+def test_read_transcript_falls_back_to_newest_for_synthetic_id(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    fake_sessions = tmp_path / "codex" / "sessions"
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "r.jsonl",
+        [
+            _meta_line("uuid-real", cwd, timestamp="2026-05-20T10:00:00Z"),
+            _user_msg_line("the actual conversation"),
+        ],
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        summary = a.read_transcript("synthetic-id-that-doesnt-exist", cwd)
+    assert summary.turn_count == 1
+    assert summary.last_user_snippet == "the actual conversation"
+
+
+def test_read_transcript_returns_empty_when_no_match(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    with patch.object(CodexAgent, "sessions_root", return_value=tmp_path / "noop"):
+        summary = a.read_transcript("anything", cwd)
+    assert summary.turn_count == 0
+    assert summary.last_user_snippet is None
+
+
+def test_render_transcript_labels_event_messages(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    fake_sessions = tmp_path / "codex" / "sessions"
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "r.jsonl",
+        [
+            _meta_line("uuid-1", cwd),
+            _user_msg_line("kick off the work"),
+            _agent_msg_line("on it"),
+        ],
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        rendered = a.render_transcript("uuid-1", cwd)
+    assert rendered is not None
+    assert "[user]\nkick off the work" in rendered
+    assert "[assistant]\non it" in rendered
+
+
+def test_render_transcript_returns_none_when_no_messages(tmp_path: Path) -> None:
+    a = CodexAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    fake_sessions = tmp_path / "codex" / "sessions"
+    # Meta only — no user_message / agent_message events.
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "r.jsonl",
+        [_meta_line("uuid-1", cwd)],
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        assert a.render_transcript("uuid-1", cwd) is None

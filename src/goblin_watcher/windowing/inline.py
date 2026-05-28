@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from goblin_watcher.models import Task
+
+
+class InlineWindower:
+    name = "inline"
+
+    def run(
+        self,
+        *,
+        task: Task,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+    ) -> int:
+        del task
+        # Stdin/stdout/stderr pass through — this is an interactive agent.
+        proc = subprocess.run(cmd, cwd=str(cwd), env=env, check=False)
+        return proc.returncode
+
+    def is_live(self, task: Task) -> bool:
+        del task
+        return False

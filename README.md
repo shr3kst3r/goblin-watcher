@@ -1,0 +1,425 @@
+# goblin-watcher
+
+**Parallel AI coding agents in git worktrees.** A CLI replacement for [Conductor](https://conductor.build/) and [Superset](https://superset.sh/) — Linear ticket → branch + worktree → spawn agent (resume or fresh), with multiple agent sessions per ticket and optional tmux windowing.
+
+```text
+gw ENG-123                         # Linear ticket → clone repo → branch + worktree → agent
+gw new --branch-name spike/foo --title "Trying a thing"
+gw new --branch-auto               # auto-named branch (e.g. swift-otter)
+gw new --branch feat/eng-456-token-bucket
+gw new --dir ~/code/scratch-fork --title "Sandbox"
+gw run                             # in worktree: pick a session; outside: project → task → session
+gw run --new                       # fresh session on an existing task
+gwcd eng-123                       # cd into a task's worktree (shell wrapper around `gw cd`)
+gwcode eng-123                     # open a task's worktree in VS Code
+gw status                          # tree view across projects, tasks, sessions
+gw pr open                         # open a GitHub PR via `gh`
+gw task prune                      # forget tasks whose branch is merged
+gw session prune --older-than 30   # forget sessions idle for 30+ days
+```
+
+## Install
+
+Prerequisites:
+
+- **[asdf](https://asdf-vm.com/)** with the `python` and `just` plugins (`asdf plugin add python && asdf plugin add just`).
+- **[uv](https://docs.astral.sh/uv/)** ≥ 0.8.x (Astral's Python package manager).
+- **`git`** (you almost certainly have this already).
+- Optional but recommended: **`gh`** (GitHub CLI, for `gw pr`), **`tmux`** (for windowing mode), **`op`** (1Password CLI, for `op://...` references to Linear keys).
+
+Quickstart:
+
+```bash
+asdf install              # installs Python 3.12.8 and just 1.40.0 per .tool-versions
+uv sync --extra dev
+uv run gw --help
+uv run gw doctor          # confirms which agent CLIs and helpers are on PATH
+```
+
+Optional install for daily use (so `gw` works outside the venv):
+
+```bash
+uv tool install --editable .
+```
+
+### Shell completion
+
+```bash
+# Zsh: dump to your fpath and rebuild compinit.
+mkdir -p ~/.zfunc && gw completion zsh > ~/.zfunc/_gw
+# Then in ~/.zshrc:
+#   fpath+=~/.zfunc
+#   autoload -U compinit && compinit
+
+# Bash:
+gw completion bash > ~/.gw-completion.bash
+# Then in ~/.bashrc:  source ~/.gw-completion.bash
+
+# Fish:
+gw completion fish > ~/.config/fish/completions/gw.fish
+```
+
+`gw --install-completion` / `--show-completion` (Typer's built-ins) fail to detect your shell when `gw` is launched via a wrapper like `uv run`, so we ship `gw completion <shell>` as a stable replacement that just emits the script to stdout.
+
+The zsh script is **static** — it knows every subcommand and flag at generation time, so `gw new <TAB>` shows the flag list right away (no need to type `--` first). Bash and fish use Typer's dynamic completion, which calls back into `gw` per tab press. Pass `--dynamic` if you want the dynamic zsh script too.
+
+The `gwcd` / `gwcode` shell-function wrappers around `gw cd` (which can only print a path — a subprocess can't `cd` its parent shell) are published via [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml`, not by `gw completion`. After `spg install` + a fresh zsh:
+
+- `gwcd eng-123` (or just `gwcd` to open the picker) `cd`s your shell into the matching task's worktree.
+- `gwcode eng-123` opens that worktree in VS Code (requires the `code` CLI on `$PATH`).
+
+## Core concepts
+
+### Project
+
+A registered git repository. Created with `gw project new <name> --repo <url>` (clones into `~/goblin/<name>/`) or `--dir <path>` (adopts an existing checkout in place). Projects can be tagged with a Linear team key (`--team ENG`) so `gw ENG-123` auto-resolves which repo to use.
+
+There is no "current" project. Any command that needs one accepts `--project NAME`; if you omit the flag, gw opens an interactive project picker (auto-picking when only one is registered).
+
+Stored at:
+
+- Registry: `~/.local/share/goblin-watcher/state.json` (XDG)
+- Per-project: `<repo>/.goblin/project.json`
+
+### Task
+
+A unit of work: branch + worktree + optional Linear issue + a list of agent sessions. Created from one of five **sources**:
+
+| Source | Flag | Example |
+|---|---|---|
+| Linear ticket | `--linear` | `gw new --linear ENG-123 --repo git@github.com:org/repo.git` |
+| Linear ticket stacked on another PR | `--linear ... --from` | `gw new --linear ENG-123 --from feat/eng-456-token-bucket` |
+| Fresh branch | `--branch-name` | `gw new --branch-name spike/profiler --from main --title "Profile feed"` |
+| Auto-named branch | `--branch-auto` | `gw new --branch-auto` (yields e.g. `swift-otter`) |
+| Existing branch | `--branch` | `gw new --branch feat/eng-456-token-bucket` |
+| Existing directory | `--dir` | `gw new --dir ~/code/scratch-fork --title "Sandbox"` |
+
+Worktrees live at `<repo>/.worktrees/<branch>/` by default. Task JSON is at `<repo>/.goblin/tasks/<task-id>.json`.
+
+### Session
+
+One agent conversation on a task. **Many sessions per task** — e.g. two parallel claude sessions exploring different approaches to the same ticket, plus a codex session applying review fixes. Each session carries a rolling summary derived from the agent's transcript.
+
+When you run an agent against a task with existing sessions, the resolution rules are:
+
+- `--session <id>` → resume that exact session.
+- `--session` (no value) → force the session picker, even if there's only one match.
+- `--new` → fresh session, seeded with the task's context.
+- `--agent <other>` with no existing sessions for that agent → fresh.
+- 0 matches for the chosen agent → fresh.
+- 1 match → resume silently.
+- 2+ matches → interactive picker (the picker includes a `[ New session ]` entry).
+
+## Headline workflows
+
+### `gw <LINEAR-ID>` — auto-pilot
+
+```bash
+gw ENG-123
+```
+
+What it does (the first time):
+
+1. Resolves `ENG-123` via the Linear GraphQL API (needs `LINEAR_API_KEY` env var or a configured `op://` reference).
+2. Picks the project whose `linear_team_key == "ENG"`. If none, falls back to `--repo <url>` to clone+register a new project named `eng`.
+3. Creates branch `eng-123-<slug-from-title>` off the project's default branch.
+4. Materializes a worktree at `<repo>/.worktrees/eng-123/` (the worktree dir uses the bare task id; only the branch carries the slug).
+5. Spawns your default agent (`claude` unless overridden) with the Linear issue as the seed prompt.
+
+Subsequent invocations on the same ticket error out, because the task already exists. Resume with `gw run <task-id>` (e.g. `gw run eng-123`), fork a parallel session with `gw run <task-id> --new`, or pick a specific one with `gw run <task-id> --session <id>`.
+
+### `gw new` — explicit task creation
+
+The general form. Use this when:
+
+- You don't have a Linear ticket yet (`--branch-name`, `--dir`).
+- You're picking up a teammate's branch (`--branch`).
+- You want to skip the agent launch (`--no-launch`).
+
+Examples:
+
+```bash
+gw new --branch-name spike/test-token-bucket --title "Try a token bucket"
+gw new --branch feat/eng-456-token-bucket          # pick up an existing branch
+gw new --dir ~/code/scratch-fork --title "Quick experiment"
+gw new --linear ENG-123 --no-launch                # create task, don't spawn agent
+gw new --linear ENG-123 --from feat/other-pr       # stack on a teammate's PR branch
+```
+
+### `gw run` — interactive session picker
+
+For a task you've already created. Resolves the task from `cwd` (you're inside the worktree), an explicit path, a task id, or — when none of those are available — an interactive picker chain:
+
+```bash
+cd ~/goblin/my-repo/.worktrees/eng-123
+gw run                                              # in-worktree: jump straight to sessions
+
+gw run                                              # outside any worktree: project → task → session pickers
+gw run eng-123                                      # explicit task id
+gw run --session abc123                             # skip picker, resume that id
+gw run --session                                    # force the picker even if there's only one match
+gw run --new                                        # force fresh
+gw run --agent codex                                # pick a non-default agent
+gw run --project my-repo                       # scope task lookup + picker to one project
+```
+
+The picker chain auto-skips a level when there's only one option: one project → goes straight to its tasks; one task → goes straight to its sessions.
+
+### `gw cd` / `gwcd` / `gwcode` — jump into a task's worktree
+
+```bash
+gwcd eng-123                                        # cd into <repo>/.worktrees/eng-123/
+gwcd                                                # no arg → opens the project → task picker
+gwcd --project my-repo                         # scope the picker to one project
+gwcode eng-123                                      # open the worktree in VS Code (`code <path>`)
+```
+
+`gw cd` itself just prints the resolved worktree path on stdout (a subprocess can't `cd` its parent shell). The `gwcd` / `gwcode` wrappers that act on that path are shell functions published by [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml` (install once with `spg install`, then start a new zsh).
+
+### `gw pr open` — push and open a PR
+
+```bash
+gw pr open eng-123 [--draft] [--notify-linear]
+```
+
+Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. PR body is templated from the Linear issue (if any). The PR URL is persisted on the task record.
+
+## Worked examples
+
+### Start a new Linear ticket against a checkout you already have
+
+You've got `my-repo` cloned at `/Users/you/goblin/my-repo` and want to start `ENG-123`.
+
+```bash
+# 1. Register the existing checkout as a project, tagged with the Linear team.
+gw project new my-repo \
+    --dir /Users/you/goblin/my-repo \
+    --team ENG
+
+# 2. Auto-pilot.
+gw ENG-123
+```
+
+That second command fetches the issue from Linear, creates `eng-123-<title-slug>` off the project's default branch, materializes a worktree at `/Users/you/goblin/my-repo/.worktrees/eng-123/`, and spawns claude with the issue body as its seed prompt. Re-running `gw ENG-123` later resumes that session.
+
+If you haven't tagged the project with `--team`, pass `--project` explicitly:
+
+```bash
+gw ENG-123 --project my-repo
+```
+
+### Start a Linear ticket when the repo isn't cloned yet
+
+```bash
+gw ENG-123 --repo git@github.com:your-org/my-repo.git
+```
+
+`gw` clones the repo into `~/goblin/eng/` (named after the team), registers it as a project, then proceeds as above. Future `gw ENG-<n>` calls reuse that project.
+
+### Spike without a Linear ticket
+
+```bash
+gw new --branch-name spike/cache-warmer --project my-repo \
+    --title "Try warming the LRU on boot"
+```
+
+Creates branch `spike/cache-warmer` off the default branch, worktree at `.worktrees/spike-cache-warmer/`, and spawns the agent with the title as the seed. Omit `--project` and you'll get the project picker (or auto-pick if there's only one registered).
+
+### Pick up a teammate's branch
+
+```bash
+gw new --branch feat/ingest-backfill --project my-repo   # local or remote branch; fetched if needed
+```
+
+### Run a second agent in parallel on the same ticket
+
+```bash
+gw run eng-123 --new                        # fresh claude alongside the existing session
+gw run eng-123 --agent codex --new          # or try codex on the same ticket
+```
+
+Both sessions live on the same task. Switch between them with the picker:
+
+```bash
+cd /Users/you/goblin/my-repo/.worktrees/eng-123
+gw run                                      # picker lists every session on this task
+```
+
+### Create the task without spawning the agent
+
+```bash
+gw new --linear ENG-123 --no-launch
+```
+
+Useful when you want the branch + worktree pre-built before opening it yourself, or when scripting setup.
+
+### Open a PR when the work is done
+
+```bash
+gw pr open eng-123                          # push + `gh pr create`
+gw pr open eng-123 --draft --notify-linear  # draft PR; also post the URL back to Linear
+```
+
+### Inspect state
+
+```bash
+gw status                                   # tree: projects → tasks → sessions
+gw status --project my-repo            # limit to one project
+gw task show eng-123                        # task detail with rolling session summaries
+gw session ls                               # sessions for the current task
+gw doctor                                   # which agent CLIs are on PATH + Linear key status
+```
+
+`gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
+
+### Add a fresh session to an existing task
+
+```bash
+gw run --new                                # in-worktree: fork a fresh session on this task
+gw run eng-123 --new                        # by task id, from anywhere
+gw run --agent codex --new                  # fresh codex session alongside any claude sessions
+```
+
+When the picker shows (2+ existing sessions for the agent), pick the `[ New session ]` entry. A different `--agent` with no prior sessions on the task always starts fresh — no `--new` needed.
+
+## Cleanup
+
+```bash
+gw session rm <session-id>                  # forget a session from gw's record; agent transcript untouched
+gw session prune --older-than 30            # forget every session whose last_used_at is >30d ago
+gw session prune --older-than 7 --agent codex --dry-run
+gw task rm <task-id>                        # delete worktree + branch + record (confirms; --force to skip)
+gw task prune                               # remove every task whose branch is merged (all projects)
+gw task prune --project my-repo        # limit to one project
+gw task prune --dry-run                     # preview without removing
+gw task prune --force                       # skip confirm + ignore uncommitted-changes guard
+gw project rm <name>                        # unregister a project (does NOT delete the checkout)
+```
+
+`gw task prune` checks each task's PR state via `gh pr view` when a PR URL is recorded, and falls back to `git merge-base --is-ancestor` against the base branch. Squash- and rebase-merged branches without a recorded PR URL won't be detected by the ancestry check alone.
+
+`gw session prune` operates only on `gw`'s record of `task.sessions`. The underlying agent transcript files (e.g. `~/.claude/projects/<encoded-cwd>/*.jsonl`) are untouched, so you can still resume a forgotten session by id if you re-add it.
+
+## Configuration
+
+Optional config at `~/.config/goblin-watcher/config.toml`:
+
+```toml
+[defaults]
+agent = "claude"                  # "claude" | "codex" | "gemini"
+windowing = "inline"              # "inline" | "tmux"
+summary_ttl_seconds = 30          # how long a session summary is considered fresh
+unsafe = true                     # spawn agents with their bypass-permission flag (see below)
+
+[linear]
+# Literal key, or an `op://vault/item/field` reference resolved via the 1Password CLI.
+# Env var LINEAR_API_KEY takes precedence.
+api_key = "op://Personal/Linear/api_key"
+
+[tmux]
+session_name = "goblin"           # tmux session that hosts every task
+attach_on_spawn = true            # `gw` execs `tmux attach -t <session>` after spawning
+split = "vertical"                # additional sessions on a task: "vertical" (top/bottom) or "horizontal" (side-by-side)
+```
+
+## Tmux windowing
+
+Set `windowing = "tmux"` in `config.toml`, or pass `--windowing tmux` on any spawn command:
+
+- One tmux session (default name `goblin`) hosts everything.
+- One window per task, named after `task.id` (e.g. `eng-123`).
+- One pane per session — additional sessions on the same task `split-window` into the existing window. Default orientation is `vertical` (stacked top/bottom); set `tmux.split = "horizontal"` for side-by-side.
+- If `gw` is run from outside tmux and `attach_on_spawn = true`, it `execvp`s into `tmux attach`. From inside, it `select-window`s.
+
+Inline mode (default) just blocks on the agent process and returns when it exits.
+
+## Agent support
+
+| Agent | Spawn | Resume | Session discovery |
+|---|---|---|---|
+| **claude** (Claude Code) | `claude "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
+| **codex** | `codex "<prompt>"` | `codex resume <id>` | Partial — synthesizes a UUID; transcript parsing stubbed |
+| **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | Partial — cwd-scoped checkpoints, no stable id |
+
+`gw doctor` checks which binaries are on PATH and resolves the Linear key.
+
+### Unsafe mode (skip permission prompts)
+
+**On by default.** `gw` spawns each agent with its "skip the confirmation prompts" flag, so the agent will execute tool calls without asking. Opt out globally with `defaults.unsafe = false` in `config.toml`, or per-invocation with `--no-unsafe` on `gw new`, `gw run`, and `gw <LINEAR-ID>`. The flag injected per agent:
+
+| Agent | Bypass flag |
+|---|---|
+| claude | `--dangerously-skip-permissions` |
+| codex | `--dangerously-bypass-approvals-and-sandbox` |
+| gemini | `--yolo` |
+
+The agents will execute everything they decide to do without asking. If you'd rather be prompted, set `defaults.unsafe = false` in your config.
+
+## Commands reference
+
+```text
+gw <LINEAR-ID> [--project NAME] [--repo URL] [--agent ...]
+               [--windowing inline|tmux] [--unsafe|--no-unsafe]
+gw new --linear|--branch|--branch-name|--branch-auto|--dir [--title ...] [--from ...]
+       [--project NAME] [--agent ...]
+       [--no-launch] [--windowing ...] [--unsafe|--no-unsafe]
+gw run [PATH|TASK-ID] [--agent ...] [--session [ID]] [--new]
+       [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
+gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode shell functions
+gw status [--project NAME]                  # tree view of projects → tasks → sessions
+gw doctor                                   # binary + key resolution checks
+gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode wrappers live in spg.toml)
+
+gw project new|ls|info|rm
+gw task ls|show|rm|prune                # `prune` accepts --project/--dry-run/--force/--no-fetch
+gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
+gw pr open|status
+gw version
+```
+
+Always reach for `gw <command> --help` for the full option list.
+
+## Storage layout
+
+```text
+~/.local/share/goblin-watcher/
+└── state.json                            # registry of projects
+
+~/.config/goblin-watcher/
+└── config.toml                           # user config (above)
+
+<project-root>/
+├── .goblin/
+│   ├── project.json                      # this project's record
+│   └── tasks/
+│       └── eng-123.json                  # one file per task; carries sessions[]
+└── .worktrees/
+    └── eng-123/                          # one worktree per task (dir = task id; branch carries the slug)
+```
+
+`.goblin/` and `.worktrees/` are appended to `.git/info/exclude` so we never touch the user's tracked `.gitignore`.
+
+## Loop-closing smoke (manual)
+
+```bash
+# Throwaway sandbox
+cd "$(mktemp -d)"
+git init -q -b main demo && cd demo && git config user.email t@t && git config user.name t
+echo hi > README.md && git add . && git commit -qm init && cd ..
+
+# Register, create a task, inspect
+gw project new demo --dir "$PWD/demo"
+gw new --branch-name spike/smoke --title "smoke" --no-launch
+gw status
+gw task show spike-smoke
+```
+
+Expected: `gw status` shows the `demo` project with one task on branch `spike/smoke`, no sessions yet.
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for architecture, conventions, and safety boundaries. Local verification is `just verify` (lint + format + typecheck + tests). Design docs live under [`docs/designs/`](docs/designs/); ADRs under [`docs/adrs/`](docs/adrs/).
+
+## License
+
+Proprietary. All rights reserved.
