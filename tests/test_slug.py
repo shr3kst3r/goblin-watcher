@@ -2,7 +2,7 @@ import random
 
 import pytest
 
-from goblin_watcher.slug import _ADJECTIVES, _NOUNS, branch_slug, random_branch_name, slugify
+from goblin_watcher.slug import _WORDS, branch_slug, random_branch_name, slugify
 
 
 @pytest.mark.parametrize(
@@ -44,11 +44,20 @@ def test_branch_slug_caps_total_length() -> None:
 
 
 def test_random_branch_name_shape() -> None:
-    name = random_branch_name(random.Random(42))
-    adj, _, noun = name.partition("-")
-    assert adj in _ADJECTIVES
-    assert noun in _NOUNS
+    name = random_branch_name("goblin-watcher", random.Random(42))
+    project, _, word = name.rpartition("-")
+    assert project == "goblin-watcher"
+    assert word in _WORDS
+
+
+def test_random_branch_name_slugifies_project() -> None:
+    name = random_branch_name("My Cool Repo", random.Random(42))
+    project, _, word = name.rpartition("-")
+    assert project == "my-cool-repo"
+    assert word in _WORDS
 
 
 def test_random_branch_name_is_deterministic_with_seed() -> None:
-    assert random_branch_name(random.Random(7)) == random_branch_name(random.Random(7))
+    assert random_branch_name("alpha", random.Random(7)) == random_branch_name(
+        "alpha", random.Random(7)
+    )

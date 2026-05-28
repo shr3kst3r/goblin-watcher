@@ -80,10 +80,14 @@ def slugify(text: str, max_len: int = _MAX_SLUG_LEN) -> str:
     return s[:max_len].rstrip("-")
 
 
-def random_branch_name(rng: random.Random | None = None) -> str:
-    """Return an `adjective-noun` branch name (e.g. `swift-otter`)."""
+# Single evocative words for the auto-generated suffix.
+_WORDS = _ADJECTIVES + _NOUNS
+
+
+def random_branch_name(project: str, rng: random.Random | None = None) -> str:
+    """Return a `{project}-{word}` branch name (e.g. `goblin-watcher-falcon`)."""
     r = rng or random
-    return f"{r.choice(_ADJECTIVES)}-{r.choice(_NOUNS)}"
+    return f"{slugify(project)}-{r.choice(_WORDS)}"
 
 
 def branch_slug(linear_id: str | None, title: str, prefix: str = "") -> str:

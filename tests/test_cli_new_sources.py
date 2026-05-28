@@ -146,7 +146,7 @@ def test_new_dir_adopts_existing_checkout(isolated_xdg: Path, tmp_path: Path) ->
 
 
 def test_new_branch_auto_creates_random_branch(isolated_xdg: Path, tmp_path: Path) -> None:
-    from goblin_watcher.slug import _ADJECTIVES, _NOUNS
+    from goblin_watcher.slug import _WORDS
 
     repo = tmp_path / "alpha"
     _init_repo(repo)
@@ -158,9 +158,9 @@ def test_new_branch_auto_creates_random_branch(isolated_xdg: Path, tmp_path: Pat
 
     proj = state.get_project("alpha")
     [task] = state.list_tasks(proj)
-    adj, _, noun = task.branch.partition("-")
-    assert adj in _ADJECTIVES
-    assert noun in _NOUNS
+    project, _, word = task.branch.rpartition("-")
+    assert project == "alpha"
+    assert word in _WORDS
     assert task.worktree_path.exists()
 
 

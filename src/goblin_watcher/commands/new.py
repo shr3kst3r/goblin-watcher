@@ -139,7 +139,9 @@ def new(
         None, "--branch-name", help="New branch name for a fresh task."
     ),
     branch_auto: bool = typer.Option(
-        False, "--branch-auto", help="New branch with an auto-generated name (e.g. swift-otter)."
+        False,
+        "--branch-auto",
+        help="New branch with an auto-generated name (e.g. goblin-watcher-falcon).",
     ),
     from_: str | None = typer.Option(
         None,
@@ -233,7 +235,7 @@ def new(
         task = _from_existing_branch(proj, branch, title)
     else:
         proj = resolve_project(project)
-        generated = random_branch_name() if branch_auto else None
+        generated = random_branch_name(proj.name) if branch_auto else None
         chosen = branch_name if branch_name is not None else generated
         assert chosen is not None
         task = _from_new_branch(proj, chosen, from_, title)
