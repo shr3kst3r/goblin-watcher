@@ -1,7 +1,9 @@
 import sys
 
+import click
 import typer
 from rich.traceback import install as install_rich_traceback
+from typer import rich_utils
 
 from goblin_watcher import command_log
 from goblin_watcher.commands import (
@@ -179,6 +181,18 @@ def main() -> None:
         except typer.Exit as err:
             entry["exit_code"] = err.exit_code
             raise SystemExit(err.exit_code) from err
+        except click.ClickException as err:
+            # `standalone_mode=False` makes Click/Typer re-raise usage errors
+            # (bad options, and the `no_args_is_help` help text, which is a
+            # NoArgsIsHelpError) instead of rendering them. Render them the way
+            # Typer's standalone mode would, rather than dumping a traceback.
+            rich_utils.rich_format_error(err)
+            entry["exit_code"] = err.exit_code
+            raise SystemExit(err.exit_code) from err
+        except click.Abort:
+            rich_utils.rich_abort_error()
+            entry["exit_code"] = 1
+            raise SystemExit(1) from None
         except KeyboardInterrupt:
             print_error("Interrupted.")
             entry["exit_code"] = 130

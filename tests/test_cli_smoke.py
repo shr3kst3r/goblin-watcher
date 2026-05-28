@@ -47,6 +47,25 @@ def test_help_unknown_command_exits_nonzero() -> None:
     assert res.returncode != 0
 
 
+def test_no_args_shows_help_without_traceback() -> None:
+    # `no_args_is_help` raises a NoArgsIsHelpError; with standalone_mode=False
+    # it must be rendered as help, not dumped as a Python traceback.
+    res = _run_gw()
+    combined = res.stdout + res.stderr
+    assert "Usage: gw" in combined
+    assert "Traceback" not in combined
+    assert "NoArgsIsHelpError" not in combined
+
+
+def test_unknown_option_shows_error_without_traceback() -> None:
+    res = _run_gw("--definitely-not-a-flag")
+    combined = res.stdout + res.stderr
+    assert res.returncode != 0
+    assert "No such option" in combined
+    assert "Traceback" not in combined
+    assert "NoSuchOption" not in combined
+
+
 def test_inject_session_pick_sentinel_eoa() -> None:
     from goblin_watcher.cli import _inject_session_pick_sentinel
     from goblin_watcher.picker import SESSION_PICK_SENTINEL
