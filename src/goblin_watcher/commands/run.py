@@ -66,6 +66,12 @@ def run(
         help="Initial prompt for a fresh session. Implies a new session "
         "(cannot be combined with --session).",
     ),
+    adversarial_review: bool = typer.Option(
+        False,
+        "--adversarial-review",
+        help="Start a fresh session seeded with `/codex:adversarial-review`. "
+        "Forces --agent claude.",
+    ),
 ) -> None:
     """Pick a session for an existing task and spawn the agent."""
     if new and session is not None:
@@ -79,6 +85,26 @@ def run(
             hint="Drop --session, or drop --prompt.",
         )
     if prompt is not None:
+        new = True
+    if adversarial_review:
+        if session is not None:
+            raise GoblinError(
+                "--adversarial-review and --session are mutually exclusive "
+                "(it always starts a fresh session).",
+                hint="Drop --session.",
+            )
+        if prompt is not None:
+            raise GoblinError(
+                "--adversarial-review and --prompt are mutually exclusive.",
+                hint="Pass one or the other.",
+            )
+        if agent is not None and agent != "claude":
+            raise GoblinError(
+                "--adversarial-review requires --agent claude "
+                "(the skill is a Claude Code slash command).",
+                hint=f"Drop --agent {agent}, or drop --adversarial-review.",
+            )
+        agent = "claude"
         new = True
     project_filter: str | None = None
     if project is not None:
@@ -130,7 +156,13 @@ def run(
                 agent_obj = get_agent(agent_name)
                 break
     elif new:
-        choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt))
+        # `/codex:adversarial-review` must be the entire user message — Claude
+        # Code's slash-command parser ignores it if buried in the seed template.
+        # `--wait` runs the review in the foreground.
+        if adversarial_review:
+            choice = Fresh(prompt="/codex:adversarial-review --wait")
+        else:
+            choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt))
     else:
         refreshed_task = sessions.refresh_task_summaries(task)
         sessions.persist(proj, refreshed_task)

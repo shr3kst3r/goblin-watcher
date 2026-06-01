@@ -110,6 +110,69 @@ def test_run_prompt_implies_fresh_and_seeds_prompt(isolated_xdg: Path, tmp_path:
     assert "Wait for my next message" not in choice.prompt
 
 
+def test_run_adversarial_review_seeds_slash_command(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    proj_a = state.get_project("alpha")
+    [task_a] = state.list_tasks(proj_a)
+
+    runner = CliRunner()
+    with patch(
+        "goblin_watcher.commands.run.launch_agent",
+        return_value=(0, task_a),
+    ) as launch:
+        res = runner.invoke(
+            app,
+            ["run", task_a.id, "--project", "alpha", "--adversarial-review"],
+        )
+    assert res.exit_code == 0, res.output
+    choice = launch.call_args.kwargs["choice"]
+    # Fresh, not Resume — adversarial review always starts a new session.
+    assert type(choice).__name__ == "Fresh"
+    # Slash command must be the entire user message, not buried in the
+    # seed template — Claude Code's parser only fires it then.
+    assert choice.prompt == "/codex:adversarial-review --wait"
+    # The agent should resolve to claude regardless of config default.
+    assert launch.call_args.kwargs["agent"].name == "claude"
+
+
+def test_run_adversarial_review_conflicts_with_session(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["run", "spike-foo", "--project", "alpha", "--adversarial-review", "--session", "x"],
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "mutually exclusive" in str(res.exception)
+
+
+def test_run_adversarial_review_conflicts_with_prompt(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["run", "spike-foo", "--project", "alpha", "--adversarial-review", "--prompt", "do work"],
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "mutually exclusive" in str(res.exception)
+
+
+def test_run_adversarial_review_rejects_non_claude_agent(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["run", "spike-foo", "--project", "alpha", "--adversarial-review", "--agent", "codex"],
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "requires --agent claude" in str(res.exception)
+
+
 def test_run_project_flag_task_missing_in_scope_errors(isolated_xdg: Path, tmp_path: Path) -> None:
     """A task id present in alpha but not beta must not silently fall back to alpha
     when --project beta is set."""
