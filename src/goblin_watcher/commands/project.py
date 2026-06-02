@@ -147,6 +147,65 @@ def info(
     console.print(f"  created_at      {proj.created_at.isoformat()}")
 
 
+_PULL_OUTCOME_STYLE: dict[git.PullBaseOutcome, str] = {
+    "created": "success",
+    "updated": "success",
+    "up_to_date": "muted",
+    "no_remote": "muted",
+    "no_remote_branch": "hint",
+    "fetch_failed": "error",
+    "diverged": "hint",
+    "dirty": "hint",
+}
+
+
+@app.command("pull")
+def pull(
+    name: str | None = typer.Argument(
+        None,
+        help="Project to pull; omit to pull every project with a remote.",
+        autocompletion=complete_projects,
+    ),
+) -> None:
+    """Fetch and fast-forward each project's default branch from its remote.
+
+    Projects with no configured remote are skipped. A branch that has diverged
+    from its remote, or that's checked out in a worktree with uncommitted
+    changes, is left untouched and reported rather than forced.
+    """
+    global_state = state.load_global()
+    if not global_state.projects:
+        console.print("[muted]No projects registered. Try `gw project new`.[/]")
+        return
+
+    if name is not None:
+        name_norm = _normalize_name(name)
+        root = state.project_root_for(name_norm, global_state)
+        targets = {name_norm: root}
+    else:
+        targets = dict(sorted(global_state.projects.items()))
+
+    table = Table(title="Pull", show_header=True, header_style="bold")
+    table.add_column("Project")
+    table.add_column("Branch")
+    table.add_column("Result")
+
+    for proj_name, root in targets.items():
+        try:
+            proj = state.load_project(root)
+        except ProjectNotFoundError:
+            table.add_row(proj_name, "", "[red]missing[/]")
+            continue
+        if not git.has_remote(proj.root):
+            table.add_row(proj_name, proj.default_branch, "[muted]no remote — skipped[/]")
+            continue
+        result = git.pull_base_from_remote(proj.root, proj.default_branch)
+        style = _PULL_OUTCOME_STYLE.get(result.outcome, "muted")
+        table.add_row(proj_name, proj.default_branch, f"[{style}]{result.detail}[/]")
+
+    console.print(table)
+
+
 @app.command("rm")
 def rm(
     name: str = typer.Argument(

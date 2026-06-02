@@ -79,6 +79,56 @@ def test_project_info_no_projects_errors(isolated_xdg: Path) -> None:
     assert "No projects registered" in result.exception.message
 
 
+def test_project_pull_skips_no_remote(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    result = runner.invoke(app, ["project", "pull"])
+    assert result.exit_code == 0, result.output
+    assert "no remote" in result.output
+
+
+def test_project_pull_fast_forwards_default_branch(isolated_xdg: Path, tmp_path: Path) -> None:
+    # Bare "remote" + a working clone that lands new commits on it.
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "-u", "origin", "main"], check=True)
+
+    # The project: a fresh clone of the remote, registered via --dir.
+    proj_dir = tmp_path / "alpha"
+    subprocess.run(["git", "clone", "-q", str(remote), str(proj_dir)], check=True)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(proj_dir)])
+    before = subprocess.run(
+        ["git", "-C", str(proj_dir), "rev-parse", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    # Advance the remote by one commit from the seed clone.
+    (seed / "next.txt").write_text("more")
+    subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-qm", "next"], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"], check=True)
+
+    result = runner.invoke(app, ["project", "pull"])
+    assert result.exit_code == 0, result.output
+
+    after = subprocess.run(
+        ["git", "-C", str(proj_dir), "rev-parse", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert after != before
+
+
 def test_project_rm_with_force(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = tmp_path / "alpha"
     _init_repo(repo)
