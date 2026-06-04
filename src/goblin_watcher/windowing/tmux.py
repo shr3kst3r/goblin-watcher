@@ -21,7 +21,7 @@ from pathlib import Path
 
 from goblin_watcher import config
 from goblin_watcher.console import console
-from goblin_watcher.errors import MissingDependencyError
+from goblin_watcher.errors import GoblinError, MissingDependencyError
 from goblin_watcher.models import Task
 
 
@@ -90,9 +90,21 @@ class TmuxWindower:
             # `-v` stacks top/bottom, `-h` places side-by-side. `vertical` ==
             # panes-stacked-vertically matches tmux's `-v` flag letter.
             split_flag = "-h" if config.load().tmux.split == "horizontal" else "-v"
-            _run_tmux("split-window", split_flag, "-t", target, "-c", str(cwd))
+            res = _run_tmux("split-window", split_flag, "-t", target, "-c", str(cwd))
         else:
-            _run_tmux("new-window", "-t", s, "-n", task.id, "-c", str(cwd))
+            # `-a` inserts the window *after* the session's current window and
+            # shifts the rest up. Without it, `new-window -t <session>` targets
+            # the current window's index and fails with "index N in use"
+            # whenever that slot is occupied (the common case once the session
+            # has windows) — silently leaving the agent unspawned.
+            res = _run_tmux("new-window", "-a", "-t", s, "-n", task.id, "-c", str(cwd))
+        if res.returncode != 0:
+            raise GoblinError(
+                f"tmux failed to open a window/pane for task '{task.id}': "
+                f"{res.stderr.strip() or 'unknown error'}",
+                hint="Run `tmux ls` to inspect the goblin session, "
+                "or switch to windowing = 'inline'.",
+            )
 
         shell_cmd = " ".join(shlex.quote(arg) for arg in cmd)
         # Send the command into the pane (last pane of the target window).

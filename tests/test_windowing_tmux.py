@@ -28,13 +28,20 @@ def fake_tmux(monkeypatch: pytest.MonkeyPatch):
     calls = []
 
     class _FakeRes:
-        returncode = 1
-        stdout = ""
-        stderr = ""
+        def __init__(self, code: int) -> None:
+            self.returncode = code
+            self.stdout = ""
+            self.stderr = ""
 
     def _fake_run(cmd, capture_output, text, check):
         calls.append(cmd)
-        return _FakeRes()
+        # `has-session` / `list-windows` return nonzero so the windower creates
+        # a fresh session and treats the task window as absent. Window/pane
+        # creation (`new-window`, `split-window`) must succeed (0), else the
+        # windower now raises.
+        sub = cmd[1] if len(cmd) > 1 else ""
+        code = 1 if sub in ("has-session", "list-windows") else 0
+        return _FakeRes(code)
 
     monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
     return calls
@@ -60,8 +67,37 @@ def test_tmux_run_creates_session_and_window(isolated_xdg: Path, tmp_path: Path,
         )
     flat = [" ".join(c) for c in fake_tmux]
     assert any("new-session" in c for c in flat)
-    assert any("new-window -t goblin -n eng-123" in c for c in flat)
+    assert any("new-window -a -t goblin -n eng-123" in c for c in flat)
     assert any("send-keys -t goblin:eng-123 claude hi Enter" in c for c in flat)
+
+
+def test_tmux_run_raises_when_new_window_fails(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing `new-window` (e.g. tmux's "index N in use") surfaces a
+    GoblinError instead of silently leaving the agent unspawned."""
+    from goblin_watcher.errors import GoblinError
+
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+    monkeypatch.setenv("TMUX", "")
+
+    class _FakeRes:
+        def __init__(self, code: int, stderr: str = "") -> None:
+            self.returncode = code
+            self.stdout = ""
+            self.stderr = stderr
+
+    def _fake_run(cmd, capture_output, text, check):
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "new-window":
+            return _FakeRes(1, stderr="create window failed: index 5 in use")
+        # has-session / list-windows nonzero → fresh session, window absent.
+        return _FakeRes(1 if sub in ("has-session", "list-windows") else 0)
+
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
+
+    with pytest.raises(GoblinError, match="index 5 in use"):
+        TmuxWindower().run(task=_task(tmp_path), cmd=["claude", "hi"], cwd=tmp_path, env={})
 
 
 def _patch_inside_tmux_with_existing_window(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
