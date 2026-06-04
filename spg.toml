@@ -45,3 +45,13 @@ shell_function = '''
   code "$target"
 '''
 complete_hook = "uv run gw __complete spg-cd"
+
+[commands.gwobsidian]
+description = "open a goblin-watcher task worktree as an Obsidian vault (interactive shells only)."
+shell_function = '''
+  local target encoded
+  target="$(gw cd "$@")" || return $?
+  encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$target")"
+  open "obsidian://open?path=$encoded"
+'''
+complete_hook = "uv run gw __complete spg-cd"
