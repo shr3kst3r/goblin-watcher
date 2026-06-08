@@ -61,3 +61,17 @@ def worktree_root(project_root: Path, override: Path | None = None) -> Path:
 def projects_root() -> Path:
     """Parent directory for newly cloned projects (~/goblin)."""
     return Path.home() / "goblin"
+
+
+def workspace_root() -> Path:
+    """Parent directory for multi-repo task workspaces.
+
+    Lives in the global data tier so no single project's repo is privileged as
+    the filesystem parent of a cross-repo workspace.
+    """
+    return data_dir() / "workspaces"
+
+
+def task_workspace(task_id: str) -> Path:
+    """Workspace directory for a multi-repo task; each repo's worktree is a subdir."""
+    return workspace_root() / task_id

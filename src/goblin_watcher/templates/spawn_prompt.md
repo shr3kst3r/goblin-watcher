@@ -2,8 +2,7 @@
 
 {linear_id}: {title}
 
-Branch: {branch} (off {base_branch})
-Worktree: {worktree}
+{repos_block}
 
 {description}
 

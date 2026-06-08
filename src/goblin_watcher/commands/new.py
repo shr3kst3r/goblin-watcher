@@ -5,7 +5,7 @@ from pathlib import Path
 import click
 import typer
 
-from goblin_watcher import config, gh, git, paths, secrets, state
+from goblin_watcher import config, gh, git, paths, secrets, state, workspace
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
 from goblin_watcher.completion_enumerators import complete_projects
@@ -169,6 +169,14 @@ def new(
         help="Project name (opens the project picker if omitted).",
         autocompletion=complete_projects,
     ),
+    with_project: list[str] = typer.Option(
+        [],
+        "--with-project",
+        help="Additional registered project(s) to include in this task (repeatable). "
+        "Creates a multi-repo workspace; only valid with --linear/--branch/"
+        "--branch-name/--branch-auto.",
+        autocompletion=complete_projects,
+    ),
     repo: str | None = typer.Option(None, "--repo", help="Repo URL to clone if missing."),
     agent: str | None = typer.Option(
         None,
@@ -235,6 +243,12 @@ def new(
             hint="e.g. `gw new --branch-auto` or `gw new --pr 42`.",
         )
 
+    if with_project and (dir is not None or pr is not None):
+        raise GoblinError(
+            "--with-project is not supported with --dir or --pr.",
+            hint="Use --linear, --branch, --branch-name, or --branch-auto for multi-repo tasks.",
+        )
+
     if linear is not None:
         task = _from_linear(linear, project, repo, title, from_)
     elif pr is not None:
@@ -254,6 +268,9 @@ def new(
     proj = state.get_project(task.project)
     state.save_task(proj, task)
 
+    if with_project:
+        task = _attach_secondaries(proj, task, with_project, from_)
+
     cfg = config.load()
     agent_name = agent or (cfg.defaults.agent) or "claude"
     windowing_mode = windowing or cfg.defaults.windowing
@@ -268,6 +285,10 @@ def new(
         ("base", task.base_branch),
         ("worktree", str(task.worktree_path)),
     ]
+    if task.is_multi_repo:
+        settings.append(("workspace", str(task.workspace_path)))
+        for r in task.secondary_repos:
+            settings.append((f"+ {r.project}", f"{r.branch} → {r.worktree_path}"))
     if title:
         settings.append(("title", title))
     if task.linear is not None:
@@ -310,6 +331,32 @@ def new(
     )
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+
+def _attach_secondaries(proj: Project, task: Task, names: list[str], from_: str | None) -> Task:
+    """Add each `--with-project` repo to `task`, persisting after every step.
+
+    Validates all names before touching the filesystem. Saves progressively so
+    a mid-assembly failure leaves a consistent task (the repos attached so far)
+    rather than a half-moved worktree; the failure propagates so no launch
+    happens on an incomplete task.
+    """
+    secondaries: list[Project] = []
+    for raw in names:
+        sp = state.get_project(raw.strip().lower())
+        if sp.name == task.project or any(s.name == sp.name for s in secondaries):
+            raise GoblinError(
+                f"Project {sp.name!r} is listed more than once for this task.",
+                hint="Each project can join a task at most once.",
+            )
+        secondaries.append(sp)
+
+    task = workspace.promote_to_workspace(task)
+    state.save_task(proj, task)
+    for sp in secondaries:
+        task = workspace.attach_repo(task, sp, from_=from_)
+        state.save_task(proj, task)
+    return task
 
 
 def _from_new_branch(proj: Project, branch_name: str, from_: str | None, title: str | None) -> Task:

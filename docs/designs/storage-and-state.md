@@ -9,6 +9,7 @@ Current-state design of how `goblin-watcher` persists projects, tasks, and confi
 │ Global tier (per-user, machine-wide)            │
 │   ~/.local/share/goblin-watcher/                │  XDG_DATA_HOME
 │     state.json         ← project registry       │
+│     workspaces/<task>/ ← multi-repo task workspaces
 │     logs/              ← (planned, not used yet)│
 │   ~/.config/goblin-watcher/                     │  XDG_CONFIG_HOME
 │     config.toml        ← user defaults          │
@@ -43,6 +44,8 @@ logs_dir()            → data_dir()/logs/
 project_meta_dir(p)   → p/.goblin/
 project_tasks_dir(p)  → p/.goblin/tasks/
 worktree_root(p)      → p/.worktrees/   (overridable per-project)
+workspace_root()      → data_dir()/workspaces/
+task_workspace(id)    → data_dir()/workspaces/<id>/   (multi-repo tasks)
 ```
 
 XDG resolution comes from `platformdirs`, so macOS uses `~/Library/Application Support/...` if `XDG_DATA_HOME` is unset. Tests pin `XDG_DATA_HOME`/`XDG_CONFIG_HOME` to a `tmp_path` so behaviour is deterministic.
@@ -129,7 +132,9 @@ A crash mid-write leaves either the old state or the new one — never a half-wr
 - `sessions` is a list, **not** a dict keyed by agent — see `sessions-and-windowing.md` for why.
 - `linear` snapshot is frozen at task-creation time. Refetching Linear is out of scope for MVP.
 - `pr_url` is set by `gw pr open` and `gw pr status`.
-- `status` transitions: `open` → `pushed` (planned) → `pr-open` → `merged` | `closed` | `abandoned`. Today only `open` and `pr-open` are set automatically.
+- `status` transitions: `open` → `pushed` (planned) → `pr-open` → `merged` | `closed` | `abandoned`. Today only `open` and `pr-open` are set automatically. For a multi-repo task it is a roll-up across repos.
+- `secondary_repos` (default `[]`) and `workspace_path` (default `null`) support multi-repo tasks (ADR 0003). The scalar `project`/`branch`/`worktree_path`/`base_branch`/`pr_url` fields describe the **primary** repo; each additional repo is a `TaskRepo` (same five fields) in `secondary_repos`. `Task.all_repos()` yields primary-first. Single-repo task JSON is unchanged — the new fields default empty, so older records validate without migration.
+- When `secondary_repos` is non-empty, `workspace_path` points at the workspace directory (below) that holds each repo's worktree as a subdir, and is the agent's cwd.
 
 ## Configuration (config.toml)
 

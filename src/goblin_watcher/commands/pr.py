@@ -10,7 +10,7 @@ from goblin_watcher.completion_enumerators import complete_projects, complete_ta
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError
 from goblin_watcher.linear import LinearClient, parse_identifier
-from goblin_watcher.models import LinearComment, Project, Task
+from goblin_watcher.models import LinearComment, Project, Task, TaskRepo
 from goblin_watcher.secrets import get_linear_api_key
 from goblin_watcher.task_resolver import _task_for_path
 
@@ -38,13 +38,24 @@ def _commit_section(commits: list[tuple[str, str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _pr_body(task: Task, repo_root: Path) -> str:
-    """Assemble a structured PR body: issue context + commits + diffstat."""
+def _pr_body(task: Task, repo: TaskRepo, repo_root: Path, siblings: list[TaskRepo]) -> str:
+    """Assemble a structured PR body for one repo: issue context + commits + diffstat.
+
+    `siblings` are the task's other repos; when non-empty a "multi-repo change"
+    note cross-references them so reviewers know the PR is one half of a set.
+    """
     sections: list[str] = []
 
     if task.linear:
         sections.append(
             f"Resolves [{task.linear.identifier}]({task.linear.url}): {task.linear.title}"
+        )
+
+    if siblings:
+        sibling_lines = "\n".join(f"- `{s.project}` — branch `{s.branch}`" for s in siblings)
+        sections.append(
+            f"## Part of a multi-repo change (task `{task.id}`)\n\n"
+            f"This PR is one of several for the same task. Sibling repos:\n{sibling_lines}"
         )
 
     if task.linear and (task.linear.description or task.linear.comments):
@@ -56,8 +67,8 @@ def _pr_body(task: Task, repo_root: Path) -> str:
             issue_parts.append(_format_comments(task.linear.comments))
         sections.append("\n\n".join(issue_parts))
 
-    commits = git.commits_between(repo_root, task.base_branch, task.branch)
-    stat = git.diffstat(repo_root, task.base_branch, task.branch)
+    commits = git.commits_between(repo_root, repo.base_branch, repo.branch)
+    stat = git.diffstat(repo_root, repo.base_branch, repo.branch)
 
     if commits or stat:
         change_parts = ["## What changed"]
@@ -68,7 +79,7 @@ def _pr_body(task: Task, repo_root: Path) -> str:
         sections.append("\n\n".join(change_parts))
 
     sections.append(
-        f"---\n_Branch `{task.branch}` off `{task.base_branch}` · opened via `gw pr open`._"
+        f"---\n_Branch `{repo.branch}` off `{repo.base_branch}` · opened via `gw pr open`._"
     )
 
     return "\n\n".join(sections)
@@ -87,6 +98,24 @@ def _resolve_task(task_id: str | None, project: str | None) -> tuple[Project, Ta
     return state.get_project(task.project), task
 
 
+def _repo_root(proj: Project, repo: TaskRepo) -> Path:
+    """Project root for `repo` (the already-loaded primary, or a lookup)."""
+    if repo.project == proj.name:
+        return proj.root
+    return state.get_project(repo.project).root
+
+
+def _set_pr_url(task: Task, project_name: str, url: str) -> Task:
+    """Return a copy of `task` with `url` stored on the matching repo + status bumped."""
+    if project_name == task.project:
+        return task.model_copy(update={"pr_url": url, "status": "pr-open"})
+    secondaries = [
+        r.model_copy(update={"pr_url": url}) if r.project == project_name else r
+        for r in task.secondary_repos
+    ]
+    return task.model_copy(update={"secondary_repos": secondaries, "status": "pr-open"})
+
+
 @app.command("open")
 def open_(
     task_id: str | None = typer.Argument(
@@ -98,36 +127,59 @@ def open_(
         help="Limit the search to one project (disambiguates a task id shared across projects).",
         autocompletion=complete_projects,
     ),
+    repo: str | None = typer.Option(
+        None,
+        "--repo",
+        help="For a multi-repo task, open a PR for only this repo's project.",
+        autocompletion=complete_projects,
+    ),
     draft: bool = typer.Option(False, "--draft", help="Open as a draft PR."),
     notify_linear: bool = typer.Option(
         False, "--notify-linear", help="Post a comment on the Linear issue with the PR URL."
     ),
 ) -> None:
-    """Open a PR for a task via `gh`."""
+    """Open a PR for a task via `gh` (one per repo for a multi-repo task)."""
     proj, task = _resolve_task(task_id, project)
 
-    # Make sure the branch is pushed so `gh pr create` has a head to point at.
-    try:
-        git.push(task.worktree_path, task.branch, set_upstream=True)
-    except GoblinError as e:
-        raise GoblinError(
-            f"Failed to push {task.branch} to origin.",
-            hint=e.hint,
-        ) from e
+    repos = task.all_repos()
+    if repo is not None:
+        wanted = repo.strip().lower()
+        repos = [r for r in repos if r.project == wanted]
+        if not repos:
+            raise GoblinError(
+                f"Task {task.id!r} has no repo for project {wanted!r}.",
+                hint="Run `gw task show` to see the task's repos.",
+            )
 
-    title = task.linear.title if task.linear else task.branch
-    body = _pr_body(task, repo_root=proj.root)
-    url = gh.create_pr(
-        cwd=task.worktree_path,
-        title=title,
-        body=body,
-        base=task.base_branch,
-        head=task.branch,
-        draft=draft,
-    )
-    updated = task.model_copy(update={"pr_url": url, "status": "pr-open"})
-    state.save_task(proj, updated)
-    print_success(f"Opened PR: {url}")
+    opened: list[tuple[str, str]] = []
+    for r in repos:
+        repo_root = _repo_root(proj, r)
+        siblings = [s for s in task.all_repos() if s.project != r.project]
+        try:
+            git.push(r.worktree_path, r.branch, set_upstream=True)
+        except GoblinError as e:
+            raise GoblinError(f"Failed to push {r.branch} to origin.", hint=e.hint) from e
+
+        title = task.linear.title if task.linear else r.branch
+        body = _pr_body(task, r, repo_root, siblings)
+        url = gh.create_pr(
+            cwd=r.worktree_path,
+            title=title,
+            body=body,
+            base=r.base_branch,
+            head=r.branch,
+            draft=draft,
+        )
+        task = _set_pr_url(task, r.project, url)
+        state.save_task(proj, task)
+        opened.append((r.project, url))
+
+    if len(opened) == 1:
+        print_success(f"Opened PR: {opened[0][1]}")
+    else:
+        print_success(f"Opened {len(opened)} PRs:")
+        for project_name, url in opened:
+            console.print(f"  [bold]{project_name}[/]  {url}")
 
     if notify_linear and task.linear:
         try:
@@ -155,18 +207,25 @@ def status(
         autocompletion=complete_projects,
     ),
 ) -> None:
-    """Show PR status for a task."""
+    """Show PR status for a task (per repo for a multi-repo task)."""
     proj, task = _resolve_task(task_id, project)
-    try:
-        data = gh.pr_status(cwd=task.worktree_path)
-    except GoblinError as e:
-        console.print(f"[muted]{e.message}[/]")
-        raise typer.Exit(code=1) from e
 
-    if data["url"] and task.pr_url != data["url"]:
-        updated = task.model_copy(update={"pr_url": data["url"]})
-        state.save_task(proj, updated)
+    console.print(f"[bold]{task.id}[/]")
+    any_found = False
+    for r in task.all_repos():
+        prefix = f"  [bold]{r.project}[/]  " if task.is_multi_repo else "  "
+        try:
+            data = gh.pr_status(cwd=r.worktree_path)
+        except GoblinError as e:
+            console.print(f"{prefix}[muted]{e.message}[/]")
+            continue
+        any_found = True
+        if data["url"] and r.pr_url != data["url"]:
+            task = _set_pr_url(task, r.project, data["url"])
+            state.save_task(proj, task)
+        console.print(f"{prefix}PR #{data['number']} · {data['state']}")
+        console.print(f"    {data['title']}")
+        console.print(f"    {data['url']}")
 
-    console.print(f"[bold]{task.id}[/]  PR #{data['number']} · {data['state']}")
-    console.print(f"  {data['title']}")
-    console.print(f"  {data['url']}")
+    if not any_found:
+        raise typer.Exit(code=1)

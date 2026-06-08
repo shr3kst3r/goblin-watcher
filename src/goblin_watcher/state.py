@@ -157,6 +157,6 @@ def delete_task_record(project: Project, task_id: str) -> None:
 def find_task_by_worktree(project: Project, worktree_path: Path) -> Task | None:
     target = worktree_path.resolve()
     for t in list_tasks(project):
-        if t.worktree_path.resolve() == target:
+        if any(r.worktree_path.resolve() == target for r in t.all_repos()):
             return t
     return None

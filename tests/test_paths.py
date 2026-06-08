@@ -30,3 +30,8 @@ def test_worktree_root_default_and_override() -> None:
 
 def test_projects_root_under_home(isolated_xdg: Path) -> None:
     assert paths.projects_root() == isolated_xdg / "home" / "goblin"
+
+
+def test_workspace_root_and_task_workspace(isolated_xdg: Path) -> None:
+    assert paths.workspace_root() == paths.data_dir() / "workspaces"
+    assert paths.task_workspace("eng-123") == paths.data_dir() / "workspaces" / "eng-123"

@@ -96,6 +96,35 @@ After Task creation (and unless `--no-launch`), the launcher needs a prompt stri
 
 This means a non-Linear task gets a thinner prompt — that's correct; the user has more responsibility for orienting the agent when they didn't go through Linear.
 
+## Multi-repo tasks
+
+A task can span more than one repository (ADR 0003). The extra repos are
+additive on top of any of the branch-creating sources above:
+
+- **At create time:** `gw new --project alpha --with-project beta [--with-project ...]`.
+  The `--project` repo is *primary*; each `--with-project` is added afterward.
+  Not valid with `--dir` or `--pr`.
+- **Incrementally:** `gw task add-repo <task> <project>` attaches a repo to an
+  existing task.
+
+Mechanics live in `workspace.py`:
+
+1. The first time a second repo joins, the task is *promoted* to a workspace:
+   a directory under `$XDG_DATA_HOME/goblin-watcher/workspaces/<task-id>/` is
+   created and the primary worktree is `git worktree move`d into it as a
+   subdir. Promotion refuses if the primary worktree is dirty (it would
+   relocate live work).
+2. Each added repo gets a branch (shared slug, honoring that project's
+   `branch_prefix`; `--from` / `--branch-name` override) and a worktree at
+   `<workspace>/<project>/`.
+3. The agent launches with `cwd = workspace_path`, seeing every repo as a
+   sibling subdirectory.
+
+The task record stays in the **primary** project's `.goblin/tasks/`. Downstream
+commands iterate `task.all_repos()` (primary first): `gw pr open` pushes and
+opens a PR per repo (cross-linking siblings; `--repo <project>` targets one),
+and `gw task rm` tears down every worktree + the workspace directory.
+
 ## Edge cases worth knowing
 
 - **Branch collisions on `--linear` reruns.** `_ensure_unique_branch` appends `-2`, `-3` so reruns don't blow up the worktree, but they also don't reuse it — by design, a second `gw ENG-123` after a name collision creates `eng-123-..-2`. If you actually want to resume, use `gw run eng-123` instead of re-creating.
@@ -105,7 +134,9 @@ This means a non-Linear task gets a thinner prompt — that's correct; the user 
 
 ## Code map
 
-- `src/goblin_watcher/commands/new.py` — entry point, source dispatch.
+- `src/goblin_watcher/commands/new.py` — entry point, source dispatch, `--with-project`.
+- `src/goblin_watcher/commands/task.py` — `gw task add-repo`, multi-repo teardown.
+- `src/goblin_watcher/workspace.py` — workspace promotion + repo attachment.
 - `src/goblin_watcher/slug.py` — `branch_slug`, `slugify`.
 - `src/goblin_watcher/git.py` — `branch_exists`, `remote_branch_exists`, `create_branch_from_remote`, `worktree_add`, `main_repo_root`.
 - `src/goblin_watcher/linear/client.py` — `parse_identifier`, `LinearClient.fetch_issue`.

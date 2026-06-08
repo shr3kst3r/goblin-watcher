@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+from pathlib import Path
 
 import typer
 from rich.table import Table
 
-from goblin_watcher import gh, git, state
+from goblin_watcher import gh, git, state, workspace
 from goblin_watcher.completion_enumerators import complete_projects, complete_tasks
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
@@ -157,9 +158,16 @@ def show(
     """Show a task's full details."""
     proj, task = _find_task(task_id, project)
     console.print(f"[bold]{task.id}[/] [muted](project: {proj.name})[/]")
-    console.print(f"  branch        {task.branch}")
-    console.print(f"  base_branch   {task.base_branch}")
-    console.print(f"  worktree      {task.worktree_path}")
+    if task.is_multi_repo:
+        console.print(f"  workspace     {task.workspace_path}")
+        for r in task.all_repos():
+            console.print(
+                f"  repo          {r.project}: {r.branch} (off {r.base_branch}) → {r.worktree_path}"
+            )
+    else:
+        console.print(f"  branch        {task.branch}")
+        console.print(f"  base_branch   {task.base_branch}")
+        console.print(f"  worktree      {task.worktree_path}")
     console.print(f"  status        {task.status}")
     console.print(f"  pr_url        {task.pr_url or '(none)'}")
     console.print(f"  linear        {task.linear.identifier if task.linear else '(none)'}")
@@ -170,26 +178,92 @@ def show(
         console.print("  sessions      (none yet)")
 
 
+@app.command("add-repo")
+def add_repo(
+    task_id: str = typer.Argument(..., help="Task id.", autocompletion=complete_tasks),
+    project_to_add: str = typer.Argument(
+        ..., help="Registered project to add to the task.", autocompletion=complete_projects
+    ),
+    task_project: str | None = typer.Option(
+        None,
+        "--task-project",
+        help="Limit the task lookup to one project (disambiguates a shared task id).",
+        autocompletion=complete_projects,
+    ),
+    branch_name: str | None = typer.Option(
+        None, "--branch-name", help="Branch name for the added repo (defaults to the task's slug)."
+    ),
+    from_: str | None = typer.Option(
+        None, "--from", help="Base branch for the added repo (defaults to its project's default)."
+    ),
+) -> None:
+    """Add another repository to an existing task (creating a multi-repo workspace)."""
+    proj, task = _find_task(task_id, task_project)
+    new_proj = state.get_project(project_to_add.strip().lower())
+
+    task = workspace.attach_repo(task, new_proj, branch_name=branch_name, from_=from_)
+    state.save_task(proj, task)
+
+    added = task.secondary_repos[-1]
+    print_success(f"Added {new_proj.name!r} to task {task.id!r} on branch {added.branch!r}")
+    console.print(f"  workspace   {task.workspace_path}")
+    for r in task.all_repos():
+        console.print(f"  {r.project:<10}  {r.worktree_path}  [muted]({r.branch})[/]")
+    console.print(
+        "[muted]Relaunch the agent (`gw run "
+        f"{task.id}`) so it picks up the new repo in its workspace.[/]"
+    )
+
+
 def _destroy_task(proj: Project, task: Task, *, force: bool) -> None:
-    """Delete worktree + branch + record. No prompts; caller handles confirmation.
+    """Delete every repo's worktree + branch, the workspace dir, and the record.
 
-    The `shutil.rmtree` fallback only kicks in when `force=True`. Without that
-    guard, a non-force run could silently nuke untracked work after `git worktree
-    remove` (sans `--force`) refused.
+    No prompts; caller handles confirmation. The `shutil.rmtree` fallback only
+    kicks in when `force=True`. Without that guard, a non-force run could
+    silently nuke untracked work after `git worktree remove` (sans `--force`)
+    refused.
     """
-    if task.worktree_path.exists():
-        try:
-            git.worktree_remove(proj.root, task.worktree_path, force=force)
-        except GoblinError:
-            if not force:
-                raise
-            shutil.rmtree(task.worktree_path, ignore_errors=True)
+    for repo in task.all_repos():
+        repo_root = _repo_root(proj, repo.project)
+        if repo.worktree_path.exists():
+            if repo_root is None:
+                shutil.rmtree(repo.worktree_path, ignore_errors=True)
+            else:
+                try:
+                    git.worktree_remove(repo_root, repo.worktree_path, force=force)
+                except GoblinError:
+                    if not force:
+                        raise
+                    shutil.rmtree(repo.worktree_path, ignore_errors=True)
+        if repo_root is not None and git.branch_exists(repo_root, repo.branch):
+            with contextlib.suppress(GoblinError):
+                git.delete_branch(repo_root, repo.branch, force=True)
 
-    if git.branch_exists(proj.root, task.branch):
-        with contextlib.suppress(GoblinError):
-            git.delete_branch(proj.root, task.branch, force=True)
+    if task.workspace_path is not None and task.workspace_path.exists():
+        shutil.rmtree(task.workspace_path, ignore_errors=True)
 
     state.delete_task_record(proj, task.id)
+
+
+def _dirty_worktrees(task: Task) -> list[Path]:
+    """Worktree paths on `task` that have uncommitted changes (across all repos)."""
+    dirty: list[Path] = []
+    for repo in task.all_repos():
+        if repo.worktree_path.exists():
+            with contextlib.suppress(GoblinError):
+                if git.has_uncommitted_changes(repo.worktree_path):
+                    dirty.append(repo.worktree_path)
+    return dirty
+
+
+def _repo_root(primary: Project, project_name: str) -> Path | None:
+    """Project root for a repo on a task, or None if the project is unregistered."""
+    if project_name == primary.name:
+        return primary.root
+    try:
+        return state.get_project(project_name).root
+    except ProjectNotFoundError:
+        return None
 
 
 @app.command("rm")
@@ -208,15 +282,17 @@ def rm(
     """Remove a task: deletes the worktree, deletes the branch, removes the record."""
     proj, task = _find_task(task_id, project)
 
-    if task.worktree_path.exists() and not force:
-        if git.has_uncommitted_changes(task.worktree_path):
+    if not force:
+        dirty = _dirty_worktrees(task)
+        if dirty:
             raise GoblinError(
-                f"Worktree {task.worktree_path} has uncommitted changes.",
+                f"Worktree {dirty[0]} has uncommitted changes.",
                 hint="Commit/stash first, or re-run with --force.",
             )
+        n = len(task.all_repos())
+        scope = f"{n} worktrees" if task.is_multi_repo else f"worktree {task.worktree_path}"
         if not typer.confirm(
-            f"Remove task {task.id!r}? "
-            f"This deletes worktree {task.worktree_path} and branch {task.branch!r}.",
+            f"Remove task {task.id!r}? This deletes {scope} and their branches.",
             default=False,
         ):
             console.print("[muted]Cancelled.[/]")
@@ -304,11 +380,7 @@ def prune(
     removed = 0
     skipped: list[tuple[Project, Task, str]] = []
     for proj, task in merged:
-        if (
-            task.worktree_path.exists()
-            and git.has_uncommitted_changes(task.worktree_path)
-            and not force
-        ):
+        if not force and _dirty_worktrees(task):
             skipped.append((proj, task, "uncommitted changes"))
             continue
         _destroy_task(proj, task, force=force)

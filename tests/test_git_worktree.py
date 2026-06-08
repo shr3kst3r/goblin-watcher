@@ -42,6 +42,21 @@ def test_worktree_remove(tmp_path: Path) -> None:
     assert not dest.exists()
 
 
+def test_worktree_move_relocates_and_keeps_link(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    src = repo / ".worktrees" / "feat-new"
+    git.worktree_add(repo, src, "feat-new", base="main")
+    dest = tmp_path / "workspace" / "repo"
+    git.worktree_move(repo, src, dest)
+    assert not src.exists()
+    assert (dest / "README.md").exists()
+    assert git.current_branch(dest) == "feat-new"
+    # Still registered as a worktree of the same repo.
+    target = str(dest.resolve())
+    assert any(entry.get("worktree", "") == target for entry in git.worktree_list(repo))
+
+
 def test_worktree_list_returns_entries(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

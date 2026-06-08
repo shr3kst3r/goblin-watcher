@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from goblin_watcher.commands.pr import _pr_body
-from goblin_watcher.models import LinearComment, LinearIssue, Task
+from goblin_watcher.models import LinearComment, LinearIssue, Task, TaskRepo
 
 
 def _init_repo_with_commits(repo: Path, branch: str) -> None:
@@ -61,7 +61,7 @@ def test_pr_body_includes_issue_and_commits(tmp_path: Path) -> None:
     )
     task = _make_task(repo, "feat/foo", linear=issue)
 
-    body = _pr_body(task, repo_root=repo)
+    body = _pr_body(task, task.primary_repo(), repo, [])
 
     # Issue context.
     assert "Resolves [ENG-1]" in body
@@ -91,7 +91,7 @@ def test_pr_body_without_linear_falls_back_to_commits(tmp_path: Path) -> None:
     _init_repo_with_commits(repo, "feat/foo")
     task = _make_task(repo, "feat/foo", linear=None)
 
-    body = _pr_body(task, repo_root=repo)
+    body = _pr_body(task, task.primary_repo(), repo, [])
 
     assert "Resolves" not in body  # no Linear → no resolves line
     assert "## Issue" not in body  # no Linear → no issue section
@@ -111,9 +111,26 @@ def test_pr_body_empty_branch_still_emits_footer(tmp_path: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feat/empty"], check=True)
 
     task = _make_task(repo, "feat/empty", linear=None)
-    body = _pr_body(task, repo_root=repo)
+    body = _pr_body(task, task.primary_repo(), repo, [])
 
     # No commits → no "What changed" section.
     assert "## What changed" not in body
     # Footer still there.
     assert "Branch `feat/empty` off `main`" in body
+
+
+def test_pr_body_cross_references_sibling_repos(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_commits(repo, "feat/foo")
+    task = _make_task(repo, "feat/foo", linear=None)
+    sibling = TaskRepo(
+        project="web",
+        branch="feat/foo-web",
+        worktree_path=tmp_path / "web",
+        base_branch="develop",
+    )
+    body = _pr_body(task, task.primary_repo(), repo, [sibling])
+
+    assert "Part of a multi-repo change" in body
+    assert "`web`" in body
+    assert "`feat/foo-web`" in body

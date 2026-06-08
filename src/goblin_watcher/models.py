@@ -49,6 +49,21 @@ class SessionRecord(_Frozen):
     description_updated_at: datetime | None = None
 
 
+class TaskRepo(_Frozen):
+    """One repository participating in a task.
+
+    The task's *primary* repo is stored as scalar fields on `Task` (for zero-
+    migration back-compat); every additional repo is a `TaskRepo` in
+    `Task.secondary_repos`. Iterate `Task.all_repos()` to treat them uniformly.
+    """
+
+    project: str
+    branch: str
+    worktree_path: Path
+    base_branch: str
+    pr_url: str | None = None
+
+
 class Task(_Frozen):
     id: str
     project: str
@@ -60,6 +75,30 @@ class Task(_Frozen):
     created_at: datetime
     status: TaskStatus = "open"
     sessions: list[SessionRecord] = Field(default_factory=list)
+    # Multi-repo support. `secondary_repos` is empty for the common single-repo
+    # case (so existing task JSON validates unchanged). `workspace_path` is the
+    # parent directory holding every repo's worktree as a subdir; it is the
+    # agent's cwd and is set iff the task spans more than one repo.
+    secondary_repos: list[TaskRepo] = Field(default_factory=list)
+    workspace_path: Path | None = None
+
+    @property
+    def is_multi_repo(self) -> bool:
+        return bool(self.secondary_repos)
+
+    def primary_repo(self) -> TaskRepo:
+        """The primary repo as a `TaskRepo`, built from the scalar fields."""
+        return TaskRepo(
+            project=self.project,
+            branch=self.branch,
+            worktree_path=self.worktree_path,
+            base_branch=self.base_branch,
+            pr_url=self.pr_url,
+        )
+
+    def all_repos(self) -> list[TaskRepo]:
+        """Every repo on the task, primary first — the canonical iteration order."""
+        return [self.primary_repo(), *self.secondary_repos]
 
 
 class Project(_Frozen):

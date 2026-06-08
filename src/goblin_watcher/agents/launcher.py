@@ -55,7 +55,9 @@ def launch(
     unsafe: bool = False,
 ) -> tuple[int, Task]:
     """Run the agent for `task`. Returns (exit_code, updated_task)."""
-    cwd = task.worktree_path
+    # A multi-repo task launches in its workspace (each repo is a subdir);
+    # a single-repo task launches directly in its worktree.
+    cwd = task.workspace_path or task.worktree_path
     env = {**os.environ, **agent.env()}
 
     if isinstance(choice, Fresh):
@@ -138,13 +140,33 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None) -> str:
         intro=intro,
         linear_id=linear.identifier if linear else task.id.upper(),
         title=linear.title if linear else task.id,
-        branch=task.branch,
-        base_branch=task.base_branch,
-        worktree=task.worktree_path,
+        repos_block=_format_repos_block(task),
         description=_format_linear_context(linear),
         addition_block=addition_block,
         trailer=trailer,
     )
+
+
+def _format_repos_block(task: Task) -> str:
+    """Render the branch/worktree section of the seed prompt.
+
+    Single-repo output is byte-identical to the original two-line block. A
+    multi-repo task lists every repo and points the agent at the shared
+    workspace it was launched in.
+    """
+    if not task.is_multi_repo:
+        return f"Branch: {task.branch} (off {task.base_branch})\nWorktree: {task.worktree_path}"
+    lines = [
+        f"This task spans {len(task.all_repos())} repositories. You are running in a "
+        "workspace that holds each repo as a subdirectory:",
+        f"Workspace: {task.workspace_path}",
+        "",
+    ]
+    for repo in task.all_repos():
+        lines.append(
+            f"- {repo.project}: {repo.worktree_path}  (branch {repo.branch} off {repo.base_branch})"
+        )
+    return "\n".join(lines)
 
 
 def _format_linear_context(linear: object) -> str:

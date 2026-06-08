@@ -209,6 +209,42 @@ def test_build_seed_prompt_blank_user_prompt_treated_as_none(
     assert "Wait for my next message before taking any action." in seed
 
 
+def test_build_seed_prompt_single_repo_unchanged(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _bootstrap(tmp_path)
+    seed = build_seed_prompt(task)
+    assert f"Branch: {task.branch} (off {task.base_branch})" in seed
+    assert f"Worktree: {task.worktree_path}" in seed
+    assert "spans" not in seed
+
+
+def test_build_seed_prompt_multi_repo_lists_every_repo(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+    from goblin_watcher.models import TaskRepo
+
+    task = _bootstrap(tmp_path)
+    multi = task.model_copy(
+        update={
+            "workspace_path": Path("/ws"),
+            "worktree_path": Path("/ws/alpha"),
+            "secondary_repos": [
+                TaskRepo(
+                    project="beta",
+                    branch=task.branch,
+                    worktree_path=Path("/ws/beta"),
+                    base_branch="main",
+                )
+            ],
+        }
+    )
+    seed = build_seed_prompt(multi)
+    assert "spans 2 repositories" in seed
+    assert "Workspace: /ws" in seed
+    assert "- alpha: /ws/alpha" in seed
+    assert "- beta: /ws/beta" in seed
+
+
 def _stub_record(session_id: str, label: str | None):
     from goblin_watcher.models import SessionRecord
 

@@ -277,6 +277,16 @@ def worktree_add(repo: Path, dest: Path, branch: str, base: str | None = None) -
         _run(args)
 
 
+def worktree_move(repo: Path, src: Path, dest: Path) -> None:
+    """Move an existing worktree from `src` to `dest`, updating git's metadata.
+
+    `git worktree move` rewrites the gitdir pointer so the relocated tree stays
+    linked to `repo`. The destination's parent must exist.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run(["-C", str(repo), "worktree", "move", str(src), str(dest)])
+
+
 def worktree_remove(repo: Path, dest: Path, force: bool = False) -> None:
     args = ["-C", str(repo), "worktree", "remove", str(dest)]
     if force:

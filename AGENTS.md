@@ -38,6 +38,7 @@ src/goblin_watcher/
 ├── gh.py                  # Thin wrapper around the `gh` CLI for PR ops
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
+├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── picker.py              # questionary-backed interactive session picker
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini impls + launcher

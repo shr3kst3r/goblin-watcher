@@ -124,11 +124,12 @@ def _task_for_path(path: Path, project_names: list[str] | None = None) -> Task:
         except GoblinError:
             continue
         for task in state.list_tasks(proj):
-            try:
-                resolved.relative_to(task.worktree_path.resolve())
-                return task
-            except ValueError:
-                continue
+            for repo in task.all_repos():
+                try:
+                    resolved.relative_to(repo.worktree_path.resolve())
+                    return task
+                except ValueError:
+                    continue
     raise GoblinError(
         f"{path} is not inside any known task's worktree.",
         hint="Run from a task's worktree, or pass a TASK-ID.",
