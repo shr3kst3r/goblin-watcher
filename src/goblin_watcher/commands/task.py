@@ -33,6 +33,19 @@ def _find_task_anywhere(task_id: str) -> tuple[Project, Task]:
     )
 
 
+def _find_task(task_id: str, project: str | None) -> tuple[Project, Task]:
+    """Resolve a task by id, optionally scoped to a single project.
+
+    With `project` set, the lookup is confined to that project — disambiguating
+    a task id that exists in more than one. Without it, every registered project
+    is searched and the first match wins.
+    """
+    if project is not None:
+        proj = state.get_project(project.strip().lower())
+        return proj, state.load_task(proj, task_id)
+    return _find_task_anywhere(task_id)
+
+
 @app.command("ls")
 def ls(
     project: str | None = typer.Option(
@@ -134,9 +147,15 @@ def _status_from_pr_state(pr_state: str | None, current: TaskStatus) -> TaskStat
 @app.command("show")
 def show(
     task_id: str = typer.Argument(..., help="Task id.", autocompletion=complete_tasks),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
 ) -> None:
     """Show a task's full details."""
-    proj, task = _find_task_anywhere(task_id)
+    proj, task = _find_task(task_id, project)
     console.print(f"[bold]{task.id}[/] [muted](project: {proj.name})[/]")
     console.print(f"  branch        {task.branch}")
     console.print(f"  base_branch   {task.base_branch}")
@@ -176,12 +195,18 @@ def _destroy_task(proj: Project, task: Task, *, force: bool) -> None:
 @app.command("rm")
 def rm(
     task_id: str = typer.Argument(..., help="Task id.", autocompletion=complete_tasks),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
     force: bool = typer.Option(
         False, "--force", help="Skip the confirmation prompt and safety checks."
     ),
 ) -> None:
     """Remove a task: deletes the worktree, deletes the branch, removes the record."""
-    proj, task = _find_task_anywhere(task_id)
+    proj, task = _find_task(task_id, project)
 
     if task.worktree_path.exists() and not force:
         if git.has_uncommitted_changes(task.worktree_path):

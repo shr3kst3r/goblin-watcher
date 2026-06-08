@@ -5,8 +5,8 @@ from pathlib import Path
 import typer
 
 from goblin_watcher import gh, git, state
-from goblin_watcher.commands.task import _find_task_anywhere
-from goblin_watcher.completion_enumerators import complete_tasks
+from goblin_watcher.commands.task import _find_task
+from goblin_watcher.completion_enumerators import complete_projects, complete_tasks
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError
 from goblin_watcher.linear import LinearClient, parse_identifier
@@ -74,9 +74,9 @@ def _pr_body(task: Task, repo_root: Path) -> str:
     return "\n\n".join(sections)
 
 
-def _resolve_task(task_id: str | None) -> tuple[Project, Task]:
+def _resolve_task(task_id: str | None, project: str | None) -> tuple[Project, Task]:
     if task_id is not None:
-        return _find_task_anywhere(task_id)
+        return _find_task(task_id, project)
     try:
         task = _task_for_path(Path.cwd())
     except GoblinError as e:
@@ -92,13 +92,19 @@ def open_(
     task_id: str | None = typer.Argument(
         None, help="Task id; defaults to the cwd's task.", autocompletion=complete_tasks
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
     draft: bool = typer.Option(False, "--draft", help="Open as a draft PR."),
     notify_linear: bool = typer.Option(
         False, "--notify-linear", help="Post a comment on the Linear issue with the PR URL."
     ),
 ) -> None:
     """Open a PR for a task via `gh`."""
-    proj, task = _resolve_task(task_id)
+    proj, task = _resolve_task(task_id, project)
 
     # Make sure the branch is pushed so `gh pr create` has a head to point at.
     try:
@@ -142,9 +148,15 @@ def status(
     task_id: str | None = typer.Argument(
         None, help="Task id; defaults to the cwd's task.", autocompletion=complete_tasks
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
 ) -> None:
     """Show PR status for a task."""
-    proj, task = _resolve_task(task_id)
+    proj, task = _resolve_task(task_id, project)
     try:
         data = gh.pr_status(cwd=task.worktree_path)
     except GoblinError as e:

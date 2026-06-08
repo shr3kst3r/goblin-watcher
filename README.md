@@ -182,10 +182,10 @@ gwobsidian eng-123                                  # open the worktree as an Ob
 ### `gw pr open` — push and open a PR
 
 ```bash
-gw pr open eng-123 [--draft] [--notify-linear]
+gw pr open eng-123 [--project NAME] [--draft] [--notify-linear]
 ```
 
-Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. PR body is templated from the Linear issue (if any). The PR URL is persisted on the task record.
+Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. PR body is templated from the Linear issue (if any). The PR URL is persisted on the task record. Pass `--project` if the same task id exists in more than one registered project.
 
 ## Worked examples
 
@@ -268,7 +268,7 @@ gw pr open eng-123 --draft --notify-linear  # draft PR; also post the URL back t
 ```bash
 gw status                                   # tree: projects → tasks → sessions
 gw status --project my-repo            # limit to one project
-gw task show eng-123                        # task detail with rolling session summaries
+gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
 ```
@@ -292,6 +292,7 @@ gw session rm <session-id>                  # forget a session from gw's record;
 gw session prune --older-than 30            # forget every session whose last_used_at is >30d ago
 gw session prune --older-than 7 --agent codex --dry-run
 gw task rm <task-id>                        # delete worktree + branch + record (confirms; --force to skip)
+gw task rm <task-id> --project my-repo      # scope the lookup when the id exists in multiple projects
 gw task prune                               # remove every task whose branch is merged (all projects)
 gw task prune --project my-repo        # limit to one project
 gw task prune --dry-run                     # preview without removing
@@ -374,9 +375,9 @@ gw doctor                                   # binary + key resolution checks
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian wrappers live in spg.toml)
 
 gw project new|ls|info|rm
-gw task ls|show|rm|prune                # `prune` accepts --project/--dry-run/--force/--no-fetch
+gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch)
 gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
-gw pr open|status
+gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
 gw version
 ```
 

@@ -53,6 +53,40 @@ def test_pr_open_resolves_task_from_cwd(isolated_xdg: Path, tmp_path: Path, monk
     assert persisted.status == "pr-open"
 
 
+def test_pr_open_project_scopes_lookup_to_one_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    """--project disambiguates a task id shared across projects."""
+    repo_a = tmp_path / "alpha"
+    repo_b = tmp_path / "beta"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo_a)])
+    runner.invoke(app, ["project", "new", "beta", "--dir", str(repo_b)])
+    runner.invoke(app, ["new", "--project", "alpha", "--branch-name", "spike/foo", "--no-launch"])
+    runner.invoke(app, ["new", "--project", "beta", "--branch-name", "spike/foo", "--no-launch"])
+    proj_b = state.get_project("beta")
+    [task_b] = state.list_tasks(proj_b)
+
+    with (
+        patch("goblin_watcher.commands.pr.git.push") as push,
+        patch(
+            "goblin_watcher.commands.pr.gh.create_pr",
+            return_value="https://github.com/x/y/pull/1",
+        ),
+    ):
+        res = runner.invoke(app, ["pr", "open", task_b.id, "--project", "beta"])
+    assert res.exit_code == 0, res.output
+    # Pushed from beta's worktree, not alpha's identically-named one.
+    push.assert_called_once()
+    assert push.call_args.args[0] == task_b.worktree_path
+
+    [persisted] = state.list_tasks(proj_b)
+    assert persisted.pr_url == "https://github.com/x/y/pull/1"
+    # Alpha's task is untouched.
+    [alpha_task] = state.list_tasks(state.get_project("alpha"))
+    assert alpha_task.pr_url is None
+
+
 def test_pr_open_without_id_outside_worktree_errors_helpfully(
     isolated_xdg: Path, tmp_path: Path, monkeypatch
 ) -> None:

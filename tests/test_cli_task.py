@@ -45,6 +45,32 @@ def test_task_show_prints_details(isolated_xdg: Path, tmp_path: Path) -> None:
     assert task.branch in res.output
 
 
+def _bootstrap_two_projects(tmp_path: Path) -> tuple[Path, Path]:
+    """Two projects, alpha and beta, each with an identically-named task."""
+    repo_a = tmp_path / "alpha"
+    repo_b = tmp_path / "beta"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo_a)])
+    runner.invoke(app, ["project", "new", "beta", "--dir", str(repo_b)])
+    # Same branch name -> same task id in both projects.
+    runner.invoke(app, ["new", "--project", "alpha", "--branch-name", "spike/foo", "--no-launch"])
+    runner.invoke(app, ["new", "--project", "beta", "--branch-name", "spike/foo", "--no-launch"])
+    return repo_a, repo_b
+
+
+def test_task_show_project_scopes_lookup_to_one_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    """--project picks which project's identically-named task to show."""
+    _bootstrap_two_projects(tmp_path)
+    proj_b = state.get_project("beta")
+    [task_b] = state.list_tasks(proj_b)
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "show", task_b.id, "--project", "beta"])
+    assert res.exit_code == 0, res.output
+    assert "project: beta" in res.output
+
+
 def test_task_rm_force_removes_worktree_and_branch(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = _bootstrap(tmp_path)
     proj = state.get_project("alpha")
@@ -56,6 +82,21 @@ def test_task_rm_force_removes_worktree_and_branch(isolated_xdg: Path, tmp_path:
     assert not worktree.exists()
     assert not git.branch_exists(repo, task.branch)
     assert state.list_tasks(proj) == []
+
+
+def test_task_rm_project_scopes_lookup_to_one_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A task id present in two projects is disambiguated by --project."""
+    _bootstrap_two_projects(tmp_path)
+    proj_a = state.get_project("alpha")
+    proj_b = state.get_project("beta")
+    [task_b] = state.list_tasks(proj_b)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["task", "rm", task_b.id, "--project", "beta", "--force"])
+    assert res.exit_code == 0, res.output
+    # Beta's task is gone; alpha's identically-named task is untouched.
+    assert state.list_tasks(proj_b) == []
+    assert len(state.list_tasks(proj_a)) == 1
 
 
 def test_task_rm_refuses_when_dirty_without_force(isolated_xdg: Path, tmp_path: Path) -> None:
