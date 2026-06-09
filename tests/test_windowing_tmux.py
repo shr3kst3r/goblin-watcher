@@ -68,7 +68,14 @@ def test_tmux_run_creates_session_and_window(isolated_xdg: Path, tmp_path: Path,
     flat = [" ".join(c) for c in fake_tmux]
     assert any("new-session" in c for c in flat)
     assert any("new-window -a -t goblin -n eng-123" in c for c in flat)
-    assert any("send-keys -t goblin:eng-123 claude hi Enter" in c for c in flat)
+    # The agent command is the pane's process (no `send-keys`), wrapped in a
+    # login-interactive shell with omz auto-update suppressed.
+    assert not any("send-keys" in c for c in flat)
+    new_window = next(c for c in fake_tmux if "new-window" in c)
+    pane_cmd = new_window[-1]
+    assert "DISABLE_AUTO_UPDATE=true" in pane_cmd
+    assert "-lic" in pane_cmd
+    assert "claude hi" in pane_cmd
 
 
 def test_tmux_run_raises_when_new_window_fails(
