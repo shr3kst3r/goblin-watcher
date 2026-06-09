@@ -79,7 +79,7 @@ class TmuxWindower:
         _run_tmux("set-hook", "-u", "-t", s, "alert-silence")
 
     @staticmethod
-    def _pane_command(cmd: list[str]) -> str:
+    def _pane_command(cmd: list[str], extra_env: dict[str, str] | None = None) -> str:
         """Build the shell-command tmux runs as the pane's process.
 
         Returns a single string suitable as `new-window`/`split-window`'s
@@ -94,7 +94,15 @@ class TmuxWindower:
         agent_cmd = " ".join(shlex.quote(arg) for arg in cmd)
         # After the agent exits, leave an interactive shell in the pane.
         inner = f"{agent_cmd}; exec {shlex.quote(shell)} -li"
-        return f"exec env DISABLE_AUTO_UPDATE=true {shlex.quote(shell)} -lic {shlex.quote(inner)}"
+        # The pane's shell inherits the tmux server env, not gw's, so the
+        # agent's extra vars (`Agent.env()`) ride along on the `env` prefix.
+        env_args = "".join(
+            f" {shlex.quote(f'{k}={v}')}" for k, v in sorted((extra_env or {}).items())
+        )
+        return (
+            f"exec env DISABLE_AUTO_UPDATE=true{env_args} "
+            f"{shlex.quote(shell)} -lic {shlex.quote(inner)}"
+        )
 
     def _window_exists(self, task_id: str) -> bool:
         s = self._session()
@@ -115,7 +123,7 @@ class TmuxWindower:
         self._ensure_session()
         s = self._session()
         target = f"{s}:{task.id}"
-        pane_cmd = self._pane_command(cmd)
+        pane_cmd = self._pane_command(cmd, extra_env=env)
         if self._window_exists(task.id):
             # Add a pane to the existing window for this additional session.
             # `-v` stacks top/bottom, `-h` places side-by-side. `vertical` ==
@@ -153,8 +161,12 @@ class TmuxWindower:
         # Attach behavior depends on where gw was invoked from.
         if self._attach_on_spawn():
             if os.environ.get("TMUX"):
-                # Already inside tmux — switch to the right window if same server.
+                # Already inside tmux. `select-window` activates the window
+                # within the goblin session; `switch-client` then moves this
+                # client there — without it, a user attached to a *different*
+                # session would see nothing happen.
                 _run_tmux("select-window", "-t", target)
+                _run_tmux("switch-client", "-t", target)
             else:
                 console.print(
                     f"[muted]Agent launched in tmux window {target}. "
@@ -164,7 +176,6 @@ class TmuxWindower:
                 tmux = _ensure_tmux()
                 os.execvp(tmux, [tmux, "attach", "-t", s])
 
-        del env  # env applies to the new tmux pane's shell, not via tmux itself
         return 0
 
     def is_live(self, task: Task) -> bool:

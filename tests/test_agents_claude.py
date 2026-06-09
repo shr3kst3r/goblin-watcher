@@ -139,3 +139,41 @@ def test_list_sessions_returns_newest_first(tmp_path: Path) -> None:
         sessions = a.list_sessions(cwd)
     assert [s.session_id for s in sessions] == ["b", "a"]
     assert sessions[0].first_message_snippet == "new session"
+
+
+def test_turn_count_ignores_tool_results_and_meta(tmp_path: Path) -> None:
+    """claude-code stores tool results and meta injections as `type: "user"`
+    records; counting them made tool-heavy sessions look like marathon
+    conversations."""
+    a = ClaudeAgent()
+    cwd = tmp_path / "wt"
+    cwd.mkdir()
+    sess_dir = tmp_path / "claude" / "projects" / a._encode_cwd(cwd)
+    _write_jsonl(
+        sess_dir / "s1.jsonl",
+        [
+            {"type": "user", "message": {"role": "user", "content": "do the thing"}},
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}],
+                },
+            },
+            {
+                "type": "user",
+                "isMeta": True,
+                "message": {"role": "user", "content": "injected context"},
+            },
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            },
+            {"type": "user", "message": {"role": "user", "content": "thanks, next step"}},
+        ],
+    )
+    fake_root = staticmethod(lambda: tmp_path / "claude" / "projects")
+    with patch.object(ClaudeAgent, "projects_root", fake_root):
+        summary = a.read_transcript("s1", cwd)
+    assert summary.turn_count == 2
+    assert summary.last_user_snippet == "thanks, next step"

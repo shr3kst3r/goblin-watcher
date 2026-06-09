@@ -277,3 +277,134 @@ def test_status_omits_sync_indicators_when_clean(isolated_xdg: Path, tmp_path: P
     assert "uncommitted" not in res.output
     assert "unpushed" not in res.output
     assert "unmerged" not in res.output
+
+
+def test_status_no_linear_skips_fetch_but_shows_cached_state(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    _bootstrap_with_linear(tmp_path, cached_state="Todo")
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.secrets.get_linear_api_key", return_value="fake-key"),
+        patch(
+            "goblin_watcher.linear.client.LinearClient.fetch_issue_state",
+            return_value="Done",
+        ) as fetch,
+    ):
+        res = runner.invoke(app, ["status", "--no-linear"])
+    assert res.exit_code == 0, res.output
+    fetch.assert_not_called()
+    assert "linear: Todo" in res.output
+
+
+def test_status_linear_ttl_skips_fresh_cache(isolated_xdg: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    _bootstrap_with_linear(tmp_path, cached_state="Todo")
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    state.save_task(proj, task.model_copy(update={"linear_state_updated_at": datetime.now(UTC)}))
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.secrets.get_linear_api_key", return_value="fake-key"),
+        patch(
+            "goblin_watcher.linear.client.LinearClient.fetch_issue_state",
+            return_value="Done",
+        ) as fetch,
+    ):
+        res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    fetch.assert_not_called()
+    assert "linear: Todo" in res.output
+
+
+def test_status_linear_ttl_expired_refetches_and_stamps(isolated_xdg: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    _bootstrap_with_linear(tmp_path, cached_state="Todo")
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    stale = datetime.now(UTC) - timedelta(hours=2)
+    state.save_task(proj, task.model_copy(update={"linear_state_updated_at": stale}))
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.secrets.get_linear_api_key", return_value="fake-key"),
+        patch(
+            "goblin_watcher.linear.client.LinearClient.fetch_issue_state",
+            return_value="Done",
+        ),
+    ):
+        res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    assert "linear: Done" in res.output
+    [persisted] = state.list_tasks(state.get_project("alpha"))
+    assert persisted.linear_state_updated_at is not None
+    assert persisted.linear_state_updated_at > stale
+
+
+def test_status_shows_active_badge_for_fresh_transcript(isolated_xdg: Path, tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from goblin_watcher.models import SessionRecord
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n")  # fresh mtime = now
+    now = datetime.now(UTC)
+    record = SessionRecord(
+        agent="claude",
+        session_id="s1",
+        created_at=now,
+        last_used_at=now,
+        summary="working away",
+        summary_updated_at=now,
+        transcript_path=transcript,
+    )
+    state.save_task(proj, task.model_copy(update={"sessions": [record]}))
+
+    res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    assert "● active" in res.output
+
+
+def test_status_shows_idle_for_old_transcript(isolated_xdg: Path, tmp_path: Path) -> None:
+    import os
+    from datetime import UTC, datetime
+
+    from goblin_watcher.models import SessionRecord
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n")
+    hour_ago = datetime.now(UTC).timestamp() - 3600
+    os.utime(transcript, (hour_ago, hour_ago))
+    now = datetime.now(UTC)
+    record = SessionRecord(
+        agent="claude",
+        session_id="s1",
+        created_at=now,
+        last_used_at=now,
+        summary="paused",
+        summary_updated_at=now,
+        transcript_path=transcript,
+    )
+    state.save_task(proj, task.model_copy(update={"sessions": [record]}))
+
+    res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    assert "● active" not in res.output
+    assert "idle" in res.output

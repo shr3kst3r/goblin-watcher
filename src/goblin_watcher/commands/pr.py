@@ -116,6 +116,17 @@ def _set_pr_url(task: Task, project_name: str, url: str) -> Task:
     return task.model_copy(update={"secondary_repos": secondaries, "status": "pr-open"})
 
 
+def _linear_comment_body(task: Task, opened: list[tuple[str, str]]) -> str:
+    """Markdown comment posted on the Linear issue by `--notify-linear`."""
+    if len(opened) == 1:
+        return f"PR opened for this issue: {opened[0][1]}\n\n_via `gw pr open`_"
+    lines = ["PRs opened for this issue:"]
+    lines += [f"- **{project_name}**: {url}" for project_name, url in opened]
+    lines.append("")
+    lines.append("_via `gw pr open`_")
+    return "\n".join(lines)
+
+
 @app.command("open")
 def open_(
     task_id: str | None = typer.Argument(
@@ -160,16 +171,27 @@ def open_(
         except GoblinError as e:
             raise GoblinError(f"Failed to push {r.branch} to origin.", hint=e.hint) from e
 
-        title = task.linear.title if task.linear else r.branch
-        body = _pr_body(task, r, repo_root, siblings)
-        url = gh.create_pr(
-            cwd=r.worktree_path,
-            title=title,
-            body=body,
-            base=r.base_branch,
-            head=r.branch,
-            draft=draft,
-        )
+        # Idempotency: an open PR for this head branch means the push above
+        # already updated it — re-running `gw pr open` shouldn't fail inside
+        # `gh pr create`. (A closed/merged PR doesn't block a fresh one.)
+        existing = gh.pr_for_branch(r.worktree_path, r.branch)
+        if existing and existing.get("state") == "OPEN" and existing.get("url"):
+            url = existing["url"]
+            console.print(
+                f"[muted]PR already open for {r.branch!r} "
+                f"(#{existing.get('number', '?')}); branch pushed, skipping create.[/]"
+            )
+        else:
+            title = task.linear.title if task.linear else r.branch
+            body = _pr_body(task, r, repo_root, siblings)
+            url = gh.create_pr(
+                cwd=r.worktree_path,
+                title=title,
+                body=body,
+                base=r.base_branch,
+                head=r.branch,
+                draft=draft,
+            )
         task = _set_pr_url(task, r.project, url)
         state.save_task(proj, task)
         opened.append((r.project, url))
@@ -185,12 +207,9 @@ def open_(
         try:
             parse_identifier(task.linear.identifier)
             api_key = get_linear_api_key()
-            with LinearClient(api_key):
-                # Comment posting is out of scope for MVP; placeholder.
-                console.print(
-                    "[muted]--notify-linear: Linear comment posting "
-                    "lands in a follow-up; PR URL stored on task.[/]"
-                )
+            with LinearClient(api_key) as client:
+                client.create_comment(task.linear.id, _linear_comment_body(task, opened))
+            print_success(f"Posted PR link to Linear issue {task.linear.identifier}")
         except GoblinError as e:
             console.print(f"[muted]Skipped Linear notification: {e.message}[/]")
 

@@ -29,7 +29,17 @@ def history(
     if not entries:
         console.print("[muted]No commands have been logged yet.[/]")
         return
-    selected = entries if show_all else entries[-max(tail, 0) :]
+    # `entries[-0:]` would be the whole list, so handle non-positive --tail
+    # explicitly: it means "show nothing".
+    if show_all:
+        selected = entries
+    elif tail <= 0:
+        selected = []
+    else:
+        selected = entries[-tail:]
+    if not selected:
+        console.print("[muted]No entries selected (--tail 0).[/]")
+        return
     if json_out:
         # Bypass Rich so long JSON lines aren't soft-wrapped at the console width.
         for entry in selected:

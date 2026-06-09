@@ -51,6 +51,13 @@ class DefaultsConfig(BaseModel):
     # head + tail with a marker in between. ~80k chars ≈ 20k input tokens ≈
     # $0.02 per Haiku refresh.
     description_max_transcript_chars: int = 80_000
+    # How long a task's cached Linear workflow state stays fresh before
+    # `gw status` re-fetches it. One API round-trip per Linear-backed task is
+    # slow with many tasks; the cache keeps status snappy. 0 = always fetch.
+    linear_state_ttl_seconds: int = 300
+    # A session whose transcript was modified within this window shows as
+    # `● active` in `gw status`; older activity shows as `idle <age>`.
+    activity_active_seconds: int = 120
 
 
 class Config(BaseModel):

@@ -235,3 +235,38 @@ def test_tmux_mark_idle_off_by_default(
     assert rc == 0
     flat = [" ".join(c) for c in calls]
     assert not any("monitor-silence" in c for c in flat)
+
+
+def test_tmux_switch_client_when_inside_other_session(
+    isolated_xdg: Path, tmp_path: Path, fake_tmux
+) -> None:
+    """Inside tmux, the windower must `switch-client` so a client attached to
+    a different session actually lands on the goblin window — `select-window`
+    alone only changes the goblin session's active window."""
+    with patch("goblin_watcher.windowing.tmux.os.environ", new={"TMUX": "/tmp/tmux-1,2,3"}):
+        code = TmuxWindower().run(
+            task=_task(tmp_path),
+            cmd=["claude", "hi"],
+            cwd=tmp_path,
+            env={},
+        )
+    assert code == 0
+    flat = [" ".join(c) for c in fake_tmux]
+    assert any("select-window -t goblin:eng-123" in c for c in flat)
+    assert any("switch-client -t goblin:eng-123" in c for c in flat)
+
+
+def test_tmux_pane_command_injects_agent_env(isolated_xdg: Path, tmp_path: Path, fake_tmux) -> None:
+    """`Agent.env()` extras must reach the pane via the `env` prefix — a tmux
+    pane's shell can't inherit gw's process environment."""
+    with patch("goblin_watcher.windowing.tmux.os.environ", new={"TMUX": "/tmp/tmux-1,2,3"}):
+        TmuxWindower().run(
+            task=_task(tmp_path),
+            cmd=["claude", "hi"],
+            cwd=tmp_path,
+            env={"MY_AGENT_VAR": "a value"},
+        )
+    new_window = next(c for c in fake_tmux if "new-window" in c)
+    pane_cmd = new_window[-1]
+    assert "MY_AGENT_VAR=a value" in pane_cmd
+    assert "DISABLE_AUTO_UPDATE=true" in pane_cmd

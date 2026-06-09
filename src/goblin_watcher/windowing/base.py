@@ -18,7 +18,13 @@ class Windower(Protocol):
         cwd: Path,
         env: dict[str, str],
     ) -> int:
-        """Run `cmd` for `task` in `cwd`. Returns process exit code."""
+        """Run `cmd` for `task` in `cwd`. Returns process exit code.
+
+        `env` carries only the agent's *extra* variables (`Agent.env()`), not
+        a full environment. Each windower decides how to deliver them: inline
+        merges them over `os.environ`; tmux injects them into the pane command
+        (a tmux pane can't inherit this process's environment).
+        """
         ...
 
     def is_live(self, task: Task) -> bool:

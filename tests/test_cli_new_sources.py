@@ -381,12 +381,24 @@ def test_new_pr_resolves_project_from_url(isolated_xdg: Path, tmp_path: Path) ->
     assert task.pr_url == "https://github.com/org/repo/pull/42"
 
 
-def test_new_pr_rejects_fork(isolated_xdg: Path, tmp_path: Path) -> None:
+def test_new_pr_fork_fetches_pull_head(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A cross-repository (fork) PR is checked out via `refs/pull/<N>/head`
+    instead of being refused."""
     from unittest.mock import patch
 
     from goblin_watcher.gh import PrInfo
 
     repo = _clone_with_pr_branch(tmp_path)
+    # Simulate GitHub's PR ref on the upstream: point refs/pull/7/head at the
+    # PR-work commit that only exists on the (would-be fork's) branch.
+    upstream = tmp_path / "upstream"
+    sha = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "feat/pr-42"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(upstream), "update-ref", "refs/pull/7/head", sha], check=True)
     _register_project(repo)
 
     info = PrInfo(
@@ -401,10 +413,13 @@ def test_new_pr_rejects_fork(isolated_xdg: Path, tmp_path: Path) -> None:
     runner = CliRunner()
     with patch("goblin_watcher.commands.new.gh.pr_view", return_value=info):
         res = runner.invoke(app, ["new", "--pr", "7", "--project", "alpha", "--no-launch"])
-    assert res.exit_code != 0
-    assert res.exception is not None
-    assert "fork" in str(res.exception).lower()
-    assert not state.list_tasks(state.get_project("alpha"))
+    assert res.exit_code == 0, res.output
+
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.branch == "feat/forked"
+    assert task.pr_url == "https://github.com/org/repo/pull/7"
+    assert (task.worktree_path / "pr-work.txt").exists()
 
 
 def test_new_pr_url_without_matching_project_errors(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -478,3 +493,41 @@ def test_linear_shortcut_dispatcher_rewrites_argv() -> None:
     ]
     # Non-Linear positional is untouched.
     assert _rewrite_linear_shortcut(["project", "ls"]) == ["project", "ls"]
+
+
+def test_new_branch_name_task_id_collision_errors(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Task ids are branch slugs truncated to 60 chars — two distinct branch
+    names can map to one id, and the second must not silently overwrite the
+    first task's record."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    runner = CliRunner()
+
+    res = runner.invoke(
+        app, ["new", "--branch-name", "x" * 61, "--project", "alpha", "--no-launch"]
+    )
+    assert res.exit_code == 0, res.output
+    [task] = state.list_tasks(state.get_project("alpha"))
+    assert task.id == "x" * 60
+
+    res = runner.invoke(
+        app, ["new", "--branch-name", "x" * 60 + "y", "--project", "alpha", "--no-launch"]
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "already exists" in str(res.exception)
+    # The original record survived.
+    [task] = state.list_tasks(state.get_project("alpha"))
+    assert task.branch == "x" * 61
+
+
+def test_linear_shortcut_dispatcher_is_case_insensitive() -> None:
+    from goblin_watcher.cli import _rewrite_linear_shortcut
+
+    assert _rewrite_linear_shortcut(["eng-123"]) == ["new", "--linear", "eng-123"]
+    # Single-char team keys are valid Linear identifiers too.
+    assert _rewrite_linear_shortcut(["X-1"]) == ["new", "--linear", "X-1"]
+    # Subcommands keep winning: no digits-suffix pattern, no rewrite.
+    assert _rewrite_linear_shortcut(["run", "eng-123"]) == ["run", "eng-123"]
+    assert _rewrite_linear_shortcut(["status"]) == ["status"]

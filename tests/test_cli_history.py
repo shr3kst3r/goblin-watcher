@@ -140,3 +140,24 @@ def test_history_prune_dry_run_does_not_modify(isolated_xdg: Path) -> None:
 def test_history_prune_rejects_negative(isolated_xdg: Path) -> None:
     res = _run_gw("history", "prune", "--days", "-1")
     assert res.returncode != 0
+
+
+def test_history_tail_zero_shows_nothing(isolated_xdg: Path) -> None:
+    data = isolated_xdg / "data"
+    _write_log(
+        data,
+        [
+            {
+                "ts": "2026-05-20T10:00:00.000000Z",
+                "argv": ["task", "ls"],
+                "cwd": "/x",
+                "exit_code": 0,
+                "duration_ms": 50,
+                "version": "0.1",
+            }
+        ],
+    )
+    res = _run_gw("history", "--tail", "0")
+    assert res.returncode == 0, res.stderr
+    assert "task ls" not in res.stdout
+    assert "No entries selected" in res.stdout

@@ -75,3 +75,28 @@ def test_cd_unknown_project_errors(isolated_xdg: Path, tmp_path: Path) -> None:
     runner = CliRunner()
     res = runner.invoke(app, ["cd", "spike-foo", "--project", "nope"])
     assert res.exit_code != 0
+
+
+def test_cd_prints_workspace_for_multi_repo_task(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A multi-repo task's agent runs in the workspace; `gw cd` should land there."""
+    from goblin_watcher.models import TaskRepo
+
+    _bootstrap_one_project(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    ws = tmp_path / "ws"
+    task = task.model_copy(
+        update={
+            "workspace_path": ws,
+            "worktree_path": ws / "alpha",
+            "secondary_repos": [
+                TaskRepo(project="beta", branch="b", worktree_path=ws / "beta", base_branch="main")
+            ],
+        }
+    )
+    state.save_task(proj, task)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["cd", task.id])
+    assert res.exit_code == 0, res.output
+    assert res.stdout.strip() == str(ws)

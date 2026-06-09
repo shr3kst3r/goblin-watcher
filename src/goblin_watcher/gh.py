@@ -187,10 +187,47 @@ def pr_status(*, cwd: Path) -> dict[str, str]:
         )
     import json
 
-    data = json.loads(res.stdout)
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError as e:
+        raise GoblinError(
+            "`gh pr view` returned output that wasn't valid JSON.",
+            hint=res.stdout.strip() or None,
+        ) from e
     return {
         "url": data.get("url", ""),
         "state": data.get("state", ""),
         "number": str(data.get("number", "")),
         "title": data.get("title", ""),
+    }
+
+
+def pr_for_branch(cwd: Path, branch: str) -> dict[str, str] | None:
+    """The most recent PR whose head is `branch`, or None when there isn't one.
+
+    Returns `{url, state, number}`. Best-effort: missing `gh` or any lookup
+    failure reads as "no PR", so callers can use it as an idempotency probe
+    before `pr create`.
+    """
+    if shutil.which("gh") is None:
+        return None
+    res = _run(
+        ["pr", "list", "--state", "all", "--head", branch, "--json", "url,state,number"],
+        cwd=cwd,
+    )
+    if res.returncode != 0:
+        return None
+    import json
+
+    try:
+        items = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(items, list) or not items:
+        return None
+    item = items[0]
+    return {
+        "url": item.get("url", ""),
+        "state": item.get("state", ""),
+        "number": str(item.get("number", "")),
     }

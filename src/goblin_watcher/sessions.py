@@ -49,7 +49,7 @@ def refresh_summary(task: Task, session: SessionRecord) -> SessionRecord:
     Returns the updated SessionRecord. Does not persist on its own.
     """
     agent = get_agent(session.agent)
-    parsed = agent.read_transcript(session.session_id, task.worktree_path)
+    parsed = agent.read_transcript(session.session_id, task.agent_cwd)
     summary_text = parsed.last_user_snippet or parsed.last_assistant_snippet or session.summary
     return session.model_copy(
         update={
@@ -83,7 +83,7 @@ def adopt_orphan_sessions(task: Task) -> Task:
     """Discover sessions on disk that gw doesn't yet know about and adopt them.
 
     No-op when `task.sessions` is non-empty. Otherwise walks every registered
-    agent's on-disk session store for `task.worktree_path` and upserts whatever
+    agent's on-disk session store for `task.agent_cwd` and upserts whatever
     it finds. Recovers tasks whose pre-record save was lost (older launcher
     bug) or whose agent was spawned outside `gw run`.
     """
@@ -92,7 +92,7 @@ def adopt_orphan_sessions(task: Task) -> Task:
     updated = task
     for name, agent_cls in agent_registry.items():
         agent = agent_cls()
-        raw_sessions = agent.list_sessions(task.worktree_path)
+        raw_sessions = agent.list_sessions(task.agent_cwd)
         for raw in raw_sessions:
             record = SessionRecord(
                 agent=cast(AgentName, name),

@@ -9,7 +9,7 @@ Read-only by default. Two read operations are exposed today; everything else (co
 | Operation | Where | Status |
 |---|---|---|
 | Fetch issue by identifier | `gw new --linear ENG-123`, `gw ENG-123` | Implemented |
-| Post a comment with the PR URL | `gw pr open --notify-linear` | Documented in safety, **not yet implemented** (placeholder prints `--notify-linear: Linear comment posting lands in a follow-up`) |
+| Post a comment with the PR URL | `gw pr open --notify-linear` | Implemented (`LinearClient.create_comment`, the only Linear write gw performs) |
 
 The boundary is stated in root AGENTS.md's safety section: Linear is read-only **unless** `--notify-linear` is passed explicitly.
 

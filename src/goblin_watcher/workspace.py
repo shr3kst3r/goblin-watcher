@@ -102,8 +102,9 @@ def attach_repo(
     """Add `new_proj` to `task`: create its branch + worktree inside the workspace.
 
     Promotes a single-repo task to a workspace first. Returns the updated task
-    (not persisted — the caller saves). Rolls back the worktree it created if
-    anything fails after creation.
+    (not persisted — the caller saves). If this raises after the worktree was
+    created, the worktree is left on disk; re-running attach is safe because
+    `git worktree add` on an existing path fails loudly rather than clobbering.
     """
     if any(r.project == new_proj.name for r in task.all_repos()):
         raise GoblinError(

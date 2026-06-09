@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shlex
 import uuid
 from dataclasses import dataclass
@@ -57,8 +56,11 @@ def launch(
     """Run the agent for `task`. Returns (exit_code, updated_task)."""
     # A multi-repo task launches in its workspace (each repo is a subdir);
     # a single-repo task launches directly in its worktree.
-    cwd = task.workspace_path or task.worktree_path
-    env = {**os.environ, **agent.env()}
+    cwd = task.agent_cwd
+    # Windowers receive only the agent's *extra* vars; inline merges them into
+    # os.environ itself, tmux injects them into the pane command (the pane's
+    # shell can't inherit this process's environment).
+    extra_env = agent.env()
 
     if isinstance(choice, Fresh):
         cmd = agent.spawn_command(prompt=choice.prompt, cwd=cwd, unsafe=unsafe)
@@ -84,7 +86,7 @@ def launch(
     task = sessions.upsert(task, pre_record)
     state.save_task(project, task)
 
-    exit_code = windower.run(task=task, cmd=cmd, cwd=cwd, env=env)
+    exit_code = windower.run(task=task, cmd=cmd, cwd=cwd, env=extra_env)
 
     # Tmux hands the agent off to a background pane and returns while the agent
     # is still starting up, so a post-launch `capture_session_id` would race

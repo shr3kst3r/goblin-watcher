@@ -31,7 +31,7 @@ def cd(
         autocompletion=complete_projects,
     ),
 ) -> None:
-    """Print the worktree path of a task.
+    """Print the worktree path of a task (the workspace for a multi-repo task).
 
     Direct use: `cd "$(gw cd eng-123)"` or `code "$(gw cd eng-123)"`.
 
@@ -45,4 +45,6 @@ def cd(
         state.get_project(normalized)
         project_filter = normalized
     task = resolve_task(target, project_filter)
-    sys.stdout.write(f"{task.worktree_path}\n")
+    # Multi-repo tasks land in the workspace — the same directory the agent
+    # runs in — so `gwcd` puts the user where all the repos are visible.
+    sys.stdout.write(f"{task.agent_cwd}\n")

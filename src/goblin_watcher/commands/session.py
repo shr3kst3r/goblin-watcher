@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 
 import typer
 from rich.table import Table
 
 from goblin_watcher import description, git, sessions, state
+from goblin_watcher.agents import get_agent
 from goblin_watcher.completion_enumerators import (
     complete_projects,
     complete_sessions,
@@ -146,13 +148,53 @@ def refresh(
         print_success(f"Refreshed {session_id!r}")
         return
 
+    # Deduplicate to distinct tasks: `_iter_all_sessions` yields one row per
+    # session, but each refresh pass covers the whole task.
+    seen_tasks: set[tuple[str, str]] = set()
     count = 0
     for proj, task, _s in _iter_all_sessions():
+        key = (proj.name, task.id)
+        if key in seen_tasks:
+            continue
+        seen_tasks.add(key)
         refreshed_task = sessions.refresh_task_summaries(task)
         sessions.persist(proj, refreshed_task)
         sessions.schedule_descriptions(proj, refreshed_task)
         count += len(task.sessions)
     print_success(f"Refreshed {count} session(s)")
+
+
+@app.command("transcript")
+def transcript(
+    session_id: str = typer.Argument(..., help="Session id.", autocompletion=complete_sessions),
+    raw: bool = typer.Option(
+        False, "--raw", help="Print the transcript file path instead of rendered text."
+    ),
+) -> None:
+    """Print a session's transcript as labeled [user] / [assistant] blocks.
+
+    `--raw` prints the on-disk transcript path (e.g. the claude jsonl) for
+    tools that want the source file. Output goes to stdout unstyled so it
+    pipes cleanly.
+    """
+    _proj, task, s = _find_session(session_id)
+    if raw:
+        path = s.transcript_path
+        if path is None:
+            raise GoblinError(
+                f"No transcript path recorded for session {session_id!r}.",
+                hint="Run `gw session refresh` first, or drop --raw for rendered text.",
+            )
+        sys.stdout.write(f"{path}\n")
+        return
+    agent = get_agent(s.agent)
+    rendered = agent.render_transcript(s.session_id, task.agent_cwd)
+    if rendered is None:
+        raise GoblinError(
+            f"No transcript available for session {session_id!r}.",
+            hint="The agent may not persist transcripts (gemini), or the file is gone.",
+        )
+    sys.stdout.write(rendered + "\n")
 
 
 @app.command("rm")

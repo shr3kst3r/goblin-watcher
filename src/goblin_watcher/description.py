@@ -324,7 +324,7 @@ def _read_transcript(session: SessionRecord, task: Task) -> TranscriptSummary | 
         _log.debug("description: unknown agent %r: %s", session.agent, e)
         return None
     try:
-        return agent.read_transcript(session.session_id, task.worktree_path)
+        return agent.read_transcript(session.session_id, task.agent_cwd)
     except Exception as e:
         _log.debug("description: read_transcript failed for %s: %s", session.session_id, e)
         return None
@@ -338,7 +338,7 @@ def _render_full_transcript(session: SessionRecord, task: Task) -> str | None:
         _log.debug("description: unknown agent %r: %s", session.agent, e)
         return None
     try:
-        return agent.render_transcript(session.session_id, task.worktree_path)
+        return agent.render_transcript(session.session_id, task.agent_cwd)
     except Exception as e:
         _log.debug("description: render_transcript failed for %s: %s", session.session_id, e)
         return None

@@ -365,6 +365,12 @@ def _from_new_branch(proj: Project, branch_name: str, from_: str | None, title: 
     _refresh_base(proj.root, base)
     final_branch = _ensure_unique_branch(proj.root, f"{proj.branch_prefix}{branch_name}")
     task_id = _task_id_from_branch(final_branch)
+    # Branch uniqueness doesn't guarantee task-id uniqueness: ids are slugs
+    # truncated to 60 chars, so two long branch names (or `a/b` vs `a-b`) can
+    # collide. Without this check the new record would silently overwrite the
+    # existing task.
+    if _load_existing_task(proj, task_id) is not None:
+        _raise_task_exists(proj, task_id)
     worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
     git.worktree_add(proj.root, worktree_dir, final_branch, base=base)
     return Task(
@@ -488,17 +494,20 @@ def _from_pr(
     proj = _resolve_pr_project(pr, project_override)
     info = gh.pr_view(pr, cwd=proj.root)
 
-    if info.is_cross_repository:
-        raise GoblinError(
-            f"PR #{info.number} is from a fork (cross-repository).",
-            hint="Cross-repo PRs aren't supported yet; check the branch out manually.",
-        )
-
     task_id = _task_id_from_branch(info.head_ref)
     if _load_existing_task(proj, task_id) is not None:
         _raise_task_exists(proj, task_id)
 
-    _refresh_base(proj.root, info.head_ref)
+    if info.is_cross_repository:
+        # A fork PR's head branch doesn't exist on origin, but GitHub exposes
+        # it under `refs/pull/<N>/head` — fetch that into a local branch.
+        # Pushing back to the fork is out of scope; this is a review checkout.
+        console.print(
+            f"[muted]PR #{info.number} is from a fork; fetching pull/{info.number}/head…[/]"
+        )
+        git.fetch_pr_head(proj.root, info.number, info.head_ref)
+    else:
+        _refresh_base(proj.root, info.head_ref)
     if not git.branch_exists(proj.root, info.head_ref):
         raise GoblinError(
             f"PR head branch {info.head_ref!r} does not exist locally or on origin.",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,7 +20,8 @@ class InlineWindower:
     ) -> int:
         del task
         # Stdin/stdout/stderr pass through — this is an interactive agent.
-        proc = subprocess.run(cmd, cwd=str(cwd), env=env, check=False)
+        # `env` is the agent's extras only; merge over the full environment.
+        proc = subprocess.run(cmd, cwd=str(cwd), env={**os.environ, **env}, check=False)
         return proc.returncode
 
     def is_live(self, task: Task) -> bool:

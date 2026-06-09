@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from goblin_watcher.errors import GoblinError, LinearAuthError
-from goblin_watcher.linear.queries import FETCH_ISSUE, FETCH_ISSUE_STATE
+from goblin_watcher.linear.queries import CREATE_COMMENT, FETCH_ISSUE, FETCH_ISSUE_STATE
 from goblin_watcher.models import LinearComment, LinearIssue
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -85,6 +85,18 @@ class LinearClient:
                 hint="Check the identifier and that you have access to the team.",
             )
         return (nodes[0].get("state") or {}).get("name", "Unknown")
+
+    def create_comment(self, issue_id: str, body: str) -> None:
+        """Post a markdown comment on the issue with internal id `issue_id`.
+
+        The only Linear write gw performs; gated behind `gw pr open
+        --notify-linear`. `issue_id` is the API's internal id (stored on
+        `LinearIssue.id`), not the human identifier.
+        """
+        data = self._post(CREATE_COMMENT, {"issueId": issue_id, "body": body})
+        payload = data.get("commentCreate") or {}
+        if not payload.get("success"):
+            raise GoblinError("Linear API did not confirm the comment was created.")
 
     def fetch_issue(self, identifier: str) -> LinearIssue:
         team_key, number = parse_identifier(identifier)

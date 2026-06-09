@@ -65,3 +65,36 @@ def test_primary_repo_mirrors_scalar_fields() -> None:
     assert primary.project == "eng"
     assert primary.branch == "eng-123-fix"
     assert primary.pr_url == "https://example/pr/1"
+
+
+def test_task_agent_cwd_single_repo_is_worktree(tmp_path: Path) -> None:
+    task = Task(
+        id="t1",
+        project="p",
+        branch="b",
+        worktree_path=tmp_path / "wt",
+        base_branch="main",
+        created_at=datetime.now(UTC),
+    )
+    assert task.agent_cwd == tmp_path / "wt"
+
+
+def test_task_agent_cwd_multi_repo_is_workspace(tmp_path: Path) -> None:
+    task = Task(
+        id="t1",
+        project="p",
+        branch="b",
+        worktree_path=tmp_path / "ws" / "p",
+        base_branch="main",
+        created_at=datetime.now(UTC),
+        workspace_path=tmp_path / "ws",
+        secondary_repos=[
+            TaskRepo(
+                project="q",
+                branch="b",
+                worktree_path=tmp_path / "ws" / "q",
+                base_branch="main",
+            )
+        ],
+    )
+    assert task.agent_cwd == tmp_path / "ws"

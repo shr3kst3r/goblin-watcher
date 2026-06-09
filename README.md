@@ -187,6 +187,8 @@ gw pr open eng-123 [--project NAME] [--draft] [--notify-linear]
 
 Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. PR body is templated from the Linear issue (if any). The PR URL is persisted on the task record. Pass `--project` if the same task id exists in more than one registered project.
 
+Re-running is idempotent: if an open PR already exists for the branch, the push still happens but `gh pr create` is skipped. `--notify-linear` posts a comment with the PR URL(s) on the task's Linear issue — the only write `gw` ever performs against Linear.
+
 ## Worked examples
 
 ### Start a new Linear ticket against a checkout you already have
@@ -270,8 +272,12 @@ gw status                                   # tree: projects → tasks → sessi
 gw status --project my-repo            # limit to one project
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
+gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
+gw config show                              # resolved config (file merged over defaults)
 ```
+
+Each session row in `gw status` carries an activity hint derived from the transcript's mtime: `● active` while the agent is producing output, `idle <age>` once it has gone quiet (done, or waiting on you). Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
 
 `gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
 
@@ -306,7 +312,14 @@ gw project rm <name>                        # unregister a project (does NOT del
 
 ## Configuration
 
-Optional config at `~/.config/goblin-watcher/config.toml`:
+Optional config at `~/.config/goblin-watcher/config.toml`. Edit it directly, or via `gw config`:
+
+```bash
+gw config show                       # resolved config + file path
+gw config set defaults.agent codex   # validated before write
+gw config unset defaults.agent       # back to the built-in default
+gw config edit                       # $EDITOR, validated on save
+```
 
 ```toml
 [defaults]

@@ -30,3 +30,14 @@ query GoblinFetchIssueState($team: String!, $number: Float!) {
   }
 }
 """.strip()
+
+# The one write gw performs against Linear. Only reachable through the
+# explicit `--notify-linear` flag on `gw pr open` (see AGENTS.md safety
+# boundaries: the API is read-only by default).
+CREATE_COMMENT = """
+mutation GoblinCreateComment($issueId: String!, $body: String!) {
+  commentCreate(input: {issueId: $issueId, body: $body}) {
+    success
+  }
+}
+""".strip()

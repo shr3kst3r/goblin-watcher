@@ -86,3 +86,24 @@ def test_fetch_issue_graphql_error(httpx_mock: HTTPXMock) -> None:
 def test_empty_api_key_rejected() -> None:
     with pytest.raises(LinearAuthError):
         LinearClient("")
+
+
+def test_create_comment_posts_mutation(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"data": {"commentCreate": {"success": True}}})
+    with LinearClient("key") as client:
+        client.create_comment("issue-uuid", "PR opened: https://github.com/o/r/pull/1")
+    request = httpx_mock.get_requests()[0]
+    import json as _json
+
+    payload = _json.loads(request.content)
+    assert "commentCreate" in payload["query"]
+    assert payload["variables"] == {
+        "issueId": "issue-uuid",
+        "body": "PR opened: https://github.com/o/r/pull/1",
+    }
+
+
+def test_create_comment_unconfirmed_raises(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"data": {"commentCreate": {"success": False}}})
+    with LinearClient("key") as client, pytest.raises(GoblinError, match="did not confirm"):
+        client.create_comment("issue-uuid", "body")

@@ -312,3 +312,25 @@ def test_task_prune_skips_unmerged(isolated_xdg: Path, tmp_path: Path) -> None:
     assert res.exit_code == 0, res.output
     # Task is unmerged — should still be there.
     assert len(state.list_tasks(proj)) == 1
+
+
+def test_task_prune_skips_stale_project_registration(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A registered project whose metadata is gone must not abort pruning for
+    the healthy projects."""
+    import shutil
+
+    from goblin_watcher import state as state_module
+
+    repo = _bootstrap(tmp_path)
+    del repo
+    # Register a second project, then nuke its metadata so get_project fails.
+    ghost = tmp_path / "ghost"
+    _init_repo(ghost)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "ghost", "--dir", str(ghost)])
+    shutil.rmtree(ghost / ".goblin")
+    assert "ghost" in state_module.load_global().projects
+
+    res = runner.invoke(app, ["task", "prune", "--dry-run", "--no-fetch"])
+    assert res.exit_code == 0, res.output
+    assert "Skipped project 'ghost'" in res.output

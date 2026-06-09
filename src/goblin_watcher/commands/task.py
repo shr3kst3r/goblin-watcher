@@ -302,16 +302,23 @@ def rm(
     print_success(f"Removed task {task.id!r}")
 
 
-def _is_task_merged(proj: Project, task: Task) -> bool:
-    """True if the task's branch is merged. PR state wins when available; falls back to ancestry."""
+def _merge_detection(proj: Project, task: Task) -> str | None:
+    """How the task's branch was detected as merged: "PR", "ancestry", or None.
+
+    PR state wins when available; falls back to ancestry. Returning the method
+    (rather than a bool) lets the prune table render it without a second
+    `gh pr view` round-trip per task.
+    """
     if task.pr_url:
         pr = gh.pr_state(task.pr_url)
         if pr == "MERGED":
-            return True
+            return "PR"
         if pr in {"OPEN", "CLOSED"}:
-            return False
+            return None
         # pr is None: gh missing or PR unreadable; fall through to ancestry.
-    return git.is_branch_merged(proj.root, task.branch, task.base_branch)
+    if git.is_branch_merged(proj.root, task.branch, task.base_branch):
+        return "ancestry"
+    return None
 
 
 @app.command("prune")
@@ -341,16 +348,24 @@ def prune(
     if project:
         projects = [state.get_project(project.strip().lower())]
     else:
-        projects = [state.get_project(n) for n in state.load_global().projects]
+        # Skip stale registrations (directory deleted, metadata gone) rather
+        # than letting one bad project abort pruning for all of them.
+        projects = []
+        for n in state.load_global().projects:
+            try:
+                projects.append(state.get_project(n))
+            except ProjectNotFoundError:
+                console.print(f"[hint]Skipped project {n!r}: metadata missing.[/]")
 
-    merged: list[tuple[Project, Task]] = []
+    merged: list[tuple[Project, Task, str]] = []
     for proj in projects:
         if fetch:
             with contextlib.suppress(GoblinError):
                 git.fetch(proj.root)
         for task in state.list_tasks(proj):
-            if _is_task_merged(proj, task):
-                merged.append((proj, task))
+            detected = _merge_detection(proj, task)
+            if detected is not None:
+                merged.append((proj, task, detected))
 
     if not merged:
         console.print("[muted]Nothing to prune.[/]")
@@ -365,8 +380,7 @@ def prune(
     table.add_column("Task")
     table.add_column("Branch")
     table.add_column("Detected via")
-    for proj, task in merged:
-        detected = "PR" if task.pr_url and gh.pr_state(task.pr_url) == "MERGED" else "ancestry"
+    for proj, task, detected in merged:
         table.add_row(proj.name, task.id, task.branch, detected)
     console.print(table)
 
@@ -379,7 +393,7 @@ def prune(
 
     removed = 0
     skipped: list[tuple[Project, Task, str]] = []
-    for proj, task in merged:
+    for proj, task, _detected in merged:
         if not force and _dirty_worktrees(task):
             skipped.append((proj, task, "uncommitted changes"))
             continue

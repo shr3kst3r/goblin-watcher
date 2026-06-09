@@ -86,3 +86,46 @@ def test_pr_view_nonzero_raises(tmp_path: Path) -> None:
         pytest.raises(GoblinError, match="No PR"),
     ):
         gh.pr_view("999", cwd=tmp_path)
+
+
+def test_pr_status_invalid_json_raises_goblin_error(tmp_path: Path) -> None:
+    class _FakeRes:
+        returncode = 0
+        stdout = "this is not json"
+        stderr = ""
+
+    with (
+        patch("goblin_watcher.gh.shutil.which", return_value="/usr/bin/gh"),
+        patch("goblin_watcher.gh.subprocess.run", return_value=_FakeRes()),
+        pytest.raises(GoblinError, match="valid JSON"),
+    ):
+        gh.pr_status(cwd=tmp_path)
+
+
+def test_pr_for_branch_returns_first_match(tmp_path: Path) -> None:
+    class _FakeRes:
+        returncode = 0
+        stdout = '[{"url": "https://github.com/o/r/pull/5", "state": "OPEN", "number": 5}]'
+        stderr = ""
+
+    with (
+        patch("goblin_watcher.gh.shutil.which", return_value="/usr/bin/gh"),
+        patch("goblin_watcher.gh.subprocess.run", return_value=_FakeRes()),
+    ):
+        info = gh.pr_for_branch(tmp_path, "feat/x")
+    assert info == {"url": "https://github.com/o/r/pull/5", "state": "OPEN", "number": "5"}
+
+
+def test_pr_for_branch_none_when_no_prs_or_gh_missing(tmp_path: Path) -> None:
+    class _FakeRes:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    with (
+        patch("goblin_watcher.gh.shutil.which", return_value="/usr/bin/gh"),
+        patch("goblin_watcher.gh.subprocess.run", return_value=_FakeRes()),
+    ):
+        assert gh.pr_for_branch(tmp_path, "feat/x") is None
+    with patch("goblin_watcher.gh.shutil.which", return_value=None):
+        assert gh.pr_for_branch(tmp_path, "feat/x") is None

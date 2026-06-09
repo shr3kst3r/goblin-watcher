@@ -81,10 +81,21 @@ class Task(_Frozen):
     # agent's cwd and is set iff the task spans more than one repo.
     secondary_repos: list[TaskRepo] = Field(default_factory=list)
     workspace_path: Path | None = None
+    # When the cached `linear.state` was last fetched from the API. Lets
+    # `gw status` skip per-task Linear round-trips inside a TTL window.
+    linear_state_updated_at: datetime | None = None
 
     @property
     def is_multi_repo(self) -> bool:
         return bool(self.secondary_repos)
+
+    @property
+    def agent_cwd(self) -> Path:
+        """The directory agents are launched in — and therefore the cwd their
+        session stores are keyed on. Multi-repo tasks run in the workspace;
+        single-repo tasks run in the worktree. Every transcript lookup must
+        use this, not `worktree_path`, or multi-repo sessions go missing."""
+        return self.workspace_path or self.worktree_path
 
     def primary_repo(self) -> TaskRepo:
         """The primary repo as a `TaskRepo`, built from the scalar fields."""

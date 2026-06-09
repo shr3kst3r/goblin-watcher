@@ -16,6 +16,9 @@ from goblin_watcher.commands import (
     completion as completion_cmd,
 )
 from goblin_watcher.commands import (
+    config_cmd,
+)
+from goblin_watcher.commands import (
     describe as describe_cmd,
 )
 from goblin_watcher.commands import (
@@ -75,6 +78,11 @@ app.add_typer(
     help="Manage the user-configured addition appended to fresh-spawn prompts.",
 )
 app.add_typer(history_cmd.app, name="history", help="Show and prune the gw command log.")
+app.add_typer(
+    config_cmd.app,
+    name="config",
+    help="Inspect and edit the gw config file (show/get/set/unset/edit/path).",
+)
 
 app.command(
     "new",
@@ -82,7 +90,8 @@ app.command(
 )(new_cmd.new)
 app.command(
     "cd",
-    help="Print a task's worktree path. Pair with the `gwcd` shell function (see `gw completion`).",
+    help="Print a task's worktree path (workspace for multi-repo tasks). "
+    "Pair with the `gwcd` shell function (see `gw completion`).",
 )(cd_cmd.cd)
 app.command("run", help="Pick a session for an existing task and spawn the agent.")(run_cmd.run)
 app.command("status", help="Tree view of projects, tasks, and sessions.")(status_cmd.status)
@@ -104,7 +113,10 @@ def _root(debug: bool = typer.Option(False, "--debug", envvar="GW_DEBUG")) -> No
         install_rich_traceback(show_locals=False)
 
 
-_LINEAR_ID = __import__("re").compile(r"^[A-Z][A-Z0-9_]+-\d+$")
+# Case-insensitive and 1+ char team key, matching `linear.parse_identifier` —
+# `gw eng-123` should work the same as `gw ENG-123`. No subcommand name can
+# collide: they're all bare lowercase words with no `-<digits>` suffix.
+_LINEAR_ID = __import__("re").compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
 
 
 def _rewrite_linear_shortcut(argv: list[str]) -> list[str]:

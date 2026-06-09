@@ -163,6 +163,25 @@ def create_branch_from_remote(repo: Path, branch: str, remote: str = "origin") -
     _run(["-C", str(repo), "branch", branch, f"{remote}/{branch}"])
 
 
+def fetch_pr_head(repo: Path, pr_number: int, branch: str, remote: str = "origin") -> None:
+    """Fetch a PR's head into local `branch` via the `pull/<N>/head` ref.
+
+    This is how a fork (cross-repository) PR is checked out without adding the
+    fork as a remote — GitHub exposes every PR's head under `refs/pull/`.
+    `+` forces an update when the local branch already exists from an earlier
+    fetch, so re-running picks up new commits on the PR.
+    """
+    _run(
+        [
+            "-C",
+            str(repo),
+            "fetch",
+            remote,
+            f"+refs/pull/{pr_number}/head:refs/heads/{branch}",
+        ]
+    )
+
+
 PullBaseOutcome = Literal[
     "no_remote",
     "fetch_failed",

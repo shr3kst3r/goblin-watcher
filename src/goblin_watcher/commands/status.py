@@ -5,12 +5,12 @@ from datetime import UTC, datetime
 import typer
 from rich.tree import Tree
 
-from goblin_watcher import description, git, secrets, sessions, state
+from goblin_watcher import config, description, git, secrets, sessions, state
 from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
 from goblin_watcher.linear import LinearClient
-from goblin_watcher.models import Project, Task
+from goblin_watcher.models import Project, SessionRecord, Task
 
 
 def _sync_indicators(proj: Project, task: Task) -> str:
@@ -109,8 +109,15 @@ class _LinearStateFetcher:
         return self._client
 
     def refresh(self, project: Project, task: Task) -> Task:
-        """Fetch the latest Linear state for `task` and persist it. No-op on failure."""
+        """Fetch the latest Linear state for `task` and persist it. No-op on failure.
+
+        Skips the API round-trip while the cached state is younger than
+        `defaults.linear_state_ttl_seconds` — one fetch per task per status
+        run adds up fast.
+        """
         if task.linear is None:
+            return task
+        if not self._cache_expired(task):
             return task
         client = self._client_or_none()
         if client is None:
@@ -119,17 +126,53 @@ class _LinearStateFetcher:
             fresh = client.fetch_issue_state(task.linear.identifier)
         except GoblinError:
             return task
-        if fresh == task.linear.state:
-            return task
+        # Persist even when the state is unchanged: the timestamp is what
+        # keeps the next status run inside the TTL window.
         updated = task.model_copy(
-            update={"linear": task.linear.model_copy(update={"state": fresh})}
+            update={
+                "linear": task.linear.model_copy(update={"state": fresh}),
+                "linear_state_updated_at": datetime.now(UTC),
+            }
         )
         state.save_task(project, updated)
         return updated
 
+    @staticmethod
+    def _cache_expired(task: Task) -> bool:
+        ts = task.linear_state_updated_at
+        if ts is None:
+            return True
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        try:
+            ttl = int(config.load().defaults.linear_state_ttl_seconds)
+        except Exception:
+            ttl = 300
+        return (datetime.now(UTC) - ts).total_seconds() >= ttl
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
+
+
+def _activity_badge(s: SessionRecord) -> str:
+    """Markup snippet showing whether a session's agent is producing output.
+
+    Derived from the transcript file's mtime: modified within
+    `defaults.activity_active_seconds` → `● active`; older → `idle <age>`;
+    no transcript on disk → '' (nothing to infer from).
+    """
+    mtime = description.transcript_mtime(s)
+    if mtime is None:
+        return ""
+    try:
+        threshold = int(config.load().defaults.activity_active_seconds)
+    except Exception:
+        threshold = 120
+    age = (datetime.now(UTC) - mtime).total_seconds()
+    if age <= threshold:
+        return " · [bold green]● active[/]"
+    return f" · idle {_fmt_relative(mtime).removesuffix(' ago')}"
 
 
 def status(
@@ -138,6 +181,11 @@ def status(
         "--project",
         help="Limit to a single project.",
         autocompletion=complete_projects,
+    ),
+    no_linear: bool = typer.Option(
+        False,
+        "--no-linear",
+        help="Skip Linear state refresh (no network; cached states still shown).",
     ),
 ) -> None:
     """Tree view: projects → tasks → sessions, with agent badges."""
@@ -174,7 +222,8 @@ def status(
                 continue
 
             for task in tasks:
-                task = linear.refresh(proj, task)
+                if not no_linear:
+                    task = linear.refresh(proj, task)
                 adopted = sessions.adopt_orphan_sessions(task)
                 if adopted is not task:
                     sessions.persist(proj, adopted)
@@ -208,7 +257,8 @@ def status(
                     turns = f"{s.turn_count} turns" if s.turn_count else "0 turns"
                     task_node.add(
                         f"[agent.{s.agent}]{s.agent}[/]  {summary}  "
-                        f"[muted]{turns} · {_fmt_relative(s.last_used_at)}[/]"
+                        f"[muted]{turns} · {_fmt_relative(s.last_used_at)}"
+                        f"{_activity_badge(s)}[/]"
                     )
     finally:
         linear.close()

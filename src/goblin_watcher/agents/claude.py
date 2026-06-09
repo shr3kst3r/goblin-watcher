@@ -118,6 +118,23 @@ def _first_user_message_snippet(path: Path) -> str | None:
     return None
 
 
+def _is_real_user_turn(msg: dict) -> bool:
+    """True for a human-typed user message; False for the bookkeeping records
+    claude-code also stores with `type: "user"` (tool results, meta/system
+    injections). Counting those inflates `turn_count` badly on tool-heavy
+    sessions.
+    """
+    if msg.get("isMeta"):
+        return False
+    inner = msg.get("message") or msg
+    content = inner.get("content")
+    if isinstance(content, list):
+        blocks = [b for b in content if isinstance(b, dict)]
+        if blocks and all(b.get("type") == "tool_result" for b in blocks):
+            return False
+    return True
+
+
 def _coerce_text(msg: dict) -> str | None:
     # claude-code's JSONL stores `message: {role, content: [...]}` with content blocks.
     inner = msg.get("message") or msg
@@ -163,6 +180,8 @@ def _parse_transcript(path: Path) -> TranscriptSummary:
     for msg in _iter_messages(path):
         role = (msg.get("type") or msg.get("role") or "").lower()
         if role in {"user", "human"}:
+            if not _is_real_user_turn(msg):
+                continue
             summary.turn_count += 1
             text = _coerce_text(msg)
             long_text = _coerce_text_long(msg)

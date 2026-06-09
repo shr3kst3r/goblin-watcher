@@ -162,3 +162,55 @@ def test_refresh_if_stale_refreshes_old_summary(tmp_path: Path) -> None:
     with patch("goblin_watcher.sessions.get_agent", return_value=_FakeAgent()):
         out = session_module.refresh_if_stale(task, stale)
     assert out.summary == "new!"
+
+
+def test_refresh_summary_uses_workspace_cwd_for_multi_repo(tmp_path: Path) -> None:
+    """Multi-repo tasks launch the agent in the workspace, so transcript reads
+    must be keyed on the workspace too — not the primary worktree subdir."""
+    from goblin_watcher.models import TaskRepo
+
+    ws = tmp_path / "ws"
+    task = _make_task(tmp_path).model_copy(
+        update={
+            "worktree_path": ws / "p",
+            "workspace_path": ws,
+            "secondary_repos": [
+                TaskRepo(project="q", branch="b", worktree_path=ws / "q", base_branch="main")
+            ],
+        }
+    )
+    seen_cwds: list[Path] = []
+
+    class _FakeAgent:
+        def read_transcript(self, _sid: str, cwd: Path) -> TranscriptSummary:
+            seen_cwds.append(cwd)
+            return TranscriptSummary()
+
+    with patch("goblin_watcher.sessions.get_agent", return_value=_FakeAgent()):
+        session_module.refresh_summary(task, _make_session())
+    assert seen_cwds == [ws]
+
+
+def test_adopt_orphan_sessions_scans_workspace_for_multi_repo(tmp_path: Path) -> None:
+    from goblin_watcher.models import TaskRepo
+
+    ws = tmp_path / "ws"
+    task = _make_task(tmp_path).model_copy(
+        update={
+            "worktree_path": ws / "p",
+            "workspace_path": ws,
+            "secondary_repos": [
+                TaskRepo(project="q", branch="b", worktree_path=ws / "q", base_branch="main")
+            ],
+        }
+    )
+    seen_cwds: list[Path] = []
+
+    class _FakeAgent:
+        def list_sessions(self, cwd: Path) -> list[RawSession]:
+            seen_cwds.append(cwd)
+            return []
+
+    with patch.object(session_module, "agent_registry", {"claude": _FakeAgent}):
+        session_module.adopt_orphan_sessions(task)
+    assert seen_cwds == [ws]
