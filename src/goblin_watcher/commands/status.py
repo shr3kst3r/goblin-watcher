@@ -21,7 +21,7 @@ def _sync_indicators(proj: Project, task: Task) -> str:
     when the branch was never pushed. Local-only projects get "↑N unmerged"
     relative to the base branch instead.
     """
-    if not task.worktree_path.exists():
+    if task.kind == "scratch" or not task.worktree_path.exists():
         return ""
     parts: list[str] = []
     try:

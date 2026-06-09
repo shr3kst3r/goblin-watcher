@@ -130,14 +130,28 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None) -> str:
     line is replaced with the user's prompt and the intro is rephrased so the
     agent treats it as the task to begin working on.
     """
-    template_path = Path(__file__).parent.parent / "templates" / "spawn_prompt.md"
-    template = template_path.read_text()
+    templates_dir = Path(__file__).parent.parent / "templates"
     linear = task.linear
     addition = prompt_addition.resolve_for_task_project(task.project).strip()
     addition_block = f"{addition}\n\n" if addition else ""
     prompt = (user_prompt or "").strip()
     intro = _PROMPTED_INTRO if prompt else _DEFAULT_INTRO
     trailer = prompt if prompt else _DEFAULT_TRAILER
+    if task.kind == "scratch":
+        # Scratch spaces have no repo, branch, or PR flow — a dedicated
+        # template avoids telling the agent to `gw pr open` a plain directory.
+        return (
+            (templates_dir / "scratch_prompt.md")
+            .read_text()
+            .format(
+                intro=intro,
+                name=task.id,
+                directory=task.worktree_path,
+                addition_block=addition_block,
+                trailer=trailer,
+            )
+        )
+    template = (templates_dir / "spawn_prompt.md").read_text()
     return template.format(
         intro=intro,
         linear_id=linear.identifier if linear else task.id.upper(),

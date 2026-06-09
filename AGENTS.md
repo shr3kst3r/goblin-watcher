@@ -4,11 +4,12 @@ Onboarding for AI coding agents (Claude Code, Codex, Gemini) and humans.
 
 ## What this is
 
-**goblin-watcher** (`gw`) is a CLI that orchestrates AI coding agents in git worktrees. It replaces tools like Conductor and Superset. Three entry points:
+**goblin-watcher** (`gw`) is a CLI that orchestrates AI coding agents in git worktrees. It replaces tools like Conductor and Superset. Four entry points:
 
 - `gw <LINEAR-ID>` — auto-pilot: clone/find repo, create branch + worktree from a Linear ticket, spawn the agent.
 - `gw new [--linear|--pr|--branch|--branch-name|--dir]` — explicit task creation from any source. `--pr` takes a GitHub PR number or URL and checks out its head branch (a URL also auto-resolves the project by repo).
 - `gw run [PATH|TASK-ID]` — open a session picker for an existing task.
+- `gw scratch [NAME]` — a scratch space: a plain directory (no git repo, no project) at `~/goblin/scratch/<name>` with tracked, resumable sessions. Backed by the reserved `scratch` project (`Project.kind/Task.kind = "scratch"`); git/PR-flavored commands skip or reject scratch tasks.
 
 Multiple sessions per task are allowed (e.g. two claude conversations on the same Linear ticket). Each session carries a rolling summary derived from the agent's transcript.
 
@@ -44,7 +45,7 @@ src/goblin_watcher/
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini impls + launcher
 ├── windowing/             # Windower protocol + Inline + Tmux impls
-├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / status / doctor / history / version)
+├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / doctor / history / version)
 └── templates/spawn_prompt.md
 ```
 

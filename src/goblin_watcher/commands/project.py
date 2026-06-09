@@ -47,6 +47,11 @@ def new(
     name_norm = _normalize_name(name)
     if not name_norm:
         raise GoblinError("Project name must not be empty.")
+    if name_norm == "scratch":
+        raise GoblinError(
+            "'scratch' is a reserved project name (it backs `gw scratch` spaces).",
+            hint="Pick another name.",
+        )
 
     existing = state.load_global()
     if name_norm in existing.projects:
@@ -195,6 +200,9 @@ def pull(
             proj = state.load_project(root)
         except ProjectNotFoundError:
             table.add_row(proj_name, "", "[red]missing[/]")
+            continue
+        if proj.kind == "scratch":
+            table.add_row(proj_name, "", "[muted]scratch — skipped[/]")
             continue
         if not git.has_remote(proj.root):
             table.add_row(proj_name, proj.default_branch, "[muted]no remote — skipped[/]")

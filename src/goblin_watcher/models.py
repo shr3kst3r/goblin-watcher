@@ -6,6 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 AgentName = Literal["claude", "codex", "gemini", "managed"]
 TaskStatus = Literal["open", "pushed", "pr-open", "merged", "closed", "abandoned"]
+# "git" projects are repos gw manages worktrees in; the single reserved
+# "scratch" project is a plain-directory container for `gw scratch` spaces.
+ProjectKind = Literal["git", "scratch"]
+# A "scratch" task's worktree_path is a plain directory — no git repo, no
+# branches, no PRs. Defaults keep pre-existing JSON records valid.
+TaskKind = Literal["repo", "scratch"]
 
 
 class _Frozen(BaseModel):
@@ -66,6 +72,7 @@ class TaskRepo(_Frozen):
 
 class Task(_Frozen):
     id: str
+    kind: TaskKind = "repo"
     project: str
     linear: LinearIssue | None = None
     branch: str
@@ -114,6 +121,7 @@ class Task(_Frozen):
 
 class Project(_Frozen):
     name: str
+    kind: ProjectKind = "git"
     root: Path
     repo_url: str | None = None
     default_branch: str = "main"

@@ -90,6 +90,12 @@ def random_branch_name(project: str, rng: random.Random | None = None) -> str:
     return f"{slugify(project)}-{r.choice(_WORDS)}"
 
 
+def random_scratch_name(rng: random.Random | None = None) -> str:
+    """Return an `{adjective}-{noun}` scratch-space name (e.g. `misty-falcon`)."""
+    r = rng or random
+    return f"{r.choice(_ADJECTIVES)}-{r.choice(_NOUNS)}"
+
+
 def branch_slug(linear_id: str | None, title: str, prefix: str = "") -> str:
     """Build a branch slug.
 

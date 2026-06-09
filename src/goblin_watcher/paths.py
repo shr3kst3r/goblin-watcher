@@ -63,6 +63,11 @@ def projects_root() -> Path:
     return Path.home() / "goblin"
 
 
+def scratch_root() -> Path:
+    """Root of the reserved scratch project; each scratch space is a subdir."""
+    return projects_root() / "scratch"
+
+
 def workspace_root() -> Path:
     """Parent directory for multi-repo task workspaces.
 

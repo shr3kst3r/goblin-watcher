@@ -85,6 +85,14 @@ def _pr_body(task: Task, repo: TaskRepo, repo_root: Path, siblings: list[TaskRep
     return "\n\n".join(sections)
 
 
+def _reject_scratch_task(task: Task) -> None:
+    if task.kind == "scratch":
+        raise GoblinError(
+            f"Task {task.id!r} is a scratch space — there's no git repo or branch "
+            "to open a PR from.",
+        )
+
+
 def _resolve_task(task_id: str | None, project: str | None) -> tuple[Project, Task]:
     if task_id is not None:
         return _find_task(task_id, project)
@@ -151,6 +159,7 @@ def open_(
 ) -> None:
     """Open a PR for a task via `gh` (one per repo for a multi-repo task)."""
     proj, task = _resolve_task(task_id, project)
+    _reject_scratch_task(task)
 
     repos = task.all_repos()
     if repo is not None:
@@ -228,6 +237,7 @@ def status(
 ) -> None:
     """Show PR status for a task (per repo for a multi-repo task)."""
     proj, task = _resolve_task(task_id, project)
+    _reject_scratch_task(task)
 
     console.print(f"[bold]{task.id}[/]")
     any_found = False

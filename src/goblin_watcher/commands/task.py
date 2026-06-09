@@ -158,7 +158,9 @@ def show(
     """Show a task's full details."""
     proj, task = _find_task(task_id, project)
     console.print(f"[bold]{task.id}[/] [muted](project: {proj.name})[/]")
-    if task.is_multi_repo:
+    if task.kind == "scratch":
+        console.print(f"  scratch dir   {task.worktree_path}")
+    elif task.is_multi_repo:
         console.print(f"  workspace     {task.workspace_path}")
         for r in task.all_repos():
             console.print(
@@ -223,6 +225,12 @@ def _destroy_task(proj: Project, task: Task, *, force: bool) -> None:
     silently nuke untracked work after `git worktree remove` (sans `--force`)
     refused.
     """
+    if task.kind == "scratch":
+        # No git worktree or branch to clean up — the directory is the task.
+        if task.worktree_path.exists():
+            shutil.rmtree(task.worktree_path, ignore_errors=True)
+        state.delete_task_record(proj, task.id)
+        return
     for repo in task.all_repos():
         repo_root = _repo_root(proj, repo.project)
         if repo.worktree_path.exists():
@@ -291,8 +299,15 @@ def rm(
             )
         n = len(task.all_repos())
         scope = f"{n} worktrees" if task.is_multi_repo else f"worktree {task.worktree_path}"
+        if task.kind == "scratch":
+            message = (
+                f"Remove scratch space {task.id!r}? This permanently deletes "
+                f"{task.worktree_path} and everything in it."
+            )
+        else:
+            message = f"Remove task {task.id!r}? This deletes {scope} and their branches."
         if not typer.confirm(
-            f"Remove task {task.id!r}? This deletes {scope} and their branches.",
+            message,
             default=False,
         ):
             console.print("[muted]Cancelled.[/]")
@@ -363,6 +378,8 @@ def prune(
             with contextlib.suppress(GoblinError):
                 git.fetch(proj.root)
         for task in state.list_tasks(proj):
+            if task.kind == "scratch":
+                continue  # no branch, so "merged" can never apply
             detected = _merge_detection(proj, task)
             if detected is not None:
                 merged.append((proj, task, detected))

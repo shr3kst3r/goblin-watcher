@@ -62,6 +62,15 @@ def _find_project_containing(path: Path) -> Project:
     )
 
 
+def _reject_scratch_project(proj: Project) -> None:
+    """Repo tasks need a git project; the reserved scratch container isn't one."""
+    if proj.kind == "scratch":
+        raise GoblinError(
+            f"Project {proj.name!r} is the reserved scratch container and can't host repo tasks.",
+            hint="Use `gw scratch [NAME]` to create a scratch space instead.",
+        )
+
+
 def _task_id_from_branch(branch: str) -> str:
     return slugify(branch.replace("/", "-"), max_len=60)
 
@@ -257,9 +266,11 @@ def new(
         task = _from_existing_dir(dir, title)
     elif branch is not None:
         proj = resolve_project(project)
+        _reject_scratch_project(proj)
         task = _from_existing_branch(proj, branch, title)
     else:
         proj = resolve_project(project)
+        _reject_scratch_project(proj)
         generated = random_branch_name(proj.name) if branch_auto else None
         chosen = branch_name if branch_name is not None else generated
         assert chosen is not None
@@ -344,6 +355,7 @@ def _attach_secondaries(proj: Project, task: Task, names: list[str], from_: str 
     secondaries: list[Project] = []
     for raw in names:
         sp = state.get_project(raw.strip().lower())
+        _reject_scratch_project(sp)
         if sp.name == task.project or any(s.name == sp.name for s in secondaries):
             raise GoblinError(
                 f"Project {sp.name!r} is listed more than once for this task.",
@@ -492,6 +504,7 @@ def _from_pr(
 ) -> Task:
     del repo_url, title  # PR title/branch supersede; auto-clone is out of scope.
     proj = _resolve_pr_project(pr, project_override)
+    _reject_scratch_project(proj)
     info = gh.pr_view(pr, cwd=proj.root)
 
     task_id = _task_id_from_branch(info.head_ref)
@@ -613,6 +626,7 @@ def _from_linear(
         issue = client.fetch_issue(linear_id)
 
     proj = _resolve_or_register_linear_project(issue.team_key, project_override, repo_url)
+    _reject_scratch_project(proj)
 
     task_id = issue.identifier.lower()
     if _load_existing_task(proj, task_id) is not None:
@@ -654,6 +668,7 @@ def _from_existing_dir(directory: Path, title: str | None) -> Task:
             hint="Use --branch or --branch-name on a registered project instead.",
         )
     proj = _find_project_containing(directory)
+    _reject_scratch_project(proj)
     branch_here = git.current_branch(directory)
     task_id = _task_id_from_branch(branch_here)
     if _load_existing_task(proj, task_id) is not None:

@@ -43,6 +43,9 @@ from goblin_watcher.commands import (
     run as run_cmd,
 )
 from goblin_watcher.commands import (
+    scratch as scratch_cmd,
+)
+from goblin_watcher.commands import (
     session as session_cmd,
 )
 from goblin_watcher.commands import (
@@ -94,6 +97,10 @@ app.command(
     "Pair with the `gwcd` shell function (see `gw completion`).",
 )(cd_cmd.cd)
 app.command("run", help="Pick a session for an existing task and spawn the agent.")(run_cmd.run)
+app.command(
+    "scratch",
+    help="Create a scratch space: a plain directory not associated with any project.",
+)(scratch_cmd.scratch)
 app.command("status", help="Tree view of projects, tasks, and sessions.")(status_cmd.status)
 app.command("doctor", help="Check dependencies and configuration.")(doctor_cmd.doctor)
 app.command("completion", help="Print a shell completion script (zsh/bash/fish).")(

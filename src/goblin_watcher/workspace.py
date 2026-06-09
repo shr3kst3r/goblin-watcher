@@ -106,6 +106,11 @@ def attach_repo(
     created, the worktree is left on disk; re-running attach is safe because
     `git worktree add` on an existing path fails loudly rather than clobbering.
     """
+    if task.kind == "scratch" or new_proj.kind == "scratch":
+        raise GoblinError(
+            "Scratch spaces can't join multi-repo workspaces (there's no git repo).",
+            hint="Use a regular project, or `gw scratch` for standalone work.",
+        )
     if any(r.project == new_proj.name for r in task.all_repos()):
         raise GoblinError(
             f"Task {task.id!r} already includes project {new_proj.name!r}.",

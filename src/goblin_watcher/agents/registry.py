@@ -38,6 +38,11 @@ def validate_agent_for_project(agent_name: str, project: Project) -> None:
     """
     if agent_name.lower() != "managed":
         return
+    if project.kind == "scratch":
+        raise GoblinError(
+            "The managed agent can't run in a scratch space (no git remote to clone).",
+            hint="Pick a local agent (claude/codex/gemini).",
+        )
     if project.repo_url:
         return
     raise GoblinError(
