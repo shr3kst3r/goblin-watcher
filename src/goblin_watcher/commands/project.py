@@ -194,22 +194,35 @@ def pull(
     table.add_column("Project")
     table.add_column("Branch")
     table.add_column("Result")
+    table.add_column("Last commit")
 
     for proj_name, root in targets.items():
         try:
             proj = state.load_project(root)
         except ProjectNotFoundError:
-            table.add_row(proj_name, "", "[red]missing[/]")
+            table.add_row(proj_name, "", "[red]missing[/]", "")
             continue
         if proj.kind == "scratch":
-            table.add_row(proj_name, "", "[muted]scratch — skipped[/]")
+            table.add_row(proj_name, "", "[muted]scratch — skipped[/]", "")
             continue
         if not git.has_remote(proj.root):
-            table.add_row(proj_name, proj.default_branch, "[muted]no remote — skipped[/]")
+            title = git.last_commit_title(proj.root, proj.default_branch)
+            table.add_row(
+                proj_name,
+                proj.default_branch,
+                "[muted]no remote — skipped[/]",
+                title or "",
+            )
             continue
         result = git.pull_base_from_remote(proj.root, proj.default_branch)
         style = _PULL_OUTCOME_STYLE.get(result.outcome, "muted")
-        table.add_row(proj_name, proj.default_branch, f"[{style}]{result.detail}[/]")
+        title = git.last_commit_title(proj.root, proj.default_branch)
+        table.add_row(
+            proj_name,
+            proj.default_branch,
+            f"[{style}]{result.detail}[/]",
+            title or "",
+        )
 
     console.print(table)
 

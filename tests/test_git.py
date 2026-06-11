@@ -71,6 +71,21 @@ def test_has_remote_false_for_non_repo(tmp_path: Path) -> None:
     assert not git.has_remote(plain)
 
 
+def test_last_commit_title_returns_subject(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "next.txt").write_text("more")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add next file"], check=True)
+    assert git.last_commit_title(repo, "main") == "add next file"
+
+
+def test_last_commit_title_none_for_missing_ref(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    assert git.last_commit_title(repo, "no-such-branch") is None
+
+
 def _make_patch(src_repo: Path, modify: callable) -> Path:  # type: ignore[type-arg]
     """Produce a single-commit patch by editing src_repo, committing, and
     `git format-patch`-ing the new commit. Returns the path to the patch file.

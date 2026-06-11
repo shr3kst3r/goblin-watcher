@@ -126,6 +126,14 @@ def head_sha(path: Path) -> str:
     return _run(["-C", str(path), "rev-parse", "HEAD"]).strip()
 
 
+def last_commit_title(repo: Path, ref: str) -> str | None:
+    """Subject line of the most recent commit on `ref`, or None if it can't be resolved."""
+    try:
+        return _run(["-C", str(repo), "log", "-1", "--format=%s", ref, "--"]).strip()
+    except GitCommandError:
+        return None
+
+
 def branch_exists(repo: Path, branch: str) -> bool:
     res = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],

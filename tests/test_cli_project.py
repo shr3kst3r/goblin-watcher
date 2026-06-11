@@ -87,6 +87,7 @@ def test_project_pull_skips_no_remote(isolated_xdg: Path, tmp_path: Path) -> Non
     result = runner.invoke(app, ["project", "pull"])
     assert result.exit_code == 0, result.output
     assert "no remote" in result.output
+    assert "init" in result.output
 
 
 def test_project_pull_fast_forwards_default_branch(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -127,6 +128,8 @@ def test_project_pull_fast_forwards_default_branch(isolated_xdg: Path, tmp_path:
         check=True,
     ).stdout.strip()
     assert after != before
+    # The "Last commit" column shows the title of the commit just pulled in.
+    assert "next" in result.output
 
 
 def test_project_rm_with_force(isolated_xdg: Path, tmp_path: Path) -> None:
