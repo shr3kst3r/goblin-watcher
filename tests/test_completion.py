@@ -106,6 +106,23 @@ def test_static_zsh_project_option_completes_projects() -> None:
     assert "PROJECT:_gw_complete_projects" in script
 
 
+def test_static_zsh_with_project_option_completes_projects() -> None:
+    """`--with-project <TAB>` should enumerate projects, same as `--project`."""
+    script = _static_zsh_script()
+    assert "WITH_PROJECT:_gw_complete_projects" in script
+
+
+def test_static_zsh_with_project_is_repeatable() -> None:
+    """`--with-project` takes multiple values; the `*` prefix keeps zsh offering it."""
+    script = _static_zsh_script()
+    assert "'*--with-project[" in script
+
+
+def test_static_zsh_task_project_option_completes_projects() -> None:
+    script = _static_zsh_script()
+    assert "TASK_PROJECT:_gw_complete_projects" in script
+
+
 def test_static_zsh_task_option_completes_tasks() -> None:
     script = _static_zsh_script()
     assert "TASK:_gw_complete_tasks" in script

@@ -254,13 +254,15 @@ def _positional_completer(name: str, path: tuple[str, ...]) -> str | None:
 
 def _spec_for(flag: str, param: click.Option) -> str:
     help_text = _zsh_escape(param.help or "")
+    # `*` lets repeatable options (multiple=True) keep being offered after use.
+    prefix = "*" if param.multiple else ""
     if param.is_flag or _is_count(param):
-        return f"'{flag}[{help_text}]'"
+        return f"'{prefix}{flag}[{help_text}]'"
     placeholder = flag.lstrip("-").upper().replace("-", "_") or "VALUE"
     completer = _value_completer(param)
     if completer:
-        return f"'{flag}[{help_text}]:{placeholder}:{completer}'"
-    return f"'{flag}[{help_text}]:{placeholder}:'"
+        return f"'{prefix}{flag}[{help_text}]:{placeholder}:{completer}'"
+    return f"'{prefix}{flag}[{help_text}]:{placeholder}:'"
 
 
 def _is_count(param: click.Option) -> bool:
@@ -270,6 +272,8 @@ def _is_count(param: click.Option) -> bool:
 # Long-flag names → zsh completer function emitted in the helpers preamble.
 _OPTION_NAME_COMPLETERS: dict[str, str] = {
     "--project": "_gw_complete_projects",
+    "--with-project": "_gw_complete_projects",
+    "--task-project": "_gw_complete_projects",
     "--task": "_gw_complete_tasks",
     "--session": "_gw_complete_sessions",
 }
@@ -279,8 +283,8 @@ def _value_completer(param: click.Option) -> str | None:
     """Return a zsh completion verb for parameters with a known value space.
 
     Order: Click `Choice` and `Path` types first (most precise), then a
-    name-based fallback for our well-known flags (`--project` / `--task` /
-    `--session`) that don't have a richer Click type.
+    name-based fallback for our well-known flags (see `_OPTION_NAME_COMPLETERS`)
+    that don't have a richer Click type.
     """
     t = param.type
     if isinstance(t, click.Choice):
