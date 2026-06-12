@@ -79,6 +79,81 @@ def refresh_task_summaries(task: Task) -> Task:
     return task.model_copy(update={"sessions": refreshed})
 
 
+# A record younger than this is never treated as dangling: a freshly spawned
+# agent (especially via tmux, which detaches immediately) may not have written
+# its transcript to disk yet.
+_DANGLING_GRACE_SECONDS = 120
+
+
+def reconcile_sessions(task: Task) -> Task:
+    """Repair session records that no longer match the agent's on-disk store.
+
+    A record is *dangling* when its agent can enumerate sessions for the
+    task's cwd but the recorded id isn't among them — resuming it would fail.
+    The two known ways to get there: tmux-mode spawns used to record a
+    synthetic placeholder id that was never reconciled with the agent's real
+    one, and agents garbage-collect old transcripts (claude's
+    `cleanupPeriodDays`). Dangling records are re-bound to on-disk sessions
+    gw isn't tracking yet (paired oldest-to-oldest — in the common case one
+    placeholder maps to the one real session), and dropped when no candidate
+    remains. Agents whose discovery comes back empty are left untouched:
+    that's either an agent with no enumerable store (gemini) or a store we
+    can't see, and dropping records on absent evidence loses data.
+
+    Tasks with no records at all fall through to `adopt_orphan_sessions`.
+    Pure; callers persist.
+    """
+    if not task.sessions:
+        return adopt_orphan_sessions(task)
+    now = _now()
+    # None marks a record for removal; replacement happens in place so the
+    # picker's ordering is preserved.
+    result: list[SessionRecord | None] = list(task.sessions)
+    changed = False
+    for name, agent_cls in agent_registry.items():
+        indices = [i for i, s in enumerate(task.sessions) if s.agent == name]
+        if not indices:
+            continue
+        discovered = agent_cls().list_sessions(task.agent_cwd)
+        if not discovered:
+            continue
+        on_disk_ids = {raw.session_id for raw in discovered}
+        tracked_ids = {task.sessions[i].session_id for i in indices}
+        dangling = [
+            i
+            for i in indices
+            if task.sessions[i].session_id not in on_disk_ids
+            and (now - task.sessions[i].created_at).total_seconds() > _DANGLING_GRACE_SECONDS
+        ]
+        if not dangling:
+            continue
+        untracked = sorted(
+            (raw for raw in discovered if raw.session_id not in tracked_ids),
+            key=lambda r: r.created_at,
+        )
+        for i in sorted(dangling, key=lambda i: task.sessions[i].created_at):
+            record = task.sessions[i]
+            if untracked:
+                raw = untracked.pop(0)
+                result[i] = record.model_copy(
+                    update={
+                        "session_id": raw.session_id,
+                        "transcript_path": raw.transcript_path,
+                        "label": record.label or raw.first_message_snippet,
+                        # Summary/description were derived from the missing
+                        # transcript; clear the timestamps so both refresh.
+                        "summary_updated_at": None,
+                        "description_updated_at": None,
+                    }
+                )
+            else:
+                result[i] = None
+            changed = True
+    if not changed:
+        return task
+    return task.model_copy(update={"sessions": [s for s in result if s is not None]})
+
+
 def adopt_orphan_sessions(task: Task) -> Task:
     """Discover sessions on disk that gw doesn't yet know about and adopt them.
 

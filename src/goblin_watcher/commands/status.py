@@ -224,7 +224,7 @@ def status(
             for task in tasks:
                 if not no_linear:
                     task = linear.refresh(proj, task)
-                adopted = sessions.adopt_orphan_sessions(task)
+                adopted = sessions.reconcile_sessions(task)
                 if adopted is not task:
                     sessions.persist(proj, adopted)
                     task = adopted

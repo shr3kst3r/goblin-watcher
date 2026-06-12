@@ -15,12 +15,21 @@ class _StubAgent:
     name = "claude"
     binary = "stub"
 
-    def __init__(self, captured_id: str | None = None) -> None:
+    def __init__(self, captured_id: str | None = None, preassign_id: str | None = None) -> None:
         self._captured = captured_id
+        self._preassign = preassign_id
+        self.capture_calls = 0
+        self.spawn_session_ids: list[str | None] = []
 
-    def spawn_command(self, *, prompt: str, cwd: Path, unsafe: bool = False) -> list[str]:
+    def spawn_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
         del prompt, cwd, unsafe
+        self.spawn_session_ids.append(session_id)
         return ["stub", "spawn"]
+
+    def new_session_id(self) -> str | None:
+        return self._preassign
 
     def resume_command(
         self, *, session_id: str | None, cwd: Path, unsafe: bool = False
@@ -33,6 +42,7 @@ class _StubAgent:
 
     def capture_session_id(self, cwd: Path) -> str | None:
         del cwd
+        self.capture_calls += 1
         return self._captured
 
     def list_sessions(self, cwd: Path) -> list[RawSession]:
@@ -124,6 +134,46 @@ def test_async_windower_persists_session_before_dispatch(
     assert record.label == "kick off"
     # The returned task matches what we persisted.
     assert returned.sessions == persisted.sessions
+
+
+def test_preassigned_id_survives_async_windower(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Agents that accept a caller-chosen session id (claude --session-id) must
+    have that exact id recorded even when the windower (tmux) detaches before
+    the transcript exists — this was the bug that left placeholder ids in
+    state, making every later `gw run` resume fail."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+
+    agent = _StubAgent(preassign_id="11111111-2222-4333-8444-555555555555")
+    launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Fresh(prompt="kick off"),
+        windower=_AsyncWindower(),
+    )
+    # The id was handed to spawn_command and stored verbatim.
+    assert agent.spawn_session_ids == ["11111111-2222-4333-8444-555555555555"]
+    [persisted] = state.list_tasks(proj)
+    assert [s.session_id for s in persisted.sessions] == ["11111111-2222-4333-8444-555555555555"]
+
+
+def test_preassigned_id_skips_capture_on_inline(isolated_xdg: Path, tmp_path: Path) -> None:
+    """With a preassigned id there is nothing to capture; capturing anyway
+    could grab an older transcript when the agent exits without writing one."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+
+    agent = _StubAgent(captured_id="stale-other-session", preassign_id="pre-id")
+    _, returned = launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Fresh(prompt="kick off"),
+        windower=_InlineWindower(),
+    )
+    assert agent.capture_calls == 0
+    assert [s.session_id for s in returned.sessions] == ["pre-id"]
 
 
 def test_inline_replaces_synthetic_id_with_captured_id(isolated_xdg: Path, tmp_path: Path) -> None:

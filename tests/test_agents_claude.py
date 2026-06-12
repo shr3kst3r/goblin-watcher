@@ -17,6 +17,34 @@ def test_spawn_command_uses_prompt_positionally() -> None:
     assert a.spawn_command(prompt="hi there", cwd=Path("/tmp")) == ["claude", "hi there"]
 
 
+def test_spawn_command_with_preassigned_session_id() -> None:
+    a = ClaudeAgent()
+    assert a.spawn_command(prompt="hi", cwd=Path("/tmp"), session_id="some-uuid") == [
+        "claude",
+        "--session-id",
+        "some-uuid",
+        "hi",
+    ]
+    assert a.spawn_command(prompt="hi", cwd=Path("/tmp"), unsafe=True, session_id="some-uuid") == [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--session-id",
+        "some-uuid",
+        "hi",
+    ]
+
+
+def test_new_session_id_is_a_uuid() -> None:
+    import uuid
+
+    a = ClaudeAgent()
+    sid = a.new_session_id()
+    assert sid is not None
+    # `claude --session-id` rejects anything that isn't a UUID.
+    assert str(uuid.UUID(sid)) == sid
+    assert a.new_session_id() != sid
+
+
 def test_resume_command_with_id() -> None:
     a = ClaudeAgent()
     assert a.resume_command(session_id="abc", cwd=Path("/tmp")) == ["claude", "--resume", "abc"]

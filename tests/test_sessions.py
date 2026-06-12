@@ -191,6 +191,97 @@ def test_refresh_summary_uses_workspace_cwd_for_multi_repo(tmp_path: Path) -> No
     assert seen_cwds == [ws]
 
 
+def _aged(record: SessionRecord, minutes: int = 10) -> SessionRecord:
+    """Push `created_at` past the reconcile grace window."""
+    past = datetime.now(UTC) - timedelta(minutes=minutes)
+    return record.model_copy(update={"created_at": past})
+
+
+def _raw(session_id: str, path: Path, snippet: str | None = None) -> RawSession:
+    return RawSession(
+        session_id=session_id,
+        created_at=datetime.now(UTC),
+        transcript_path=path,
+        first_message_snippet=snippet,
+    )
+
+
+def _registry_with(list_result: list[RawSession]) -> dict:
+    class _FakeAgent:
+        def list_sessions(self, cwd: Path) -> list[RawSession]:
+            del cwd
+            return list_result
+
+    return {"claude": _FakeAgent}
+
+
+def test_reconcile_rebinds_dangling_record_to_untracked_transcript(tmp_path: Path) -> None:
+    """The tmux-spawn bug: a placeholder id was recorded but never reconciled,
+    while the agent's real transcript sits on disk untracked. The record must
+    be re-bound to the real id (keeping gw-side metadata like the label)."""
+    task = _make_task(tmp_path)
+    bogus = _aged(_make_session().model_copy(update={"session_id": "a29e7bceec544c9aa4a2e405"}))
+    bogus = bogus.model_copy(update={"label": "kick off", "summary_updated_at": datetime.now(UTC)})
+    task = task.model_copy(update={"sessions": [bogus]})
+
+    real = _raw("e910f381-34cd-4598-8321-d58d9ff84338", tmp_path / "real.jsonl", "hello")
+    with patch.object(session_module, "agent_registry", _registry_with([real])):
+        out = session_module.reconcile_sessions(task)
+
+    [record] = out.sessions
+    assert record.session_id == "e910f381-34cd-4598-8321-d58d9ff84338"
+    assert record.transcript_path == tmp_path / "real.jsonl"
+    assert record.label == "kick off"
+    # Stale summary/description must be recomputed against the real transcript.
+    assert record.summary_updated_at is None
+    assert record.description_updated_at is None
+
+
+def test_reconcile_drops_dangling_record_with_no_candidate(tmp_path: Path) -> None:
+    """Transcript garbage-collected by the agent: the store is enumerable but
+    neither the recorded id nor any untracked session exists — resume can
+    never work, so the record goes."""
+    task = _make_task(tmp_path)
+    gone = _aged(_make_session().model_copy(update={"session_id": "cleaned-up"}))
+    kept = _aged(_make_session().model_copy(update={"session_id": "alive"}))
+    task = task.model_copy(update={"sessions": [gone, kept]})
+
+    alive = _raw("alive", tmp_path / "alive.jsonl")
+    with patch.object(session_module, "agent_registry", _registry_with([alive])):
+        out = session_module.reconcile_sessions(task)
+    assert [s.session_id for s in out.sessions] == ["alive"]
+
+
+def test_reconcile_leaves_records_alone_when_discovery_is_empty(tmp_path: Path) -> None:
+    """No on-disk evidence (gemini, or a missing store) must never drop data."""
+    task = _make_task(tmp_path)
+    task = task.model_copy(update={"sessions": [_aged(_make_session())]})
+    with patch.object(session_module, "agent_registry", _registry_with([])):
+        out = session_module.reconcile_sessions(task)
+    assert out is task
+
+
+def test_reconcile_spares_records_within_grace_window(tmp_path: Path) -> None:
+    """A just-spawned agent may not have written its transcript yet; its
+    fresh record must not be treated as dangling."""
+    task = _make_task(tmp_path)
+    fresh = _make_session().model_copy(update={"session_id": "just-spawned"})
+    task = task.model_copy(update={"sessions": [fresh]})
+
+    other = _raw("older-session", tmp_path / "older.jsonl")
+    with patch.object(session_module, "agent_registry", _registry_with([other])):
+        out = session_module.reconcile_sessions(task)
+    assert [s.session_id for s in out.sessions] == ["just-spawned"]
+
+
+def test_reconcile_adopts_when_no_records_exist(tmp_path: Path) -> None:
+    task = _make_task(tmp_path)
+    raw = _raw("found-on-disk", tmp_path / "found.jsonl", "hi")
+    with patch.object(session_module, "agent_registry", _registry_with([raw])):
+        out = session_module.reconcile_sessions(task)
+    assert [s.session_id for s in out.sessions] == ["found-on-disk"]
+
+
 def test_adopt_orphan_sessions_scans_workspace_for_multi_repo(tmp_path: Path) -> None:
     from goblin_watcher.models import TaskRepo
 

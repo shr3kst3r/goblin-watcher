@@ -125,7 +125,9 @@ def run(
 
     # Decide which session to spawn.
     if session == SESSION_PICK_SENTINEL:
-        refreshed_task = sessions.refresh_task_summaries(task)
+        # Re-bind/drop records whose transcript vanished (or never existed —
+        # old tmux spawns stored placeholder ids) before offering them.
+        refreshed_task = sessions.refresh_task_summaries(sessions.reconcile_sessions(task))
         sessions.persist(proj, refreshed_task)
         sessions.schedule_descriptions(proj, refreshed_task)
         if not refreshed_task.sessions:
@@ -164,7 +166,7 @@ def run(
         else:
             choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt))
     else:
-        refreshed_task = sessions.refresh_task_summaries(task)
+        refreshed_task = sessions.refresh_task_summaries(sessions.reconcile_sessions(task))
         sessions.persist(proj, refreshed_task)
         sessions.schedule_descriptions(proj, refreshed_task)
         if not refreshed_task.sessions:

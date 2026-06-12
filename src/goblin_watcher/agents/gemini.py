@@ -19,9 +19,15 @@ class GeminiAgent:
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
 
-    def spawn_command(self, *, prompt: str, cwd: Path, unsafe: bool = False) -> list[str]:
-        del cwd
+    def spawn_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        del cwd, session_id
         return [*self._prefix(unsafe), "-p", prompt]
+
+    def new_session_id(self) -> str | None:
+        # Gemini has no stable session ids at all; the launcher synthesizes.
+        return None
 
     def resume_command(
         self, *, session_id: str | None, cwd: Path, unsafe: bool = False

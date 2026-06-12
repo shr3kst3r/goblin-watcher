@@ -62,8 +62,16 @@ def launch(
     # shell can't inherit this process's environment).
     extra_env = agent.env()
 
+    # Agents that accept a caller-chosen session id (claude's `--session-id`)
+    # get one up-front, so the record we save before dispatch already carries
+    # the *real* id — windowers like tmux detach before the agent writes its
+    # transcript, making post-launch capture impossible there.
+    preassigned: str | None = None
     if isinstance(choice, Fresh):
-        cmd = agent.spawn_command(prompt=choice.prompt, cwd=cwd, unsafe=unsafe)
+        preassigned = agent.new_session_id()
+        cmd = agent.spawn_command(
+            prompt=choice.prompt, cwd=cwd, unsafe=unsafe, session_id=preassigned
+        )
     else:
         cmd = agent.resume_command(session_id=choice.session_id, cwd=cwd, unsafe=unsafe)
 
@@ -75,7 +83,7 @@ def launch(
     # might never get written. For Fresh sessions we synthesize an id; inline
     # mode reconciles to the agent's real id once the agent has exited.
     is_fresh = isinstance(choice, Fresh)
-    initial_id = _new_id() if is_fresh else choice.session_id
+    initial_id = (preassigned or _new_id()) if is_fresh else choice.session_id
     pre_record = SessionRecord(
         agent=cast(AgentName, agent.name),
         session_id=initial_id,
@@ -90,11 +98,15 @@ def launch(
 
     # Tmux hands the agent off to a background pane and returns while the agent
     # is still starting up, so a post-launch `capture_session_id` would race
-    # with the agent's first write. Leave the pre-saved record in place.
+    # with the agent's first write. Leave the pre-saved record in place — for
+    # agents with a preassigned id it already holds the real one.
     if windower.name == "tmux":
         return exit_code, task
 
-    captured = agent.capture_session_id(cwd)
+    # A preassigned id IS the session's id by construction; capturing would
+    # only risk picking up an older transcript when the agent exited before
+    # writing its own (e.g. user quit immediately).
+    captured = None if preassigned else agent.capture_session_id(cwd)
     if captured and captured != initial_id:
         if is_fresh:
             # Replace the synthetic placeholder with one keyed on the agent's

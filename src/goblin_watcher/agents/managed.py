@@ -143,9 +143,14 @@ class ManagedAgent:
     def __init__(self, client: ManagedClient | None = None) -> None:
         self.client: ManagedClient = client or NotConfiguredClient()
 
-    def spawn_command(self, *, prompt: str, cwd: Path, unsafe: bool = False) -> list[str]:
-        del prompt, cwd, unsafe
+    def spawn_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        del prompt, cwd, unsafe, session_id
         raise _LAUNCHER_NOT_WIRED
+
+    def new_session_id(self) -> str | None:
+        return None
 
     def resume_command(
         self, *, session_id: str | None, cwd: Path, unsafe: bool = False

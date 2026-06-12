@@ -46,10 +46,26 @@ class Agent(Protocol):
     name: str
     binary: str
 
-    def spawn_command(self, *, prompt: str, cwd: Path, unsafe: bool = False) -> list[str]:
+    def spawn_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
         """Argv to start a fresh interactive session seeded with `prompt`.
 
         When `unsafe` is true, prepend the agent's bypass-permission flag.
+        `session_id` (from `new_session_id`) preassigns the session's id;
+        agents whose CLI can't accept one ignore it.
+        """
+        ...
+
+    def new_session_id(self) -> str | None:
+        """A fresh id to preassign to the next spawned session, or None.
+
+        When non-None, the launcher passes it to `spawn_command` and records
+        it as the session's id — no post-launch capture needed, which is the
+        only reliable option for windowers (tmux) that detach before the
+        agent writes its transcript. Agents whose CLI can't accept a
+        caller-chosen id return None; the launcher then falls back to a
+        synthetic placeholder reconciled via `capture_session_id`.
         """
         ...
 

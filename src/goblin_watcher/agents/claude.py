@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,9 +31,19 @@ class ClaudeAgent:
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
 
-    def spawn_command(self, *, prompt: str, cwd: Path, unsafe: bool = False) -> list[str]:
+    def spawn_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
         del cwd
-        return [*self._prefix(unsafe), prompt]
+        cmd = self._prefix(unsafe)
+        if session_id:
+            cmd += ["--session-id", session_id]
+        return [*cmd, prompt]
+
+    def new_session_id(self) -> str | None:
+        # `claude --session-id` requires a UUID and names the transcript file
+        # after it, so the id we record up-front is the id on disk.
+        return str(uuid.uuid4())
 
     def resume_command(
         self, *, session_id: str | None, cwd: Path, unsafe: bool = False
