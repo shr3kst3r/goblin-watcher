@@ -3,7 +3,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from goblin_watcher import state
+from goblin_watcher import git, state
 from goblin_watcher.cli import app
 
 
@@ -520,6 +520,127 @@ def test_new_branch_name_task_id_collision_errors(isolated_xdg: Path, tmp_path: 
     # The original record survived.
     [task] = state.list_tasks(state.get_project("alpha"))
     assert task.branch == "x" * 61
+
+
+def test_new_branch_name_rm_replaces_existing(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`--rm` removes the colliding task (branch + worktree + record) and recreates
+    it under the same branch name instead of bumping to -2."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    assert res.exit_code == 0, res.output
+
+    # Without --rm, re-running errors and points at --rm.
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    # A same-name re-run bumps to spike/foo-2 (sibling); the id collision guard
+    # only fires on truncation clashes, so this succeeds — assert two tasks.
+    assert res.exit_code == 0, res.output
+    assert len(state.list_tasks(state.get_project("alpha"))) == 2
+
+    # --rm collapses back: the spike/foo task is replaced, not duplicated.
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--rm", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    proj = state.get_project("alpha")
+    branches = sorted(t.branch for t in state.list_tasks(proj))
+    assert branches == ["spike/foo", "spike/foo-2"]
+    [foo] = [t for t in state.list_tasks(proj) if t.branch == "spike/foo"]
+    assert foo.worktree_path.exists()
+
+
+def test_new_rm_refuses_dirty_worktree(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`--rm` won't discard uncommitted work in the worktree it would delete."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    [task] = state.list_tasks(state.get_project("alpha"))
+    (task.worktree_path / "scratch.txt").write_text("work in progress")
+
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--rm", "--no-launch"])
+    assert res.exit_code != 0
+    assert "uncommitted changes" in str(res.exception)
+    # The original task and its work survived.
+    [task] = state.list_tasks(state.get_project("alpha"))
+    assert task.branch == "spike/foo"
+    assert (task.worktree_path / "scratch.txt").exists()
+
+
+def test_new_rm_force_discards_dirty_worktree(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`--rm-force` removes the colliding task even with uncommitted work, then
+    recreates a clean worktree."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    [task] = state.list_tasks(state.get_project("alpha"))
+    (task.worktree_path / "scratch.txt").write_text("work in progress")
+
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--rm-force", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.branch == "spike/foo"
+    assert task.worktree_path.exists()
+    # The dirty file was discarded with the old worktree.
+    assert not (task.worktree_path / "scratch.txt").exists()
+
+
+def test_new_existing_branch_rm_keeps_branch(isolated_xdg: Path, tmp_path: Path) -> None:
+    """For an adopted branch, --rm clears the worktree + record but keeps the
+    branch (gw didn't create it). The recreate would fail if the branch were gone."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "feat/pre-existing"], check=True)
+    _register_project(repo)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["new", "--branch", "feat/pre-existing", "--no-launch"])
+    assert res.exit_code == 0, res.output
+
+    res = runner.invoke(app, ["new", "--branch", "feat/pre-existing", "--rm", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.branch == "feat/pre-existing"
+    assert task.worktree_path.exists()
+    assert git.branch_exists(repo, "feat/pre-existing")
+
+
+def test_new_dir_rm_resets_record_only(isolated_xdg: Path, tmp_path: Path) -> None:
+    """For an in-place --dir checkout, --rm resets only the record: the directory
+    and its (possibly dirty) contents are left untouched."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    external = tmp_path / "external-checkout"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", str(external), "-b", "spike/external"],
+        check=True,
+    )
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["new", "--dir", str(external), "--no-launch"])
+    assert res.exit_code == 0, res.output
+    # Uncommitted work in the adopted dir must not block --rm (we don't delete it).
+    (external / "wip.txt").write_text("in progress")
+
+    res = runner.invoke(app, ["new", "--dir", str(external), "--rm", "--no-launch"])
+    assert res.exit_code == 0, res.output
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.branch == "spike/external"
+    assert external.exists()
+    assert (external / "wip.txt").read_text() == "in progress"
+    assert git.branch_exists(repo, "spike/external")
 
 
 def test_linear_shortcut_dispatcher_is_case_insensitive() -> None:

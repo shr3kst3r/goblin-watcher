@@ -217,23 +217,33 @@ def add_repo(
     )
 
 
-def _destroy_task(proj: Project, task: Task, *, force: bool) -> None:
-    """Delete every repo's worktree + branch, the workspace dir, and the record.
+def destroy_task(
+    proj: Project,
+    task: Task,
+    *,
+    force: bool,
+    delete_branches: bool = True,
+    delete_worktrees: bool = True,
+) -> None:
+    """Delete a task's record and, by default, every repo's worktree + branch.
 
-    No prompts; caller handles confirmation. The `shutil.rmtree` fallback only
-    kicks in when `force=True`. Without that guard, a non-force run could
-    silently nuke untracked work after `git worktree remove` (sans `--force`)
-    refused.
+    No prompts; caller handles confirmation. `delete_worktrees=False` leaves the
+    checkouts on disk (used by `gw new --rm` on `--dir`, where the worktree is
+    the user's in-place directory); `delete_branches=False` leaves the branches
+    (used when a source adopts an existing branch — `--branch`/`--pr` — so --rm
+    doesn't destroy pre-existing work). The `shutil.rmtree` fallback only kicks
+    in when `force=True`. Without that guard, a non-force run could silently
+    nuke untracked work after `git worktree remove` (sans `--force`) refused.
     """
     if task.kind == "scratch":
         # No git worktree or branch to clean up — the directory is the task.
-        if task.worktree_path.exists():
+        if delete_worktrees and task.worktree_path.exists():
             shutil.rmtree(task.worktree_path, ignore_errors=True)
         state.delete_task_record(proj, task.id)
         return
     for repo in task.all_repos():
         repo_root = _repo_root(proj, repo.project)
-        if repo.worktree_path.exists():
+        if delete_worktrees and repo.worktree_path.exists():
             if repo_root is None:
                 shutil.rmtree(repo.worktree_path, ignore_errors=True)
             else:
@@ -243,17 +253,17 @@ def _destroy_task(proj: Project, task: Task, *, force: bool) -> None:
                     if not force:
                         raise
                     shutil.rmtree(repo.worktree_path, ignore_errors=True)
-        if repo_root is not None and git.branch_exists(repo_root, repo.branch):
+        if delete_branches and repo_root is not None and git.branch_exists(repo_root, repo.branch):
             with contextlib.suppress(GoblinError):
                 git.delete_branch(repo_root, repo.branch, force=True)
 
-    if task.workspace_path is not None and task.workspace_path.exists():
+    if delete_worktrees and task.workspace_path is not None and task.workspace_path.exists():
         shutil.rmtree(task.workspace_path, ignore_errors=True)
 
     state.delete_task_record(proj, task.id)
 
 
-def _dirty_worktrees(task: Task) -> list[Path]:
+def dirty_worktrees(task: Task) -> list[Path]:
     """Worktree paths on `task` that have uncommitted changes (across all repos)."""
     dirty: list[Path] = []
     for repo in task.all_repos():
@@ -291,7 +301,7 @@ def rm(
     proj, task = _find_task(task_id, project)
 
     if not force:
-        dirty = _dirty_worktrees(task)
+        dirty = dirty_worktrees(task)
         if dirty:
             raise GoblinError(
                 f"Worktree {dirty[0]} has uncommitted changes.",
@@ -313,7 +323,7 @@ def rm(
             console.print("[muted]Cancelled.[/]")
             raise typer.Exit(code=1)
 
-    _destroy_task(proj, task, force=force)
+    destroy_task(proj, task, force=force)
     print_success(f"Removed task {task.id!r}")
 
 
@@ -411,10 +421,10 @@ def prune(
     removed = 0
     skipped: list[tuple[Project, Task, str]] = []
     for proj, task, _detected in merged:
-        if not force and _dirty_worktrees(task):
+        if not force and dirty_worktrees(task):
             skipped.append((proj, task, "uncommitted changes"))
             continue
-        _destroy_task(proj, task, force=force)
+        destroy_task(proj, task, force=force)
         removed += 1
 
     print_success(f"Removed {removed} task(s)")

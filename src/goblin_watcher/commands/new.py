@@ -8,6 +8,7 @@ import typer
 from goblin_watcher import config, gh, git, paths, secrets, state, workspace
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
+from goblin_watcher.commands.task import destroy_task, dirty_worktrees
 from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import agent_badge, console, print_settings, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
@@ -114,8 +115,52 @@ def _raise_task_exists(proj: Project, task_id: str) -> None:
         f"Task {task_id!r} already exists in project {proj.name!r}.",
         hint=(
             f"Use `gw run {task_id}` to resume it "
-            f"(or `gw run {task_id} --new` to start a fresh session on the same task)."
+            f"(or `gw run {task_id} --new` to start a fresh session on the same task). "
+            f"Pass --rm to remove it and start over."
         ),
+    )
+
+
+def _handle_existing(
+    proj: Project,
+    task_id: str,
+    *,
+    rm: bool,
+    force: bool,
+    delete_branch: bool,
+    delete_worktree: bool,
+) -> None:
+    """Resolve a task-id collision: with --rm remove the existing task, else raise.
+
+    `delete_branch`/`delete_worktree` scope the removal to what gw owns for this
+    source. Branch-creating sources (--linear/--branch-name/--branch-auto) own
+    both. Sources that adopt an existing branch (--branch/--pr) keep the branch
+    so --rm never destroys pre-existing work; --dir keeps its in-place checkout
+    entirely (only the record is reset). When a worktree we'd remove has
+    uncommitted changes we refuse unless `force` (--rm-force) is set, so plain
+    --rm never discards in-flight work.
+    """
+    existing = _load_existing_task(proj, task_id)
+    if existing is None:
+        return
+    if not rm:
+        _raise_task_exists(proj, task_id)
+    if delete_worktree and not force:
+        dirty = dirty_worktrees(existing)
+        if dirty:
+            raise GoblinError(
+                f"Existing task {task_id!r} has uncommitted changes in {dirty[0]}.",
+                hint="Commit or stash there first, or pass --rm-force to discard it.",
+            )
+    destroy_task(
+        proj,
+        existing,
+        force=force,
+        delete_branches=delete_branch,
+        delete_worktrees=delete_worktree,
+    )
+    console.print(
+        f"[muted]Removed existing task {task_id!r} ({'--rm-force' if force else '--rm'}).[/]"
     )
 
 
@@ -194,6 +239,20 @@ def new(
         click_type=click.Choice(list(AGENT_NAMES)),
     ),
     no_launch: bool = typer.Option(False, "--no-launch", help="Create the task but do not launch."),
+    rm: bool = typer.Option(
+        False,
+        "--rm",
+        help="If a task with the same id already exists, remove it first instead of "
+        "erroring. Refuses if its worktree has uncommitted changes. For --branch/--pr "
+        "the existing branch is kept (only the gw worktree + record are removed); for "
+        "--dir only the record is reset.",
+    ),
+    rm_force: bool = typer.Option(
+        False,
+        "--rm-force",
+        help="Like --rm, but also remove an existing task whose worktree has "
+        "uncommitted changes (discarding that work). Implies --rm.",
+    ),
     windowing: str | None = typer.Option(
         None,
         "--windowing",
@@ -258,23 +317,25 @@ def new(
             hint="Use --linear, --branch, --branch-name, or --branch-auto for multi-repo tasks.",
         )
 
+    # --rm-force implies --rm; `force` lets removal proceed past a dirty worktree.
+    remove = rm or rm_force
     if linear is not None:
-        task = _from_linear(linear, project, repo, title, from_)
+        task = _from_linear(linear, project, repo, title, from_, remove, rm_force)
     elif pr is not None:
-        task = _from_pr(pr, project, repo, title)
+        task = _from_pr(pr, project, repo, title, remove, rm_force)
     elif dir is not None:
-        task = _from_existing_dir(dir, title)
+        task = _from_existing_dir(dir, title, remove, rm_force)
     elif branch is not None:
         proj = resolve_project(project)
         _reject_scratch_project(proj)
-        task = _from_existing_branch(proj, branch, title)
+        task = _from_existing_branch(proj, branch, title, remove, rm_force)
     else:
         proj = resolve_project(project)
         _reject_scratch_project(proj)
         generated = random_branch_name(proj.name) if branch_auto else None
         chosen = branch_name if branch_name is not None else generated
         assert chosen is not None
-        task = _from_new_branch(proj, chosen, from_, title)
+        task = _from_new_branch(proj, chosen, from_, title, remove, rm_force)
 
     proj = state.get_project(task.project)
     state.save_task(proj, task)
@@ -371,11 +432,26 @@ def _attach_secondaries(proj: Project, task: Task, names: list[str], from_: str 
     return task
 
 
-def _from_new_branch(proj: Project, branch_name: str, from_: str | None, title: str | None) -> Task:
+def _from_new_branch(
+    proj: Project, branch_name: str, from_: str | None, title: str | None, rm: bool, force: bool
+) -> Task:
     del title  # only relevant to seed prompt (Phase 5)
     base = from_ or proj.default_branch
     _refresh_base(proj.root, base)
-    final_branch = _ensure_unique_branch(proj.root, f"{proj.branch_prefix}{branch_name}")
+    natural_branch = f"{proj.branch_prefix}{branch_name}"
+    if rm:
+        # Free the natural branch name first so the recreated task reuses it
+        # instead of bumping to -2/-3/... . Without --rm we keep the existing
+        # behavior: a same-name re-run creates a sibling on the next free name.
+        _handle_existing(
+            proj,
+            _task_id_from_branch(natural_branch),
+            rm=True,
+            force=force,
+            delete_branch=True,
+            delete_worktree=True,
+        )
+    final_branch = _ensure_unique_branch(proj.root, natural_branch)
     task_id = _task_id_from_branch(final_branch)
     # Branch uniqueness doesn't guarantee task-id uniqueness: ids are slugs
     # truncated to 60 chars, so two long branch names (or `a/b` vs `a-b`) can
@@ -395,12 +471,15 @@ def _from_new_branch(proj: Project, branch_name: str, from_: str | None, title: 
     )
 
 
-def _from_existing_branch(proj: Project, branch: str, title: str | None) -> Task:
+def _from_existing_branch(
+    proj: Project, branch: str, title: str | None, rm: bool, force: bool
+) -> Task:
     del title  # not used for branch naming; only relevant to prompt seed (Phase 5)
     repo = proj.root
     task_id = _task_id_from_branch(branch)
-    if _load_existing_task(proj, task_id) is not None:
-        _raise_task_exists(proj, task_id)
+    # Adopting an existing branch: --rm clears the worktree + record but keeps
+    # the branch (we didn't create it).
+    _handle_existing(proj, task_id, rm=rm, force=force, delete_branch=False, delete_worktree=True)
 
     _refresh_base(repo, branch)
     if not git.branch_exists(repo, branch):
@@ -501,6 +580,8 @@ def _from_pr(
     project_override: str | None,
     repo_url: str | None,
     title: str | None,
+    rm: bool,
+    force: bool,
 ) -> Task:
     del repo_url, title  # PR title/branch supersede; auto-clone is out of scope.
     proj = _resolve_pr_project(pr, project_override)
@@ -508,8 +589,9 @@ def _from_pr(
     info = gh.pr_view(pr, cwd=proj.root)
 
     task_id = _task_id_from_branch(info.head_ref)
-    if _load_existing_task(proj, task_id) is not None:
-        _raise_task_exists(proj, task_id)
+    # The PR head branch pre-exists (or was fetched): --rm keeps it, clearing
+    # only the worktree + record.
+    _handle_existing(proj, task_id, rm=rm, force=force, delete_branch=False, delete_worktree=True)
 
     if info.is_cross_repository:
         # A fork PR's head branch doesn't exist on origin, but GitHub exposes
@@ -618,6 +700,8 @@ def _from_linear(
     repo_url: str | None,
     title: str | None,
     from_: str | None,
+    rm: bool,
+    force: bool,
 ) -> Task:
     del title  # Linear's title supersedes
     parse_identifier(linear_id)  # validates the form; we use the fetched issue's team
@@ -629,8 +713,7 @@ def _from_linear(
     _reject_scratch_project(proj)
 
     task_id = issue.identifier.lower()
-    if _load_existing_task(proj, task_id) is not None:
-        _raise_task_exists(proj, task_id)
+    _handle_existing(proj, task_id, rm=rm, force=force, delete_branch=True, delete_worktree=True)
 
     base = from_ or proj.default_branch
     _refresh_base(proj.root, base)
@@ -657,7 +740,7 @@ def _clone_linear_issue(issue: LinearIssue) -> LinearIssue:
     return LinearIssue.model_validate(issue.model_dump())
 
 
-def _from_existing_dir(directory: Path, title: str | None) -> Task:
+def _from_existing_dir(directory: Path, title: str | None, rm: bool, force: bool) -> Task:
     del title  # only relevant to seed prompt (Phase 5)
     directory = directory.resolve()
     if not directory.exists():
@@ -671,8 +754,9 @@ def _from_existing_dir(directory: Path, title: str | None) -> Task:
     _reject_scratch_project(proj)
     branch_here = git.current_branch(directory)
     task_id = _task_id_from_branch(branch_here)
-    if _load_existing_task(proj, task_id) is not None:
-        _raise_task_exists(proj, task_id)
+    # The directory is adopted in place — --rm resets only the record, leaving
+    # the user's checkout and branch untouched.
+    _handle_existing(proj, task_id, rm=rm, force=force, delete_branch=False, delete_worktree=False)
     return Task(
         id=task_id,
         project=proj.name,
