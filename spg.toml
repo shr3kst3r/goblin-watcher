@@ -55,3 +55,12 @@ shell_function = '''
   open "obsidian://open?path=$encoded"
 '''
 complete_hook = "uv run gw __complete spg-cd"
+
+[commands.gwfinder]
+description = "open a goblin-watcher task worktree in Finder (interactive shells only)."
+shell_function = '''
+  local target
+  target="$(gw cd "$@")" || return $?
+  open "$target"
+'''
+complete_hook = "uv run gw __complete spg-cd"

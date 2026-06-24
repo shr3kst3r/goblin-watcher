@@ -13,6 +13,7 @@ gw run --new                       # fresh session on an existing task
 gwcd eng-123                       # cd into a task's worktree (shell wrapper around `gw cd`)
 gwcode eng-123                     # open a task's worktree in VS Code
 gwobsidian eng-123                 # open a task's worktree as an Obsidian vault
+gwfinder eng-123                   # open a task's worktree in Finder
 gw status                          # tree view across projects, tasks, sessions
 gw pr open                         # open a GitHub PR via `gh`
 gw task prune                      # forget tasks whose branch is merged
@@ -64,11 +65,12 @@ gw completion fish > ~/.config/fish/completions/gw.fish
 
 The zsh script is **static** — it knows every subcommand and flag at generation time, so `gw new <TAB>` shows the flag list right away (no need to type `--` first). Bash and fish use Typer's dynamic completion, which calls back into `gw` per tab press. Pass `--dynamic` if you want the dynamic zsh script too.
 
-The `gwcd` / `gwcode` / `gwobsidian` shell-function wrappers around `gw cd` (which can only print a path — a subprocess can't `cd` its parent shell) are published via [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml`, not by `gw completion`. After `spg install` + a fresh zsh:
+The `gwcd` / `gwcode` / `gwobsidian` / `gwfinder` shell-function wrappers around `gw cd` (which can only print a path — a subprocess can't `cd` its parent shell) are published via [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml`, not by `gw completion`. After `spg install` + a fresh zsh:
 
 - `gwcd eng-123` (or just `gwcd` to open the picker) `cd`s your shell into the matching task's worktree.
 - `gwcode eng-123` opens that worktree in VS Code (requires the `code` CLI on `$PATH`).
 - `gwobsidian eng-123` opens that worktree as an Obsidian vault (requires Obsidian installed; first open prompts to trust the folder).
+- `gwfinder eng-123` opens that worktree in Finder (`open <path>`).
 
 ## Core concepts
 
@@ -167,7 +169,7 @@ gw run --project my-repo                       # scope task lookup + picker to o
 
 The picker chain auto-skips a level when there's only one option: one project → goes straight to its tasks; one task → goes straight to its sessions.
 
-### `gw cd` / `gwcd` / `gwcode` / `gwobsidian` — jump into a task's worktree
+### `gw cd` / `gwcd` / `gwcode` / `gwobsidian` / `gwfinder` — jump into a task's worktree
 
 ```bash
 gwcd eng-123                                        # cd into <repo>/.worktrees/eng-123/
@@ -175,9 +177,10 @@ gwcd                                                # no arg → opens the proje
 gwcd --project my-repo                         # scope the picker to one project
 gwcode eng-123                                      # open the worktree in VS Code (`code <path>`)
 gwobsidian eng-123                                  # open the worktree as an Obsidian vault
+gwfinder eng-123                                    # open the worktree in Finder (`open <path>`)
 ```
 
-`gw cd` itself just prints the resolved worktree path on stdout (a subprocess can't `cd` its parent shell). The `gwcd` / `gwcode` / `gwobsidian` wrappers that act on that path are shell functions published by [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml` (install once with `spg install`, then start a new zsh). `gwobsidian` opens the path via the `obsidian://open?path=…` URI — Obsidian prompts to trust the folder the first time you open it as a vault.
+`gw cd` itself just prints the resolved worktree path on stdout (a subprocess can't `cd` its parent shell). The `gwcd` / `gwcode` / `gwobsidian` / `gwfinder` wrappers that act on that path are shell functions published by [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml` (install once with `spg install`, then start a new zsh). `gwobsidian` opens the path via the `obsidian://open?path=…` URI — Obsidian prompts to trust the folder the first time you open it as a vault. `gwfinder` opens the path with macOS `open`, which reveals the worktree in Finder.
 
 ### `gw pr open` — push and open a PR
 
@@ -382,10 +385,10 @@ gw new --linear|--branch|--branch-name|--branch-auto|--dir [--title ...] [--from
        [--no-launch] [--windowing ...] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--agent ...] [--session [ID]] [--new]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
-gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian shell functions
+gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
 gw status [--project NAME]                  # tree view of projects → tasks → sessions
 gw doctor                                   # binary + key resolution checks
-gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian wrappers live in spg.toml)
+gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
 gw project new|ls|info|rm
 gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch)
