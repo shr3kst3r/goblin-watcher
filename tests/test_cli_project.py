@@ -29,6 +29,21 @@ def test_project_new_dir_registers(isolated_xdg: Path, tmp_path: Path) -> None:
     assert proj.default_branch == "main"
 
 
+def test_project_new_repo_clones_empty_remote(isolated_xdg: Path, tmp_path: Path) -> None:
+    # A brand-new remote with zero commits: registration must still succeed.
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["project", "new", "alpha", "--repo", str(remote), "--prefix", "s/"]
+    )
+    assert result.exit_code == 0, result.output
+
+    proj = state.get_project("alpha")
+    assert proj.default_branch == "main"
+    assert proj.branch_prefix == "s/"
+
+
 def test_project_new_dir_rejects_non_repo(isolated_xdg: Path, tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()

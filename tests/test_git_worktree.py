@@ -1,7 +1,10 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from goblin_watcher import git
+from goblin_watcher.errors import GitCommandError
 
 
 def _init_repo(path: Path, branch: str = "main") -> None:
@@ -31,6 +34,15 @@ def test_worktree_add_checks_out_existing_branch(tmp_path: Path) -> None:
     dest = repo / ".worktrees" / "feat-existing"
     git.worktree_add(repo, dest, "feat-existing")
     assert git.current_branch(dest) == "feat-existing"
+
+
+def test_worktree_add_clear_error_when_base_has_no_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    dest = repo / ".worktrees" / "feat-new"
+    with pytest.raises(GitCommandError, match="does not resolve to a commit"):
+        git.worktree_add(repo, dest, "feat-new", base="main")
 
 
 def test_worktree_remove(tmp_path: Path) -> None:

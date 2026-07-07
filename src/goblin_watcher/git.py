@@ -69,7 +69,12 @@ def adopt(path: Path) -> Path:
 
 
 def current_branch(path: Path) -> str:
-    return _run(["-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    try:
+        return _run(["-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    except GitCommandError:
+        # A repo with no commits yet (unborn HEAD) can't rev-parse HEAD, but
+        # .git/HEAD still names the branch it points at.
+        return _run(["-C", str(path), "symbolic-ref", "--short", "HEAD"]).strip()
 
 
 def default_branch(path: Path) -> str:
@@ -137,6 +142,18 @@ def last_commit_title(repo: Path, ref: str) -> str | None:
 def branch_exists(repo: Path, branch: str) -> bool:
     res = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return res.returncode == 0
+
+
+def commit_exists(repo: Path, ref: str) -> bool:
+    """True if `ref` resolves to a commit in `repo`. False for missing refs and
+    for any ref in a repo with no commits yet (unborn HEAD)."""
+    res = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
         capture_output=True,
         text=True,
         check=False,
@@ -298,6 +315,14 @@ def worktree_add(repo: Path, dest: Path, branch: str, base: str | None = None) -
     if branch_exists(repo, branch):
         _run(["-C", str(repo), "worktree", "add", str(dest), branch])
     else:
+        if base and not commit_exists(repo, base):
+            raise GitCommandError(
+                f"Cannot create branch {branch!r}: base {base!r} does not resolve to a commit.",
+                hint=(
+                    "If the repo is brand new (no commits yet), push an initial commit "
+                    f"to {base!r} first, then re-run."
+                ),
+            )
         args = ["-C", str(repo), "worktree", "add", "-b", branch, str(dest)]
         if base:
             args.append(base)

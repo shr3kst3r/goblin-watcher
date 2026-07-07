@@ -49,6 +49,35 @@ def test_current_branch(tmp_path: Path) -> None:
     assert git.current_branch(repo) == "trunk"
 
 
+def test_current_branch_repo_with_no_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(repo)], check=True)
+    assert git.current_branch(repo) == "trunk"
+
+
+def test_default_branch_clone_of_empty_remote(tmp_path: Path) -> None:
+    # A brand-new (zero-commit) remote: clone succeeds but HEAD is unborn.
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    clone = git.clone(str(remote), tmp_path / "clone")
+    assert git.default_branch(clone) == "main"
+
+
+def test_commit_exists(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    assert git.commit_exists(repo, "main")
+    assert not git.commit_exists(repo, "no-such-ref")
+
+
+def test_commit_exists_false_in_repo_with_no_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    assert not git.commit_exists(repo, "main")
+
+
 def test_has_remote_false_for_fresh_init(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
