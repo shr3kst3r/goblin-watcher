@@ -74,12 +74,21 @@ def resolve_task(target: str | None, project_filter: str | None) -> Task:
         as_path = Path(target).expanduser()
         if as_path.exists():
             return _task_for_path(as_path, project_names)
+        matches: list[Task] = []
         for name in project_names:
             try:
                 proj = state.get_project(name)
-                return state.load_task(proj, target)
+                matches.append(state.load_task(proj, target))
             except (GoblinError, TaskNotFoundError):
                 continue
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            names = ", ".join(t.project for t in matches)
+            raise GoblinError(
+                f"Task {target!r} exists in more than one project: {names}.",
+                hint=f"Disambiguate with --project, e.g. `--project {matches[0].project}`.",
+            )
         scope = f" in project {project_filter!r}" if project_filter else ""
         raise GoblinError(
             f"No task or path matches {target!r}{scope}.",

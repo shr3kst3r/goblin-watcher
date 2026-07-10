@@ -18,20 +18,34 @@ app = typer.Typer()
 
 
 def _find_task_anywhere(task_id: str) -> tuple[Project, Task]:
-    """Search every registered project for a task with this id."""
+    """Search every registered project for a task with this id.
+
+    The id must be unique across projects: two tasks sharing an id (e.g. the
+    same ticket started in two repos) would otherwise resolve to whichever
+    project registered first, silently operating on the wrong worktree.
+    """
+    matches: list[tuple[Project, Task]] = []
     for name in state.load_global().projects:
         try:
             proj = state.get_project(name)
         except ProjectNotFoundError:
             continue
         try:
-            return proj, state.load_task(proj, task_id)
+            matches.append((proj, state.load_task(proj, task_id)))
         except TaskNotFoundError:
             continue
-    raise TaskNotFoundError(
-        f"No task {task_id!r} in any registered project.",
-        hint="Run `gw task ls` to see what's around.",
-    )
+    if not matches:
+        raise TaskNotFoundError(
+            f"No task {task_id!r} in any registered project.",
+            hint="Run `gw task ls` to see what's around.",
+        )
+    if len(matches) > 1:
+        names = ", ".join(proj.name for proj, _ in matches)
+        raise GoblinError(
+            f"Task {task_id!r} exists in more than one project: {names}.",
+            hint=f"Disambiguate with --project, e.g. `--project {matches[0][0].name}`.",
+        )
+    return matches[0]
 
 
 def _find_task(task_id: str, project: str | None) -> tuple[Project, Task]:
@@ -39,7 +53,7 @@ def _find_task(task_id: str, project: str | None) -> tuple[Project, Task]:
 
     With `project` set, the lookup is confined to that project — disambiguating
     a task id that exists in more than one. Without it, every registered project
-    is searched and the first match wins.
+    is searched and the id must match exactly one task.
     """
     if project is not None:
         proj = state.get_project(project.strip().lower())

@@ -53,6 +53,25 @@ def test_run_project_flag_scopes_task_lookup(isolated_xdg: Path, tmp_path: Path)
     assert kwargs["task"].id == task_b.id
 
 
+def test_run_ambiguous_task_id_errors_without_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Without --project, a task id shared across projects errors instead of
+    silently resolving to whichever project registered first."""
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.run.launch_agent") as launch:
+        res = runner.invoke(app, ["run", "spike-foo"])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "more than one project" in res.exception.message
+    assert "alpha" in res.exception.message
+    assert "beta" in res.exception.message
+    assert res.exception.hint is not None
+    assert "--project" in res.exception.hint
+    launch.assert_not_called()
+
+
 def test_run_project_flag_unknown_errors(isolated_xdg: Path, tmp_path: Path) -> None:
     _bootstrap_two_projects(tmp_path)
     runner = CliRunner()

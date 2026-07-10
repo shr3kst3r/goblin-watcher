@@ -87,6 +87,42 @@ def test_pr_open_project_scopes_lookup_to_one_project(isolated_xdg: Path, tmp_pa
     assert alpha_task.pr_url is None
 
 
+def test_pr_open_ambiguous_task_id_errors_without_project(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A task id shared across projects must not silently resolve to whichever
+    project registered first — that would push and open a PR from the wrong
+    worktree (with the wrong base branch)."""
+    from goblin_watcher.errors import GoblinError
+
+    repo_a = tmp_path / "alpha"
+    repo_b = tmp_path / "beta"
+    _init_repo(repo_a)
+    _init_repo(repo_b)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo_a)])
+    runner.invoke(app, ["project", "new", "beta", "--dir", str(repo_b)])
+    runner.invoke(app, ["new", "--project", "alpha", "--branch-name", "spike/foo", "--no-launch"])
+    runner.invoke(app, ["new", "--project", "beta", "--branch-name", "spike/foo", "--no-launch"])
+    [task] = state.list_tasks(state.get_project("alpha"))
+
+    with (
+        patch("goblin_watcher.commands.pr.git.push") as push,
+        patch("goblin_watcher.commands.pr.gh.create_pr") as create,
+    ):
+        res = runner.invoke(app, ["pr", "open", task.id])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "more than one project" in res.exception.message
+    assert "alpha" in res.exception.message
+    assert "beta" in res.exception.message
+    assert res.exception.hint is not None
+    assert "--project" in res.exception.hint
+    # Nothing was pushed or created for either project's worktree.
+    push.assert_not_called()
+    create.assert_not_called()
+
+
 def test_pr_open_without_id_outside_worktree_errors_helpfully(
     isolated_xdg: Path, tmp_path: Path, monkeypatch
 ) -> None:
