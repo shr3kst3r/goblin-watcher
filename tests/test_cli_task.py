@@ -334,3 +334,102 @@ def test_task_prune_skips_stale_project_registration(isolated_xdg: Path, tmp_pat
     res = runner.invoke(app, ["task", "prune", "--dry-run", "--no-fetch"])
     assert res.exit_code == 0, res.output
     assert "Skipped project 'ghost'" in res.output
+
+
+def test_task_rename_moves_record_only(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    old_id = task.id
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "rename", old_id, "better-name"])
+    assert res.exit_code == 0, res.output
+
+    renamed = state.load_task(proj, "better-name")
+    assert renamed.branch == task.branch
+    assert renamed.worktree_path == task.worktree_path
+    assert renamed.sessions == task.sessions
+    assert not state.task_file(proj, old_id).exists()
+    assert task.worktree_path.exists()  # worktree untouched on disk
+
+
+def test_task_rename_rejects_same_id(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "rename", task.id, task.id])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "already named" in res.exception.message
+
+
+def test_task_rename_rejects_non_slug_id(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "rename", task.id, "Spike Foo!"])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "spike-foo" in (res.exception.hint or "")
+    # Nothing changed.
+    assert state.task_file(proj, task.id).exists()
+
+
+def test_task_rename_rejects_collision_in_same_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["new", "--branch-name", "other-task", "--no-launch"])
+    res = runner.invoke(app, ["task", "rename", "spike-foo", "other-task"])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "already exists" in res.exception.message
+    assert "alpha" in res.exception.message
+
+
+def test_task_rename_rejects_collision_in_other_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    """An id in use by ANOTHER project is refused too — it would make the id
+    ambiguous and force --project on every later command."""
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["new", "--project", "beta", "--branch-name", "beta-only", "--no-launch"])
+    res = runner.invoke(app, ["task", "rename", "spike-foo", "beta-only", "--project", "alpha"])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "beta" in res.exception.message
+
+
+def test_task_rename_project_scopes_lookup(isolated_xdg: Path, tmp_path: Path) -> None:
+    """With the same task id in two projects, --project picks which one to rename."""
+    _bootstrap_two_projects(tmp_path)
+    proj_a = state.get_project("alpha")
+    proj_b = state.get_project("beta")
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "rename", "spike-foo", "renamed", "--project", "beta"])
+    assert res.exit_code == 0, res.output
+    assert state.task_file(proj_b, "renamed").exists()
+    assert not state.task_file(proj_b, "spike-foo").exists()
+    # Alpha's identically-named task is untouched.
+    assert state.task_file(proj_a, "spike-foo").exists()
+
+
+def test_task_rename_ambiguous_without_project_errors(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "rename", "spike-foo", "renamed"])
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "more than one project" in res.exception.message

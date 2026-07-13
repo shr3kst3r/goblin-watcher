@@ -184,3 +184,18 @@ class TmuxWindower:
         if res.returncode != 0:
             return False
         return any(line.strip() == task.id for line in res.stdout.splitlines())
+
+    def rename_window(self, old_task_id: str, new_task_id: str) -> bool:
+        """Rename a task's window, if one is live. Returns whether a rename happened.
+
+        Best-effort by design: callers (`gw task rename`) invoke this without
+        knowing whether the task was ever spawned in tmux, so a missing binary,
+        session, or window is a normal outcome, not an error.
+        """
+        if shutil.which("tmux") is None:
+            return False
+        if not self._window_exists(old_task_id):
+            return False
+        s = self._session()
+        res = _run_tmux("rename-window", "-t", f"{s}:{old_task_id}", new_task_id)
+        return res.returncode == 0

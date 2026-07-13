@@ -270,3 +270,44 @@ def test_tmux_pane_command_injects_agent_env(isolated_xdg: Path, tmp_path: Path,
     pane_cmd = new_window[-1]
     assert "MY_AGENT_VAR=a value" in pane_cmd
     assert "DISABLE_AUTO_UPDATE=true" in pane_cmd
+
+
+@pytest.fixture
+def fake_tmux_with_window(monkeypatch: pytest.MonkeyPatch):
+    """Fake tmux where the goblin session has a live `eng-123` window."""
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    calls = []
+
+    class _FakeRes:
+        def __init__(self, code: int, stdout: str = "") -> None:
+            self.returncode = code
+            self.stdout = stdout
+            self.stderr = ""
+
+    def _fake_run(cmd, capture_output, text, check):
+        calls.append(cmd)
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "list-windows":
+            return _FakeRes(0, stdout="intro\neng-123\n")
+        return _FakeRes(0)
+
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
+    return calls
+
+
+def test_rename_window_renames_live_window(isolated_xdg: Path, fake_tmux_with_window) -> None:
+    assert TmuxWindower().rename_window("eng-123", "eng-456") is True
+    assert ["tmux", "rename-window", "-t", "goblin:eng-123", "eng-456"] in fake_tmux_with_window
+
+
+def test_rename_window_no_window_is_a_noop(isolated_xdg: Path, fake_tmux_with_window) -> None:
+    assert TmuxWindower().rename_window("eng-999", "eng-456") is False
+    assert not any("rename-window" in c for c in fake_tmux_with_window)
+
+
+def test_rename_window_without_tmux_binary(
+    isolated_xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: None)
+    assert TmuxWindower().rename_window("eng-123", "eng-456") is False

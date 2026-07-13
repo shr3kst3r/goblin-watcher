@@ -12,7 +12,9 @@ from goblin_watcher.completion_enumerators import complete_projects, complete_ta
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.models import Project, Task, TaskStatus
+from goblin_watcher.slug import slugify
 from goblin_watcher.task_resolver import resolve_project
+from goblin_watcher.windowing.tmux import TmuxWindower
 
 app = typer.Typer()
 
@@ -192,6 +194,69 @@ def show(
         console.print(f"  sessions      {len(task.sessions)} (run `gw session ls`)")
     else:
         console.print("  sessions      (none yet)")
+
+
+def _ensure_task_id_free(new_id: str) -> None:
+    """Refuse a task id already in use by ANY registered project.
+
+    Same-project collisions would overwrite a record; cross-project ones would
+    make the id ambiguous, forcing --project on every later command. A rename
+    is a deliberate act, so the collision is cheap to avoid up front.
+    """
+    for name in state.load_global().projects:
+        try:
+            other = state.get_project(name)
+        except ProjectNotFoundError:
+            continue
+        if state.task_file(other, new_id).exists():
+            raise GoblinError(
+                f"Task {new_id!r} already exists in project {other.name!r}.",
+                hint="Pick a different id, or remove that task first (`gw task rm`).",
+            )
+
+
+@app.command("rename")
+def rename(
+    task_id: str = typer.Argument(..., help="Current task id.", autocompletion=complete_tasks),
+    new_id: str = typer.Argument(..., help="New task id."),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
+) -> None:
+    """Rename a task's id (record + tmux window only).
+
+    The branch, worktree path, and agent sessions are untouched — sessions are
+    keyed on the worktree's cwd, so leaving it in place keeps resume working.
+    """
+    proj, task = _find_task(task_id, project)
+
+    new_id = new_id.strip().lower()
+    slugged = slugify(new_id, max_len=60)
+    if new_id != slugged:
+        raise GoblinError(
+            f"{new_id!r} is not a valid task id.",
+            hint=f"Ids are lowercase slugs — try {slugged!r}.",
+        )
+    if new_id == task.id:
+        raise GoblinError(f"Task is already named {new_id!r}.")
+    _ensure_task_id_free(new_id)
+
+    # New record first, then drop the old one: a crash in between leaves a
+    # recoverable duplicate rather than no record at all.
+    state.save_task(proj, task.model_copy(update={"id": new_id}))
+    state.delete_task_record(proj, task.id)
+
+    if TmuxWindower().rename_window(task.id, new_id):
+        console.print(f"[muted]Renamed tmux window {task.id!r} → {new_id!r}.[/]")
+
+    print_success(f"Renamed task {task.id!r} → {new_id!r}")
+    if task.kind == "scratch":
+        console.print(f"[muted]The scratch directory is unchanged: {task.worktree_path}[/]")
+    else:
+        console.print(f"[muted]Branch ({task.branch}), worktree, and sessions are unchanged.[/]")
 
 
 @app.command("add-repo")
