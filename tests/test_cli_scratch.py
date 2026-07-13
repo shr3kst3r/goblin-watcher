@@ -2,7 +2,7 @@
 
 import re
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 from goblin_watcher import paths, state
 from goblin_watcher.agents.launcher import build_seed_prompt
 from goblin_watcher.cli import app
-from goblin_watcher.models import Project
+from goblin_watcher.models import Project, SessionRecord
 
 
 def _init_repo(path: Path) -> None:
@@ -163,6 +163,81 @@ def test_task_prune_skips_scratch(isolated_xdg: Path) -> None:
     res = runner.invoke(app, ["task", "prune", "--dry-run", "--no-fetch"])
     assert res.exit_code == 0, res.output
     assert "Nothing to prune" in res.output
+    assert "--scratch-older-than" in res.output
+
+
+def _backdate(task_id: str, days: int) -> None:
+    proj = state.get_project("scratch")
+    task = state.load_task(proj, task_id)
+    stale = datetime.now(UTC) - timedelta(days=days)
+    state.save_task(proj, task.model_copy(update={"created_at": stale}))
+
+
+def test_task_prune_scratch_older_than_removes_idle(isolated_xdg: Path) -> None:
+    assert _scratch("old", "--no-launch").exit_code == 0
+    assert _scratch("recent", "--no-launch").exit_code == 0
+    _backdate("old", days=45)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["task", "prune", "--no-fetch", "--scratch-older-than", "30", "--force"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "idle 45d" in res.output
+
+    proj = state.get_project("scratch")
+    ids = {t.id for t in state.list_tasks(proj)}
+    assert ids == {"recent"}
+    assert not (proj.root / "old").exists()
+    assert (proj.root / "recent").is_dir()
+
+
+def test_task_prune_scratch_recent_session_keeps_task(isolated_xdg: Path) -> None:
+    assert _scratch("busy", "--no-launch").exit_code == 0
+    _backdate("busy", days=45)
+    proj = state.get_project("scratch")
+    task = state.load_task(proj, "busy")
+    now = datetime.now(UTC)
+    session = SessionRecord(agent="claude", session_id="s1", created_at=now, last_used_at=now)
+    state.save_task(proj, task.model_copy(update={"sessions": [session]}))
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["task", "prune", "--no-fetch", "--scratch-older-than", "30", "--force"]
+    )
+    assert res.exit_code == 0, res.output
+    assert state.load_task(proj, "busy").worktree_path.is_dir()
+
+
+def test_task_prune_scratch_dry_run_lists_but_keeps(isolated_xdg: Path) -> None:
+    assert _scratch("old", "--no-launch").exit_code == 0
+    _backdate("old", days=45)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["task", "prune", "--no-fetch", "--scratch-older-than", "30", "--dry-run"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "old" in res.output
+    proj = state.get_project("scratch")
+    assert state.load_task(proj, "old").worktree_path.is_dir()
+
+
+def test_task_prune_scratch_older_than_zero_takes_all(isolated_xdg: Path) -> None:
+    assert _scratch("fresh", "--no-launch").exit_code == 0
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["task", "prune", "--no-fetch", "--scratch-older-than", "0", "--force"]
+    )
+    assert res.exit_code == 0, res.output
+    assert state.list_tasks(state.get_project("scratch")) == []
+
+
+def test_task_prune_scratch_older_than_rejects_negative(isolated_xdg: Path) -> None:
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "prune", "--no-fetch", "--scratch-older-than", "-1"])
+    assert res.exit_code != 0
+    assert "non-negative" in str(res.exception)
 
 
 def test_pr_open_rejects_scratch_task(isolated_xdg: Path) -> None:

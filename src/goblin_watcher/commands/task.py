@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -425,6 +426,12 @@ def _merge_detection(proj: Project, task: Task) -> str | None:
     return None
 
 
+def _scratch_last_activity(task: Task) -> datetime:
+    """Most recent sign of life on a scratch task: creation or last session use."""
+    stamps = [task.created_at, *(s.last_used_at for s in task.sessions)]
+    return max(ts if ts.tzinfo else ts.replace(tzinfo=UTC) for ts in stamps)
+
+
 @app.command("prune")
 def prune(
     project: str | None = typer.Option(
@@ -442,13 +449,26 @@ def prune(
         help="Skip the confirmation prompt; also remove tasks with uncommitted changes.",
     ),
     fetch: bool = typer.Option(True, "--fetch/--no-fetch", help="Run `git fetch` before checking."),
+    scratch_older_than: int | None = typer.Option(
+        None,
+        "--scratch-older-than",
+        help="Also prune scratch spaces idle for more than N days (0 = all of them). "
+        "Idle means no session use since then. Without this flag, scratch tasks "
+        "are never pruned.",
+    ),
 ) -> None:
     """Remove tasks whose branch is merged into the base branch.
 
     Detection: if the task has a PR URL, `gh pr view` decides. Otherwise, falls
     back to `git merge-base --is-ancestor <branch> origin/<base>`. Squash- and
     rebase-merged branches without a recorded PR may go undetected.
+
+    Scratch spaces have no branch, so "merged" never applies; pass
+    `--scratch-older-than N` to prune the ones idle for more than N days
+    (deleting their directories permanently).
     """
+    if scratch_older_than is not None and scratch_older_than < 0:
+        raise GoblinError("--scratch-older-than must be non-negative.")
     if project:
         projects = [state.get_project(project.strip().lower())]
     else:
@@ -461,24 +481,38 @@ def prune(
             except ProjectNotFoundError:
                 console.print(f"[hint]Skipped project {n!r}: metadata missing.[/]")
 
+    now = datetime.now(UTC)
     merged: list[tuple[Project, Task, str]] = []
+    scratch_skipped = 0
     for proj in projects:
-        if fetch:
+        if fetch and proj.kind != "scratch":
             with contextlib.suppress(GoblinError):
                 git.fetch(proj.root)
         for task in state.list_tasks(proj):
             if task.kind == "scratch":
-                continue  # no branch, so "merged" can never apply
+                # No branch, so "merged" can never apply; prune by idle age.
+                if scratch_older_than is None:
+                    scratch_skipped += 1
+                    continue
+                idle = now - _scratch_last_activity(task)
+                if idle >= timedelta(days=scratch_older_than):
+                    merged.append((proj, task, f"idle {idle.days}d"))
+                continue
             detected = _merge_detection(proj, task)
             if detected is not None:
                 merged.append((proj, task, detected))
 
     if not merged:
         console.print("[muted]Nothing to prune.[/]")
+        if scratch_skipped:
+            console.print(
+                f"[hint]{scratch_skipped} scratch space(s) untouched — prune idle "
+                f"ones with --scratch-older-than N.[/]"
+            )
         return
 
     table = Table(
-        title=f"Merged tasks{' (dry run)' if dry_run else ''}",
+        title=f"Tasks to prune{' (dry run)' if dry_run else ''}",
         show_header=True,
         header_style="bold",
     )
@@ -487,7 +521,8 @@ def prune(
     table.add_column("Branch")
     table.add_column("Detected via")
     for proj, task, detected in merged:
-        table.add_row(proj.name, task.id, task.branch, detected)
+        branch = "—" if task.kind == "scratch" else task.branch
+        table.add_row(proj.name, task.id, branch, detected)
     console.print(table)
 
     if dry_run:
