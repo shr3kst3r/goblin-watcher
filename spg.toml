@@ -10,6 +10,19 @@ description = "goblin-watcher: parallel AI coding agents in git worktrees."
 # src/goblin_watcher/completion_spg.py for the hook contract.
 complete_hook = "uv run gw __complete spg"
 
+# --- links: publish this repo's Claude Code skill globally --------------------
+#
+# `spg install` / `sync` symlinks the skill into ~/.claude/skills/ (and
+# `uninstall` removes it), so Claude knows how to drive `gw` in every session,
+# not just ones inside this repo. `source` points at the real top-level
+# directory — never at the `.claude/skills/` bridge symlink, so nothing
+# resolves through two hops.
+
+[links.goblin-watcher]
+source = "skills/goblin-watcher"
+target = "~/.claude/skills/"
+description = "goblin-watcher skill: how to drive gw (tasks, sessions, PRs, pruning) from Claude"
+
 [commands.gw-verify]
 run = "just verify"
 description = "Run the full CI gate: ruff check + ruff format --check + ty + pytest."
