@@ -123,8 +123,13 @@ def _backfill_prs(proj: Project, tasks: list[Task]) -> list[Task]:
         if t.pr_url == info["url"] and t.status == new_status:
             updated.append(t)
             continue
-        merged = t.model_copy(update={"pr_url": info["url"], "status": new_status})
-        state.save_task(proj, merged)
+        merged = state.update_task(
+            proj,
+            t.id,
+            lambda latest, u=info["url"], s=new_status: latest.model_copy(
+                update={"pr_url": u, "status": s}
+            ),
+        )
         updated.append(merged)
     return updated
 
@@ -284,7 +289,21 @@ def add_repo(
     new_proj = state.get_project(project_to_add.strip().lower())
 
     task = workspace.attach_repo(task, new_proj, branch_name=branch_name, from_=from_)
-    state.save_task(proj, task)
+    # Narrow patch under the task lock (ADR 0004): `attach_repo` just spent
+    # several git subprocesses creating a branch and worktree, so the snapshot
+    # loaded before it is stale. Only the three workspace-shaped fields it owns
+    # are carried across.
+    task = state.update_task(
+        proj,
+        task.id,
+        lambda latest, t=task: latest.model_copy(
+            update={
+                "workspace_path": t.workspace_path,
+                "worktree_path": t.worktree_path,
+                "secondary_repos": t.secondary_repos,
+            }
+        ),
+    )
 
     added = task.secondary_repos[-1]
     print_success(f"Added {new_proj.name!r} to task {task.id!r} on branch {added.branch!r}")
@@ -407,7 +426,7 @@ def rm(
     print_success(f"Removed task {task.id!r}")
 
 
-def _merge_detection(proj: Project, task: Task) -> str | None:
+def merge_detection(proj: Project, task: Task) -> str | None:
     """How the task's branch was detected as merged: "PR", "ancestry", or None.
 
     PR state wins when available; falls back to ancestry. Returning the method
@@ -426,7 +445,7 @@ def _merge_detection(proj: Project, task: Task) -> str | None:
     return None
 
 
-def _scratch_last_activity(task: Task) -> datetime:
+def scratch_last_activity(task: Task) -> datetime:
     """Most recent sign of life on a scratch task: creation or last session use."""
     stamps = [task.created_at, *(s.last_used_at for s in task.sessions)]
     return max(ts if ts.tzinfo else ts.replace(tzinfo=UTC) for ts in stamps)
@@ -494,11 +513,11 @@ def prune(
                 if scratch_older_than is None:
                     scratch_skipped += 1
                     continue
-                idle = now - _scratch_last_activity(task)
+                idle = now - scratch_last_activity(task)
                 if idle >= timedelta(days=scratch_older_than):
                     merged.append((proj, task, f"idle {idle.days}d"))
                 continue
-            detected = _merge_detection(proj, task)
+            detected = merge_detection(proj, task)
             if detected is not None:
                 merged.append((proj, task, detected))
 

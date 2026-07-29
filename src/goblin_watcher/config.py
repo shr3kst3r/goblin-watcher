@@ -60,10 +60,53 @@ class DefaultsConfig(BaseModel):
     activity_active_seconds: int = 120
 
 
+# Which notification transport `gw sync` uses. "auto" resolves to "macos" on
+# darwin and "off" elsewhere.
+NotifyTransport = Literal["auto", "macos", "command", "off"]
+
+# Events a sync pass can notify on. Edge-triggered: each fires once, when the
+# underlying state actually changes (ADR 0005).
+SyncEvent = Literal[
+    "agent-idle",
+    "pr-merged",
+    "checks-failed",
+    "checks-passed",
+    "prunable",
+]
+
+_DEFAULT_SYNC_EVENTS: tuple[SyncEvent, ...] = (
+    "agent-idle",
+    "pr-merged",
+    "checks-failed",
+    "checks-passed",
+    "prunable",
+)
+
+
+class SyncConfig(BaseModel):
+    """Background-sync settings (ADR 0005). Sync only runs if scheduled."""
+
+    # How often the launchd/cron job fires. Also the worst-case staleness of
+    # anything `gw status` reads from the sync cache.
+    interval_seconds: int = 300
+    # Auto-prune tasks that are merged AND have a clean worktree. Never forces:
+    # dirty or ambiguous tasks are reported, never deleted.
+    prune: bool = True
+    # Prune scratch spaces idle more than N days. 0 disables (scratch spaces
+    # have no merge signal, so idleness is the only criterion).
+    scratch_prune_days: int = 0
+    notify: NotifyTransport = "auto"
+    # argv for the "command" transport; title and body are appended as the
+    # final two arguments. Never shell-interpolated.
+    notify_command: list[str] = Field(default_factory=list)
+    notify_events: list[SyncEvent] = Field(default_factory=lambda: list(_DEFAULT_SYNC_EVENTS))
+
+
 class Config(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     linear: LinearConfig = Field(default_factory=LinearConfig)
     tmux: TmuxConfig = Field(default_factory=TmuxConfig)
+    sync: SyncConfig = Field(default_factory=SyncConfig)
 
 
 def load() -> Config:

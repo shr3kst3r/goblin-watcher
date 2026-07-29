@@ -9,8 +9,10 @@ Current-state design of how `goblin-watcher` persists projects, tasks, and confi
 │ Global tier (per-user, machine-wide)            │
 │   ~/.local/share/goblin-watcher/                │  XDG_DATA_HOME
 │     state.json         ← project registry       │
+│     state.lock         ← registry lock (ADR 0004)
 │     workspaces/<task>/ ← multi-repo task workspaces
-│     logs/              ← (planned, not used yet)│
+│     sync/              ← background-sync state + indicator cache
+│     logs/              ← commands.jsonl, sync.jsonl, describe.log
 │   ~/.config/goblin-watcher/                     │  XDG_CONFIG_HOME
 │     config.toml        ← user defaults          │
 └─────────────────────────────────────────────────┘
@@ -60,6 +62,32 @@ All JSON files go through `state._atomic_write_text`:
 4. On any exception, unlink the temp file and re-raise.
 
 A crash mid-write leaves either the old state or the new one — never a half-written file. That matters because state corruption would mean losing the project registry.
+
+## Cross-process locking
+
+Atomic writes prevent torn files but not *lost updates*: two processes that each
+load, mutate, and save the same record produce last-writer-wins. Since ADR 0004,
+read-modify-write cycles are serialized with advisory `fcntl.flock` locks:
+
+```python
+state.update_task(project, task_id, mutate)   # lock → re-read → mutate → save
+state.update_global(mutate)
+```
+
+The lock spans the **read**, so `mutate` always sees current on-disk state.
+Locks are taken on stable sidecar files — `<tasks>/.<task_id>.lock` and
+`data_dir()/state.lock` — never on the data file, whose inode every atomic write
+replaces. Sidecars are empty, persist between runs, and are excluded from task
+discovery by the `*.json` glob.
+
+Callers pass **narrow patches** that touch only the fields they own. Persisting a
+whole `Task` loaded minutes earlier (the old launcher pattern) would revert
+whatever else landed meanwhile. Expensive work — network calls, transcript
+parsing, agent-store globbing — must stay outside the callback, which is why
+session reconciliation is split into `plan_reconciliation` / `apply_reconciliation`.
+
+`state.write_json_atomic` is the public seam for modules that keep their own JSON
+files (the sync tier) and want the same guarantee.
 
 ## Schemas
 

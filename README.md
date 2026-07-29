@@ -278,6 +278,7 @@ gw session ls                               # sessions for the current task
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
 gw config show                              # resolved config (file merged over defaults)
+gw sync status                              # is background sync scheduled? when did it last run?
 ```
 
 Each session row in `gw status` carries an activity hint derived from the transcript's mtime: `● active` while the agent is producing output, `idle <age>` once it has gone quiet (done, or waiting on you). Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
@@ -313,6 +314,52 @@ gw project rm <name>                        # unregister a project (does NOT del
 
 `gw session prune` operates only on `gw`'s record of `task.sessions`. The underlying agent transcript files (e.g. `~/.claude/projects/<encoded-cwd>/*.jsonl`) are untouched, so you can still resume a forgotten session by id if you re-add it.
 
+## Background sync
+
+`gw sync` does ahead of time what `gw status` and the picker otherwise do on the
+blocking path: refresh Linear states and session summaries, reconcile sessions,
+pull PR and CI state, cache the git indicators, prune what's safely prunable, and
+notify you when something changes. It is **not a daemon** — each pass is a
+short-lived, idempotent command, scheduled by launchd.
+
+```bash
+gw sync                                     # run one pass now, printing every action
+gw sync install                             # schedule it (launchd; --interval SECONDS)
+gw sync status                              # installed? loaded? last run? what's missing?
+gw sync watch                               # follow background passes live
+gw sync uninstall                           # stop scheduling
+```
+
+Nothing runs in the background until you run `gw sync install`; without it,
+`gw status` behaves exactly as before.
+
+**Notifications are edge-triggered** — each fires once, when the state actually
+changes, so a quiet day produces none:
+
+| Event | Fires when |
+|---|---|
+| `agent-idle` | a session that was producing output goes quiet |
+| `pr-merged` | the PR's state becomes `MERGED` |
+| `checks-failed` / `checks-passed` | CI flips |
+| `prunable` | a merged branch can't be auto-pruned because the worktree is dirty |
+
+**Pruning never forces.** A task is removed only when it is merged *and* clean;
+anything dirty or ambiguous is reported and left alone. Scratch spaces have no
+merge signal, so they're pruned by idle age and only when you opt in:
+
+```bash
+gw config set sync.scratch_prune_days 14    # prune scratch spaces idle > 14 days (0 = off)
+gw config set sync.prune false              # disable auto-pruning of merged tasks
+```
+
+`gw status` reads the cached indicators when they're fresh, showing the reading's
+age (`↑2 unpushed (3m)`), and recomputes live otherwise. `gw status --no-cache`
+always recomputes.
+
+Everything a pass does is journaled to `~/.local/share/goblin-watcher/logs/sync.jsonl`,
+which is what `gw sync watch` and `gw sync status` read. Trim it with
+`gw sync prune-journal --days 30`.
+
 ## Configuration
 
 Optional config at `~/.config/goblin-watcher/config.toml`. Edit it directly, or via `gw config`:
@@ -340,6 +387,14 @@ api_key = "op://Personal/Linear/api_key"
 session_name = "goblin"           # tmux session that hosts every task
 attach_on_spawn = true            # `gw` execs `tmux attach -t <session>` after spawning
 split = "vertical"                # additional sessions on a task: "vertical" (top/bottom) or "horizontal" (side-by-side)
+
+[sync]                            # background sync; inert until `gw sync install`
+interval_seconds = 300            # also the worst-case staleness of cached indicators
+prune = true                      # auto-prune merged AND clean tasks; never forces
+scratch_prune_days = 0            # prune scratch spaces idle > N days (0 = off)
+notify = "auto"                   # "auto" (macOS notifications on darwin) | "macos" | "command" | "off"
+notify_command = []               # argv for notify = "command"; title and body are appended
+notify_events = ["agent-idle", "pr-merged", "checks-failed", "checks-passed", "prunable"]
 ```
 
 ## Tmux windowing
@@ -386,7 +441,8 @@ gw new --linear|--branch|--branch-name|--branch-auto|--dir [--title ...] [--from
 gw run [PATH|TASK-ID] [--agent ...] [--session [ID]] [--new]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
-gw status [--project NAME]                  # tree view of projects → tasks → sessions
+gw status [--project NAME] [--no-linear] [--no-cache]   # tree view of projects → tasks → sessions
+gw sync                                     # run one background-sync pass now, verbosely
 gw doctor                                   # binary + key resolution checks
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
@@ -394,6 +450,7 @@ gw project new|ls|info|rm
 gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch)
 gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
 gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
+gw sync run|watch|status|install|uninstall|prune-journal   # background refresh; `run` is what the scheduler calls
 gw version
 ```
 
@@ -403,7 +460,10 @@ Always reach for `gw <command> --help` for the full option list.
 
 ```text
 ~/.local/share/goblin-watcher/
-└── state.json                            # registry of projects
+├── state.json                            # registry of projects
+├── state.lock                            # advisory lock for registry writes (ADR 0004)
+├── sync/                                 # background-sync state + cached task indicators
+└── logs/                                 # commands.jsonl, sync.jsonl
 
 ~/.config/goblin-watcher/
 └── config.toml                           # user config (above)
@@ -412,7 +472,8 @@ Always reach for `gw <command> --help` for the full option list.
 ├── .goblin/
 │   ├── project.json                      # this project's record
 │   └── tasks/
-│       └── eng-123.json                  # one file per task; carries sessions[]
+│       ├── eng-123.json                  # one file per task; carries sessions[]
+│       └── .eng-123.lock                 # advisory lock sidecar for that task
 └── .worktrees/
     └── eng-123/                          # one worktree per task (dir = task id; branch carries the slug)
 ```

@@ -305,3 +305,45 @@ def _stub_record(session_id: str, label: str | None):
         last_used_at=datetime.now(UTC),
         label=label,
     )
+
+
+class _DeletingWindower:
+    """Mimics the task being removed while the agent runs (`gw task rm`, sync prune)."""
+
+    name = "inline"
+
+    def run(self, *, task: Task, cmd: list[str], cwd: Path, env: dict[str, str]) -> int:
+        del cmd, cwd, env
+        state.delete_task_record(state.get_project(task.project), task.id)
+        return 0
+
+    def is_live(self, task: Task) -> bool:
+        del task
+        return False
+
+
+def test_post_run_write_does_not_resurrect_a_deleted_task(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A task removed mid-session must stay removed.
+
+    `gw sync` prunes merged-and-clean tasks unattended (ADR 0005), so a
+    long-running agent finishing after its task was pruned would otherwise write
+    the record back — pointing at a worktree and branch that no longer exist.
+    """
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+
+    exit_code, returned = launch(
+        project=proj,
+        task=task,
+        agent=_StubAgent(captured_id="real-id"),
+        choice=Fresh(prompt="kick off"),
+        windower=_DeletingWindower(),
+    )
+
+    assert exit_code == 0
+    # Caller still gets a usable task to render...
+    assert [s.session_id for s in returned.sessions] == ["real-id"]
+    # ...but nothing was written back to disk.
+    assert state.list_tasks(proj) == []

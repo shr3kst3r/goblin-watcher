@@ -114,7 +114,7 @@ def show(
     """Show a session's full details."""
     proj, task, s = _find_session(session_id)
     s = sessions.refresh_if_stale(task, s)
-    sessions.persist(proj, sessions.upsert(task, s))
+    sessions.persist_refresh(proj, sessions.upsert(task, s))
     description.schedule_if_stale(proj, task, s)
 
     console.print(f"[bold]{s.session_id}[/]")
@@ -144,7 +144,7 @@ def refresh(
     if session_id:
         proj, task, s = _find_session(session_id)
         refreshed = sessions.refresh_summary(task, s)
-        sessions.persist(proj, sessions.upsert(task, refreshed))
+        sessions.persist_refresh(proj, sessions.upsert(task, refreshed))
         print_success(f"Refreshed {session_id!r}")
         return
 
@@ -157,8 +157,7 @@ def refresh(
         if key in seen_tasks:
             continue
         seen_tasks.add(key)
-        refreshed_task = sessions.refresh_task_summaries(task)
-        sessions.persist(proj, refreshed_task)
+        refreshed_task = sessions.persist_refresh(proj, sessions.refresh_task_summaries(task))
         sessions.schedule_descriptions(proj, refreshed_task)
         count += len(task.sessions)
     print_success(f"Refreshed {count} session(s)")
@@ -203,9 +202,15 @@ def rm(
 ) -> None:
     """Forget a session from gw's record. The agent's own session store is untouched."""
     proj, task, s = _find_session(session_id)
-    new_sessions = [x for x in task.sessions if x.session_id != s.session_id]
-    updated = task.model_copy(update={"sessions": new_sessions})
-    state.save_task(proj, updated)
+    # Remove under the task lock (ADR 0004) so a session added concurrently —
+    # e.g. an agent the launcher just registered — isn't silently deleted.
+    state.update_task(
+        proj,
+        task.id,
+        lambda latest: latest.model_copy(
+            update={"sessions": [x for x in latest.sessions if x.session_id != s.session_id]}
+        ),
+    )
     print_success(f"Removed session {session_id!r} from {task.id}")
 
 
@@ -322,10 +327,17 @@ def prune(
     removed = 0
     for (proj_name, task_id), ids in by_task.items():
         proj = state.get_project(proj_name)
-        t = state.load_task(proj, task_id)
-        new_sessions = [x for x in t.sessions if x.session_id not in ids]
-        state.save_task(proj, t.model_copy(update={"sessions": new_sessions}))
-        removed += len(t.sessions) - len(new_sessions)
+        before = 0
+
+        def _drop(latest: Task, ids: set[str] = ids) -> Task:
+            nonlocal before
+            before = len(latest.sessions)
+            return latest.model_copy(
+                update={"sessions": [x for x in latest.sessions if x.session_id not in ids]}
+            )
+
+        after = state.update_task(proj, task_id, _drop)
+        removed += before - len(after.sessions)
     print_success(f"Forgot {removed} session(s)")
 
 

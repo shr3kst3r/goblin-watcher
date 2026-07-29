@@ -52,6 +52,9 @@ from goblin_watcher.commands import (
     status as status_cmd,
 )
 from goblin_watcher.commands import (
+    sync as sync_cmd,
+)
+from goblin_watcher.commands import (
     task as task_cmd,
 )
 from goblin_watcher.commands import (
@@ -81,6 +84,11 @@ app.add_typer(
     help="Manage the user-configured addition appended to fresh-spawn prompts.",
 )
 app.add_typer(history_cmd.app, name="history", help="Show and prune the gw command log.")
+app.add_typer(
+    sync_cmd.app,
+    name="sync",
+    help="Refresh tasks in the background: run a pass, watch it, check or install the schedule.",
+)
 app.add_typer(
     config_cmd.app,
     name="config",

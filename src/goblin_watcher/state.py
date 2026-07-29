@@ -11,11 +11,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from goblin_watcher import paths
+from goblin_watcher import locks, paths
 from goblin_watcher.errors import ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.models import GlobalState, Project, Task
 
@@ -43,6 +44,16 @@ def _json_default(value: Any) -> Any:
 
 def _write_json(target: Path, payload: dict[str, Any]) -> None:
     _atomic_write_text(target, json.dumps(payload, indent=2, default=_json_default) + "\n")
+
+
+def write_json_atomic(target: Path, payload: dict[str, Any]) -> None:
+    """Atomically write `payload` as JSON to an arbitrary path.
+
+    The public seam for modules that keep their own JSON files (e.g. the sync
+    tier) and want the same tmp-file-plus-rename guarantee as project state,
+    without reaching into this module's internals.
+    """
+    _write_json(target, payload)
 
 
 def load_global() -> GlobalState:
@@ -93,22 +104,41 @@ def get_project(name: str, state: GlobalState | None = None) -> Project:
     return load_project(project_root_for(name, state))
 
 
+def update_global(mutate: Callable[[GlobalState], GlobalState]) -> GlobalState:
+    """Apply `mutate` to the registry under an exclusive lock (ADR 0004).
+
+    The lock spans the *read*: the registry is re-loaded from disk inside it, so
+    `mutate` always sees current state and a concurrent writer's entry can't be
+    lost. `mutate` must be cheap and side-effect-free — no network, no
+    subprocesses — so lock hold times stay in milliseconds.
+    """
+    with locks.exclusive(paths.global_lock_file()):
+        updated = mutate(load_global())
+        save_global(updated)
+        return updated
+
+
 def register_project(project: Project) -> None:
     """Persist the project record and add it to the global registry."""
     paths.project_meta_dir(project.root).mkdir(parents=True, exist_ok=True)
     paths.project_tasks_dir(project.root).mkdir(parents=True, exist_ok=True)
     save_project(project)
-    state = load_global()
-    state.projects[project.name] = project.root
-    save_global(state)
+
+    def _add(state: GlobalState) -> GlobalState:
+        state.projects[project.name] = project.root
+        return state
+
+    update_global(_add)
 
 
 def unregister_project(name: str) -> None:
-    state = load_global()
-    if name not in state.projects:
-        raise ProjectNotFoundError(f"No project named {name!r}.")
-    del state.projects[name]
-    save_global(state)
+    def _remove(state: GlobalState) -> GlobalState:
+        if name not in state.projects:
+            raise ProjectNotFoundError(f"No project named {name!r}.")
+        del state.projects[name]
+        return state
+
+    update_global(_remove)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +162,25 @@ def load_task(project: Project, task_id: str) -> Task:
             hint="Run `gw task ls` to see this project's tasks.",
         )
     return Task.model_validate_json(f.read_text())
+
+
+def update_task(project: Project, task_id: str, mutate: Callable[[Task], Task]) -> Task:
+    """Apply `mutate` to one task record under an exclusive lock (ADR 0004).
+
+    The lock spans the *read*: the task is re-loaded from disk inside it, so
+    `mutate` receives current state rather than a snapshot the caller may have
+    been holding for minutes. Callers pass a narrow patch that touches only the
+    fields they own — persisting a whole stale `Task` is what this exists to
+    prevent.
+
+    `mutate` must be cheap and side-effect-free (no network, no subprocesses):
+    it runs with the lock held. Raises `TaskNotFoundError` if the record is gone
+    by the time the lock is acquired.
+    """
+    with locks.exclusive(paths.task_lock_file(project.root, task_id)):
+        updated = mutate(load_task(project, task_id))
+        save_task(project, updated)
+        return updated
 
 
 def list_tasks(project: Project) -> list[Task]:

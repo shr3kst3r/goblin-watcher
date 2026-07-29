@@ -70,5 +70,7 @@ def test_atomic_write_does_not_leave_temp_files(isolated_xdg: Path, tmp_path: Pa
     state.register_project(_make_project(root))
 
     state_dir = isolated_xdg / "data" / "goblin-watcher"
-    leftovers = [p for p in state_dir.iterdir() if p.name != "state.json"]
+    # `state.lock` is the advisory-lock sidecar (ADR 0004) and is expected to
+    # persist; what must never survive a write is a `state.json.*` temp file.
+    leftovers = [p for p in state_dir.iterdir() if p.name not in {"state.json", "state.lock"}]
     assert leftovers == []

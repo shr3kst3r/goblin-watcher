@@ -375,33 +375,27 @@ def apply(project_name: str, task_id: str, session_id: str) -> int:
         # Graceful fail-back: leave the existing snippet `summary` untouched.
         return 0
 
-    # Re-load right before save to minimize the foreground-overwrites-us race
-    # window. We update *only* the description fields on the matching session;
-    # everything else uses the freshly-loaded state.
+    # Persist under the task lock, re-reading inside it and patching *only* the
+    # description fields on the matching session (ADR 0004). The LLM call above
+    # deliberately happens outside the lock — it takes seconds.
+    from goblin_watcher import sessions as sessions_mod
+
+    def _patch(latest: Task) -> Task:
+        if not sessions_mod.has_session(latest, target.agent, session_id):
+            # Session was deleted while we ran; no-op write.
+            return latest
+        return sessions_mod.patch_session(
+            latest,
+            target.agent,
+            session_id,
+            {"description": new_description, "description_updated_at": _now()},
+        )
+
     try:
-        latest = state.load_task(project, task_id)
+        state.update_task(project, task_id, _patch)
     except Exception as e:
-        _log.debug("description: re-load failed for %r: %s", task_id, e)
+        _log.debug("description: persist failed for %r: %s", task_id, e)
         return 1
-    updated_sessions: list[SessionRecord] = []
-    matched = False
-    for s in latest.sessions:
-        if s.session_id == session_id and s.agent == target.agent:
-            matched = True
-            updated_sessions.append(
-                s.model_copy(
-                    update={
-                        "description": new_description,
-                        "description_updated_at": _now(),
-                    }
-                )
-            )
-        else:
-            updated_sessions.append(s)
-    if not matched:
-        # Session was deleted while we ran; quietly drop the update.
-        return 0
-    state.save_task(project, latest.model_copy(update={"sessions": updated_sessions}))
     return 0
 
 

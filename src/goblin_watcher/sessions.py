@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 from goblin_watcher import config, description, state
 from goblin_watcher.agents import get_agent
 from goblin_watcher.agents import registry as agent_registry
+from goblin_watcher.errors import TaskNotFoundError
 from goblin_watcher.models import AgentName, Project, SessionRecord, Task
 
 SUMMARY_TTL_DEFAULT = 30  # seconds; overridable via config.defaults.summary_ttl_seconds
@@ -41,6 +44,28 @@ def upsert(task: Task, session: SessionRecord) -> Task:
                 update={"sessions": [*task.sessions[:i], merged, *task.sessions[i + 1 :]]}
             )
     return task.model_copy(update={"sessions": [*task.sessions, session]})
+
+
+def patch_session(task: Task, agent: str, session_id: str, updates: dict[str, object]) -> Task:
+    """Return a copy of `task` with `updates` applied to one matching session.
+
+    The narrow-patch primitive behind `state.update_task` callbacks (ADR 0004):
+    it touches only the named fields on the session identified by
+    `(agent, session_id)` and leaves every other field and session exactly as
+    loaded. When no session matches — it was removed while the caller worked —
+    the task is returned unchanged, which persists as a harmless no-op write.
+    """
+    out: list[SessionRecord] = []
+    for s in task.sessions:
+        if s.agent == agent and s.session_id == session_id:
+            out.append(s.model_copy(update=dict(updates)))
+        else:
+            out.append(s)
+    return task.model_copy(update={"sessions": out})
+
+
+def has_session(task: Task, agent: str, session_id: str) -> bool:
+    return any(s.agent == agent and s.session_id == session_id for s in task.sessions)
 
 
 def refresh_summary(task: Task, session: SessionRecord) -> SessionRecord:
@@ -101,7 +126,9 @@ def reconcile_sessions(task: Task) -> Task:
     can't see, and dropping records on absent evidence loses data.
 
     Tasks with no records at all fall through to `adopt_orphan_sessions`.
-    Pure; callers persist.
+    Pure; callers persist. Callers that persist under a lock should use
+    `plan_reconciliation` + `apply_reconciliation` instead, so the on-disk
+    discovery this does happens *outside* the lock (ADR 0004).
     """
     if not task.sessions:
         return adopt_orphan_sessions(task)
@@ -180,7 +207,167 @@ def adopt_orphan_sessions(task: Task) -> Task:
     return updated
 
 
+# ---------------------------------------------------------------------------
+# Lock-friendly reconciliation: expensive discovery outside, cheap apply inside.
+#
+# `reconcile_sessions` walks every registered agent's on-disk session store,
+# which for codex means globbing the entire `~/.codex/sessions` tree. That must
+# not happen while a task lock is held (ADR 0004), so callers that persist split
+# it: plan first (no lock), then apply the plan to the freshly-loaded record
+# inside `state.update_task`. The plan keys everything by (agent, session_id)
+# rather than list position, so it stays correct even if the session list
+# changed while the discovery ran.
+
+
+@dataclass(frozen=True)
+class Rebind:
+    """Re-point a dangling record at an on-disk session gw wasn't tracking."""
+
+    agent: str
+    session_id: str
+    new_session_id: str
+    transcript_path: Path | None
+    label_fallback: str | None
+
+
+@dataclass(frozen=True)
+class ReconcilePlan:
+    rebinds: tuple[Rebind, ...] = ()
+    drops: tuple[tuple[str, str], ...] = ()  # (agent, session_id)
+    adoptions: tuple[SessionRecord, ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.rebinds or self.drops or self.adoptions)
+
+
+def plan_reconciliation(task: Task) -> ReconcilePlan:
+    """Discover what reconciliation *would* change. Hits the filesystem; no lock."""
+    if not task.sessions:
+        adopted = adopt_orphan_sessions(task)
+        return ReconcilePlan(adoptions=tuple(adopted.sessions))
+    now = _now()
+    rebinds: list[Rebind] = []
+    drops: list[tuple[str, str]] = []
+    for name, agent_cls in agent_registry.items():
+        mine = [s for s in task.sessions if s.agent == name]
+        if not mine:
+            continue
+        discovered = agent_cls().list_sessions(task.agent_cwd)
+        if not discovered:
+            continue
+        on_disk_ids = {raw.session_id for raw in discovered}
+        tracked_ids = {s.session_id for s in mine}
+        dangling = [
+            s
+            for s in mine
+            if s.session_id not in on_disk_ids
+            and (now - s.created_at).total_seconds() > _DANGLING_GRACE_SECONDS
+        ]
+        if not dangling:
+            continue
+        untracked = sorted(
+            (raw for raw in discovered if raw.session_id not in tracked_ids),
+            key=lambda r: r.created_at,
+        )
+        for record in sorted(dangling, key=lambda s: s.created_at):
+            if untracked:
+                raw = untracked.pop(0)
+                rebinds.append(
+                    Rebind(
+                        agent=name,
+                        session_id=record.session_id,
+                        new_session_id=raw.session_id,
+                        transcript_path=raw.transcript_path,
+                        label_fallback=raw.first_message_snippet,
+                    )
+                )
+            else:
+                drops.append((name, record.session_id))
+    return ReconcilePlan(rebinds=tuple(rebinds), drops=tuple(drops))
+
+
+def apply_reconciliation(task: Task, plan: ReconcilePlan) -> Task:
+    """Apply `plan` to `task`. Pure and cheap — safe to run under a lock."""
+    if plan.is_empty:
+        return task
+    updated = task
+    for rb in plan.rebinds:
+        existing = next(
+            (s for s in updated.sessions if s.agent == rb.agent and s.session_id == rb.session_id),
+            None,
+        )
+        if existing is None:
+            continue  # someone else already reconciled or removed it
+        updated = patch_session(
+            updated,
+            rb.agent,
+            rb.session_id,
+            {
+                "session_id": rb.new_session_id,
+                "transcript_path": rb.transcript_path,
+                "label": existing.label or rb.label_fallback,
+                # Summary/description were derived from the missing transcript;
+                # clear the timestamps so both refresh.
+                "summary_updated_at": None,
+                "description_updated_at": None,
+            },
+        )
+    if plan.drops:
+        dropped = set(plan.drops)
+        updated = updated.model_copy(
+            update={
+                "sessions": [s for s in updated.sessions if (s.agent, s.session_id) not in dropped]
+            }
+        )
+    for record in plan.adoptions:
+        if not has_session(updated, record.agent, record.session_id):
+            updated = upsert(updated, record)
+    return updated
+
+
+# Fields owned by snippet-summary refresh. Anything else on the session record
+# belongs to another writer and must not be carried over from a stale snapshot.
+_SUMMARY_FIELDS = ("summary", "turn_count", "summary_updated_at", "transcript_path")
+
+
+def persist_refresh(project: Project, task: Task, plan: ReconcilePlan | None = None) -> Task:
+    """Persist reconciliation + refreshed summaries as a narrow patch (ADR 0004).
+
+    `task` may be a snapshot the caller has been holding; only the
+    summary-owned fields of each session are carried across, applied to the
+    record as freshly loaded under the lock. Returns the persisted task.
+    """
+    refreshed_by_key = {(s.agent, s.session_id): s for s in task.sessions}
+
+    def _mutate(latest: Task) -> Task:
+        out = apply_reconciliation(latest, plan) if plan is not None else latest
+        for key, snapshot in refreshed_by_key.items():
+            if not has_session(out, key[0], key[1]):
+                continue
+            out = patch_session(
+                out,
+                key[0],
+                key[1],
+                {f: getattr(snapshot, f) for f in _SUMMARY_FIELDS},
+            )
+        return out
+
+    try:
+        return state.update_task(project, task.id, _mutate)
+    except TaskNotFoundError:
+        # Task removed underneath us (e.g. concurrent `gw task rm`). Nothing to
+        # persist; hand back what we had so callers can still render.
+        return task
+
+
 def persist(project: Project, task: Task) -> None:
+    """Write a whole task record.
+
+    Prefer `state.update_task` (or `persist_refresh`) for anything derived from
+    a snapshot — see ADR 0004. This remains for callers that just created the
+    record and are its only writer.
+    """
     state.save_task(project, task)
 
 

@@ -201,8 +201,12 @@ def open_(
                 head=r.branch,
                 draft=draft,
             )
-        task = _set_pr_url(task, r.project, url)
-        state.save_task(proj, task)
+        # Narrow patch under the task lock (ADR 0004): `task` predates the push
+        # and PR creation, so writing it back wholesale would revert concurrent
+        # updates (e.g. a sync pass refreshing Linear state).
+        task = state.update_task(
+            proj, task.id, lambda latest, p=r.project, u=url: _set_pr_url(latest, p, u)
+        )
         opened.append((r.project, url))
 
     if len(opened) == 1:
@@ -250,8 +254,11 @@ def status(
             continue
         any_found = True
         if data["url"] and r.pr_url != data["url"]:
-            task = _set_pr_url(task, r.project, data["url"])
-            state.save_task(proj, task)
+            task = state.update_task(
+                proj,
+                task.id,
+                lambda latest, p=r.project, u=data["url"]: _set_pr_url(latest, p, u),
+            )
         console.print(f"{prefix}PR #{data['number']} · {data['state']}")
         console.print(f"    {data['title']}")
         console.print(f"    {data['url']}")

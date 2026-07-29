@@ -61,5 +61,5 @@ What still has to be built before managed runs work end-to-end: a `ManagedClient
 
 - **Task as the unit** rather than Session: a branch + worktree is the load-bearing artifact (git operations, PRs, base-branch tracking). Sessions hang off because they're cheaper to recreate.
 - **Many sessions per task**: real workflows want to try two approaches in parallel against the same ticket. Forcing one session per agent per task was the wrong shape.
-- **Lazy-refresh summaries**: a background daemon would be overkill for an interactive CLI. Refreshing on read (status / picker) and on session exit covers the natural moments without a long-running process.
+- **Lazy-refresh summaries**: refreshing on read (status / picker) and on session exit covers the natural moments without a long-running process. This remains the fallback path and the only behaviour when background sync isn't installed. Since ADR 0005 the same work is *also* done ahead of time by `gw sync`, a short-lived scheduled command — still no resident daemon, but freshness no longer has to ride the interactive blocking path. See `background-sync.md`.
 - **Tmux as opt-in**: tmux is the obvious right answer for power users but a hard dependency for everyone else. The `Windower` protocol keeps the spawn path agnostic.

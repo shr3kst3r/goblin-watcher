@@ -127,8 +127,9 @@ def run(
     if session == SESSION_PICK_SENTINEL:
         # Re-bind/drop records whose transcript vanished (or never existed —
         # old tmux spawns stored placeholder ids) before offering them.
-        refreshed_task = sessions.refresh_task_summaries(sessions.reconcile_sessions(task))
-        sessions.persist(proj, refreshed_task)
+        plan = sessions.plan_reconciliation(task)
+        refreshed_task = sessions.refresh_task_summaries(sessions.apply_reconciliation(task, plan))
+        refreshed_task = sessions.persist_refresh(proj, refreshed_task, plan)
         sessions.schedule_descriptions(proj, refreshed_task)
         if not refreshed_task.sessions:
             raise GoblinError(
@@ -166,8 +167,9 @@ def run(
         else:
             choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt))
     else:
-        refreshed_task = sessions.refresh_task_summaries(sessions.reconcile_sessions(task))
-        sessions.persist(proj, refreshed_task)
+        plan = sessions.plan_reconciliation(task)
+        refreshed_task = sessions.refresh_task_summaries(sessions.apply_reconciliation(task, plan))
+        refreshed_task = sessions.persist_refresh(proj, refreshed_task, plan)
         sessions.schedule_descriptions(proj, refreshed_task)
         if not refreshed_task.sessions:
             choice = Fresh(prompt=build_seed_prompt(task))

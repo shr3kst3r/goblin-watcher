@@ -177,6 +177,50 @@ def pr_state(url: str) -> str | None:
         return None
 
 
+def pr_checks(url: str) -> str | None:
+    """Roll up a PR's CI checks to `passing`, `failing`, or `pending`.
+
+    Returns None when `gh` is missing, the lookup fails, or the PR has no checks
+    configured at all — "no signal" is distinct from "passing", and callers must
+    not report a green tick for a repo without CI.
+
+    The rollup is deliberately coarse: any failure/timeout/cancellation is
+    `failing`, any still-running or queued check is `pending`, and everything
+    else having concluded successfully (or neutral/skipped) is `passing`.
+    """
+    if shutil.which("gh") is None:
+        return None
+    res = _run(["pr", "view", url, "--json", "statusCheckRollup"])
+    if res.returncode != 0:
+        return None
+    import json
+
+    try:
+        rollup = json.loads(res.stdout).get("statusCheckRollup")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not rollup:
+        return None
+
+    failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+    pending = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"}
+    saw_pending = False
+    for check in rollup:
+        if not isinstance(check, dict):
+            continue
+        # CheckRun reports `status` + `conclusion`; StatusContext reports `state`.
+        status = str(check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or "").upper()
+        legacy_state = str(check.get("state") or "").upper()
+        if conclusion in failing or legacy_state in failing:
+            return "failing"
+        still_running = status and status != "COMPLETED"
+        unknown = not status and not conclusion and not legacy_state
+        if legacy_state in pending or still_running or unknown:
+            saw_pending = True
+    return "pending" if saw_pending else "passing"
+
+
 def pr_status(*, cwd: Path) -> dict[str, str]:
     """Return key/value details for the PR associated with the current branch."""
     res = _run(["pr", "view", "--json", "url,state,number,title"], cwd=cwd)

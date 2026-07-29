@@ -108,6 +108,31 @@ def _managed_agent_check() -> Check:
     )
 
 
+def _sync_check() -> Check:
+    """Whether background sync is scheduled, and when it last ran (ADR 0005).
+
+    Advisory: sync is opt-in, so "not installed" is a normal state and must not
+    fail doctor.
+    """
+    from goblin_watcher.sync import launchd, store
+
+    if not launchd.is_supported():
+        return Check(
+            name="background sync",
+            ok=True,
+            detail="launchd scheduling is macOS-only — see `gw sync install` for a cron line",
+        )
+    if not launchd.plist_path().exists():
+        return Check(
+            name="background sync",
+            ok=True,
+            detail="not scheduled — run `gw sync install` to enable",
+        )
+    last = store.load_state().last_pass
+    when = "never run" if last is None else f"last pass {last.status}"
+    return Check(name="background sync", ok=True, detail=f"scheduled · {when}")
+
+
 def _render(checks: list[Check]) -> None:
     table = Table(title="gw doctor", show_header=True, header_style="bold")
     table.add_column("Check")
@@ -132,6 +157,7 @@ def doctor() -> None:
         _windowing_check(cfg),
         _omz_update_prompt_check(cfg),
         _linear_key_check(),
+        _sync_check(),
     ]
     _render(checks)
     if any(not c.ok for c in checks):

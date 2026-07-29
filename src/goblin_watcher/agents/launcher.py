@@ -12,6 +12,7 @@ from typing import cast
 from goblin_watcher import prompt_addition, sessions, state
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.console import console
+from goblin_watcher.errors import TaskNotFoundError
 from goblin_watcher.models import AgentName, Project, SessionRecord, Task
 from goblin_watcher.windowing.base import Windower
 
@@ -42,6 +43,45 @@ def _new_id() -> str:
 def _label_from_prompt(prompt: str, max_len: int = 80) -> str:
     text = " ".join(prompt.split())
     return text[:max_len] + ("…" if len(text) > max_len else "")
+
+
+def _persist_record(
+    project: Project,
+    task: Task,
+    record: SessionRecord,
+    drop_session_id: str | None = None,
+    *,
+    create_if_missing: bool = False,
+) -> Task:
+    """Upsert one session record onto the task under its lock (ADR 0004).
+
+    An agent session runs for minutes to hours, so the `task` this function is
+    handed post-run is arbitrarily stale. Writing it back wholesale would revert
+    every update any other process made meanwhile — Linear state, PR backfill,
+    descriptions. Instead we re-read under the lock and upsert just this record
+    (optionally dropping a placeholder id it replaces).
+
+    `create_if_missing` is for the pre-dispatch write only. On the post-run
+    write the record being gone means the task was removed while the agent ran
+    (`gw task rm`, or a `gw sync` prune) — recreating it there would resurrect a
+    task whose worktree and branch are already deleted.
+    """
+
+    def _mutate(latest: Task) -> Task:
+        out = latest
+        if drop_session_id is not None:
+            out = out.model_copy(
+                update={"sessions": [s for s in out.sessions if s.session_id != drop_session_id]}
+            )
+        return sessions.upsert(out, record)
+
+    try:
+        return state.update_task(project, task.id, _mutate)
+    except TaskNotFoundError:
+        updated = _mutate(task)
+        if create_if_missing:
+            state.save_task(project, updated)
+        return updated
 
 
 def launch(
@@ -83,16 +123,20 @@ def launch(
     # might never get written. For Fresh sessions we synthesize an id; inline
     # mode reconciles to the agent's real id once the agent has exited.
     is_fresh = isinstance(choice, Fresh)
-    initial_id = (preassigned or _new_id()) if is_fresh else choice.session_id
+    if isinstance(choice, Fresh):
+        initial_id = preassigned or _new_id()
+        label: str | None = _label_from_prompt(choice.prompt)
+    else:
+        initial_id = choice.session_id
+        label = None
     pre_record = SessionRecord(
         agent=cast(AgentName, agent.name),
         session_id=initial_id,
         created_at=_now(),
         last_used_at=_now(),
-        label=_label_from_prompt(choice.prompt) if isinstance(choice, Fresh) else None,
+        label=label,
     )
-    task = sessions.upsert(task, pre_record)
-    state.save_task(project, task)
+    task = _persist_record(project, task, pre_record, create_if_missing=True)
 
     exit_code = windower.run(task=task, cmd=cmd, cwd=cwd, env=extra_env)
 
@@ -107,24 +151,23 @@ def launch(
     # only risk picking up an older transcript when the agent exited before
     # writing its own (e.g. user quit immediately).
     captured = None if preassigned else agent.capture_session_id(cwd)
+    drop_id: str | None = None
     if captured and captured != initial_id:
         if is_fresh:
             # Replace the synthetic placeholder with one keyed on the agent's
             # real id.
-            task = task.model_copy(
-                update={"sessions": [s for s in task.sessions if s.session_id != initial_id]}
-            )
-            real_record = pre_record.model_copy(update={"session_id": captured})
+            drop_id = initial_id
+            final_record = pre_record.model_copy(update={"session_id": captured})
         else:
             # Resume that forked into a new transcript: keep the resumed record
             # and add a new one alongside for the forked transcript.
-            real_record = pre_record.model_copy(update={"session_id": captured, "label": None})
-        real_record = sessions.refresh_summary(task, real_record)
-        task = sessions.upsert(task, real_record)
+            final_record = pre_record.model_copy(update={"session_id": captured, "label": None})
     else:
-        refreshed = sessions.refresh_summary(task, pre_record)
-        task = sessions.upsert(task, refreshed)
-    state.save_task(project, task)
+        final_record = pre_record
+    # Transcript parsing happens before we take the lock — it reads a JSONL file
+    # that can be large, and ADR 0004 keeps lock hold times to milliseconds.
+    final_record = sessions.refresh_summary(task, final_record)
+    task = _persist_record(project, task, final_record, drop_session_id=drop_id)
     return exit_code, task
 
 

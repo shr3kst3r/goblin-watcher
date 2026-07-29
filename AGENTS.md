@@ -11,6 +11,8 @@ Onboarding for AI coding agents (Claude Code, Codex, Gemini) and humans.
 - `gw run [PATH|TASK-ID]` — open a session picker for an existing task.
 - `gw scratch [NAME]` — a scratch space: a plain directory (no git repo, no project) at `~/goblin/scratch/<name>` with tracked, resumable sessions. Backed by the reserved `scratch` project (`Project.kind/Task.kind = "scratch"`); git/PR-flavored commands skip or reject scratch tasks. Clean up idle spaces with `gw task prune --scratch-older-than <days>`.
 
+Plus `gw sync` — a short-lived, idempotent background pass (Linear + session refresh, PR/CI state, cached git indicators, safe prune, edge-triggered notifications), scheduled via launchd by `gw sync install`. Not a daemon. `gw sync watch` follows it live; `gw sync status` reports installation and component health. See ADR 0005 and `docs/designs/background-sync.md`.
+
 Multiple sessions per task are allowed (e.g. two claude conversations on the same Linear ticket). Each session carries a rolling summary derived from the agent's transcript.
 
 ## Docs and scratch
@@ -32,7 +34,9 @@ src/goblin_watcher/
 ├── console.py             # Rich Console singleton + colored agent badges
 ├── errors.py              # GoblinError (root) + ProjectNotFoundError, TaskNotFoundError, ...
 ├── config.py              # TOML config at $XDG_CONFIG_HOME/goblin-watcher/config.toml
+├── locks.py               # advisory fcntl.flock on sidecar files (ADR 0004)
 ├── state.py               # JSON persistence: global registry + per-project tasks
+├── linear_state.py        # TTL-cached Linear workflow-state refresh (status + sync)
 ├── paths.py               # XDG resolution + per-project paths
 ├── models.py              # Pydantic: LinearIssue / Task / Project / SessionRecord / GlobalState
 ├── slug.py                # Branch / task-id slugification
@@ -45,7 +49,8 @@ src/goblin_watcher/
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini impls + launcher
 ├── windowing/             # Windower protocol + Inline + Tmux impls
-├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / doctor / history / version)
+├── sync/                  # background sync: engine, journal, indicator cache, notify, launchd
+├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / sync / doctor / history / version)
 └── templates/spawn_prompt.md
 ```
 
