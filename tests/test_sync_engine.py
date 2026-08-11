@@ -78,7 +78,12 @@ def notifier() -> _RecordingNotifier:
 
 
 def _run(notifier: _RecordingNotifier, **gh_returns: object):  # type: ignore[no-untyped-def]
-    """Run one pass with `gh` stubbed and notifications captured."""
+    """Run one pass with `gh` stubbed and notifications captured.
+
+    Task PR URLs in these tests are not github.com URLs, so they take
+    `_collect_pr_snapshots`' per-PR fallback and these two stubs are what it
+    calls. `test_pr_snapshots_are_batched_per_repo` covers the batched path.
+    """
     return patch.multiple(
         "goblin_watcher.sync.engine.gh",
         pr_state=lambda url: gh_returns.get("pr_state"),
@@ -172,6 +177,128 @@ def test_disabled_event_is_silent_but_still_journaled(demo, notifier) -> None:  
 
     assert notifier.sent == []
     assert report.notifications == []
+
+
+def test_prune_reuses_the_pr_state_the_pass_already_fetched(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """`merge_detection` must not re-ask `gh` about a PR the pass just looked up.
+
+    It used to, which made every PR-bearing task cost three `gh` round-trips a
+    pass instead of two.
+    """
+    project, task = demo
+    state.update_task(
+        project, task.id, lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1"})
+    )
+    # Uncommitted work blocks the prune, so the task survives and we can see
+    # that the prune step still recognised it as merged.
+    (task.worktree_path / "wip.txt").write_text("precious\n")
+
+    calls: list[str] = []
+
+    def _pr_state(url: str) -> str:
+        calls.append(url)
+        return "MERGED"
+
+    with (
+        patch.multiple(
+            "goblin_watcher.sync.engine.gh", pr_state=_pr_state, pr_checks=lambda url: None
+        ),
+        patch("goblin_watcher.sync.engine.resolve", return_value=notifier),
+    ):
+        report = engine.run_pass()
+
+    assert calls == ["https://gh/pr/1"], "PR state was fetched more than once in one pass"
+    assert report.pruned == []
+    assert any("not clean" in title for title, _b in notifier.sent), (
+        "prune step lost the merged signal"
+    )
+
+
+def test_a_merged_task_is_never_looked_up_again(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """MERGED is terminal: once recorded, the PR costs no further API calls.
+
+    Merged-but-dirty tasks accumulate (prune refuses to delete them), so
+    re-polling them every pass is the dominant cost this skip removes.
+    """
+    project, task = demo
+    state.update_task(
+        project,
+        task.id,
+        lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1", "status": "merged"}),
+    )
+    (task.worktree_path / "wip.txt").write_text("precious\n")
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("a merged PR must not be re-fetched")
+
+    with (
+        patch.multiple(
+            "goblin_watcher.sync.engine.gh",
+            pr_state=_boom,
+            pr_checks=_boom,
+            pr_snapshots=_boom,
+        ),
+        patch("goblin_watcher.sync.engine.resolve", return_value=notifier),
+    ):
+        report = engine.run_pass()
+
+    assert report.status == "ok"
+    assert [t.id for t in state.list_tasks(project)] == ["demo-1"]
+    entry = store.get_indicators("demo", "demo-1", max_age_seconds=3600)
+    assert entry is not None
+    assert entry.pr_state == "MERGED"
+    assert entry.checks is None, "CI on a merged PR is not actionable and must not be reported"
+
+
+def test_pr_state_is_fetched_once_per_repo_not_once_per_task(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """Two github.com PRs in one repo cost one batched query between them."""
+    project, task = demo
+    state.update_task(
+        project,
+        task.id,
+        lambda t: t.model_copy(update={"pr_url": "https://github.com/o/r/pull/1"}),
+    )
+    _git(project.root, "worktree", "add", "-q", "-b", "demo-2", str(project.root / "wt2"))
+    state.save_task(
+        project,
+        Task(
+            id="demo-2",
+            project="demo",
+            branch="demo-2",
+            worktree_path=project.root / "wt2",
+            base_branch="main",
+            created_at=datetime.now(UTC),
+            pr_url="https://github.com/o/r/pull/2",
+        ),
+    )
+
+    batched: list[tuple[str, list[int]]] = []
+
+    def _snapshots(repo: str, numbers: list[int]):  # type: ignore[no-untyped-def]
+        batched.append((repo, sorted(numbers)))
+        return {
+            1: engine.gh.PrSnapshot(state="OPEN", checks="passing"),
+            2: engine.gh.PrSnapshot(state="OPEN", checks="failing"),
+        }
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("a github.com PR must go through the batched query")
+
+    with (
+        patch.multiple(
+            "goblin_watcher.sync.engine.gh",
+            pr_snapshots=_snapshots,
+            pr_state=_boom,
+            pr_checks=_boom,
+        ),
+        patch("goblin_watcher.sync.engine.resolve", return_value=notifier),
+        patch("goblin_watcher.sync.engine.merge_detection", return_value=None),
+    ):
+        engine.run_pass()
+
+    assert batched == [("o/r", [1, 2])], "expected exactly one query covering both PRs"
+    assert store.get_indicators("demo", "demo-1", max_age_seconds=3600).checks == "passing"  # type: ignore[union-attr]
+    assert store.get_indicators("demo", "demo-2", max_age_seconds=3600).checks == "failing"  # type: ignore[union-attr]
 
 
 def test_prune_removes_merged_and_clean_task(demo, notifier) -> None:  # type: ignore[no-untyped-def]
