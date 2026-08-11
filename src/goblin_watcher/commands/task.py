@@ -135,19 +135,23 @@ def _backfill_prs(proj: Project, tasks: list[Task]) -> list[Task]:
 
 
 def _first_pr_for_task(prs: list[dict[str, str]], task: Task) -> dict[str, str] | None:
-    """Match a PR to a task. Exact branch wins; otherwise fall back to Linear-id basename.
+    """Match a PR to a task. Exact branch wins; otherwise fall back to ticket-id basename.
 
     The fallback exists because (a) re-created tasks land on `<branch>-2/-3/...`
     while the original PR stays on the bare branch, and (b) teammates often
     open PRs from prefixed branches like `<user>/<id>-<slug>`. In both cases the
-    Linear identifier is in the branch basename and that's the durable anchor.
+    ticket identifier (`eng-123`, or `gh-42` for a GitHub issue) is in the branch
+    basename and that's the durable anchor.
     """
     for p in prs:
         if p["headRefName"] == task.branch:
             return p
-    if not task.linear:
+    if task.linear:
+        needle = task.linear.identifier.lower()
+    elif task.github_issue:
+        needle = f"gh-{task.github_issue.number}"
+    else:
         return None
-    needle = task.linear.identifier.lower()
     for p in prs:
         basename = p["headRefName"].rsplit("/", 1)[-1].lower()
         if basename == needle or basename.startswith(needle + "-"):
@@ -195,6 +199,10 @@ def show(
     console.print(f"  status        {task.status}")
     console.print(f"  pr_url        {task.pr_url or '(none)'}")
     console.print(f"  linear        {task.linear.identifier if task.linear else '(none)'}")
+    if task.github_issue is not None:
+        issue = task.github_issue
+        # Parens, not brackets: Rich would read `[open]` as a markup tag and eat it.
+        console.print(f"  github issue  {issue.reference} ({issue.state.lower()}) {issue.url}")
     console.print(f"  created_at    {task.created_at.isoformat()}")
     if task.sessions:
         console.print(f"  sessions      {len(task.sessions)} (run `gw session ls`)")

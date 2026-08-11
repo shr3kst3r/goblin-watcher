@@ -13,7 +13,7 @@ from goblin_watcher import prompt_addition, sessions, state
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.console import console
 from goblin_watcher.errors import TaskNotFoundError
-from goblin_watcher.models import AgentName, Project, SessionRecord, Task
+from goblin_watcher.models import AgentName, GhIssue, Project, SessionRecord, Task
 from goblin_watcher.windowing.base import Windower
 
 
@@ -186,7 +186,6 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None) -> str:
     agent treats it as the task to begin working on.
     """
     templates_dir = Path(__file__).parent.parent / "templates"
-    linear = task.linear
     addition = prompt_addition.resolve_for_task_project(task.project).strip()
     addition_block = f"{addition}\n\n" if addition else ""
     prompt = (user_prompt or "").strip()
@@ -209,10 +208,10 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None) -> str:
     template = (templates_dir / "spawn_prompt.md").read_text()
     return template.format(
         intro=intro,
-        linear_id=linear.identifier if linear else task.id.upper(),
-        title=linear.title if linear else task.id,
+        ticket_id=task.ticket_id,
+        title=task.ticket_title or task.id,
         repos_block=_format_repos_block(task),
-        description=_format_linear_context(linear),
+        description=_format_ticket_context(task),
         addition_block=addition_block,
         trailer=trailer,
     )
@@ -238,6 +237,30 @@ def _format_repos_block(task: Task) -> str:
             f"- {repo.project}: {repo.worktree_path}  (branch {repo.branch} off {repo.base_branch})"
         )
     return "\n".join(lines)
+
+
+def _format_ticket_context(task: Task) -> str:
+    """Render the tracking item's description block for the seed prompt.
+
+    Linear tickets contribute their description plus the comment thread; GitHub
+    issues contribute their body. A task with neither says so explicitly, so the
+    agent knows the thin prompt is the whole brief rather than a truncation.
+    """
+    if task.linear is not None:
+        return _format_linear_context(task.linear)
+    if task.github_issue is not None:
+        return _format_github_issue_context(task.github_issue)
+    return "(no Linear issue or GitHub issue attached — fresh task)"
+
+
+def _format_github_issue_context(issue: GhIssue) -> str:
+    header = f"GitHub issue {issue.reference} ({issue.state.lower()}): {issue.url}"
+    if issue.labels:
+        header += f"\nLabels: {', '.join(issue.labels)}"
+    body = (issue.body or "").strip()
+    if not body:
+        return f"{header}\n\n(The issue has no description.)"
+    return f"{header}\n\n{body}"
 
 
 def _format_linear_context(linear: object) -> str:

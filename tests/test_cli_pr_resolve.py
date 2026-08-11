@@ -280,3 +280,44 @@ def test_pr_open_notify_linear_failure_is_nonfatal(
     # The PR itself still landed on the task.
     [persisted] = state.list_tasks(proj)
     assert persisted.pr_url == "https://github.com/x/y/pull/12"
+
+
+def test_pr_open_titles_from_the_github_issue_and_closes_it(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """An issue-backed task gets the issue's title and a `Closes` line."""
+    from goblin_watcher.models import GhIssue
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    state.register_project(proj.model_copy(update={"repo_url": "git@github.com:org/repo.git"}))
+    state.save_task(
+        proj,
+        task.model_copy(
+            update={
+                "github_issue": GhIssue(
+                    number=42,
+                    repo="org/repo",
+                    title="Add rate limit",
+                    body="We need a token bucket.",
+                    state="OPEN",
+                    url="https://github.com/org/repo/issues/42",
+                )
+            }
+        ),
+    )
+
+    with (
+        patch("goblin_watcher.commands.pr.git.push"),
+        patch("goblin_watcher.commands.pr.gh.pr_for_branch", return_value=None),
+        patch(
+            "goblin_watcher.commands.pr.gh.create_pr",
+            return_value="https://github.com/org/repo/pull/9",
+        ) as create,
+    ):
+        res = CliRunner().invoke(app, ["pr", "open", task.id])
+    assert res.exit_code == 0, res.output
+
+    assert create.call_args.kwargs["title"] == "Add rate limit"
+    assert "Closes #42 — Add rate limit" in create.call_args.kwargs["body"]

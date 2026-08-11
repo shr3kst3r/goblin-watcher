@@ -1,4 +1,4 @@
-"""Thin wrapper around the `gh` CLI for PR operations."""
+"""Thin wrapper around the `gh` CLI for PR and issue operations."""
 
 from __future__ import annotations
 
@@ -31,6 +31,66 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
 
 
 _PR_URL_RE = re.compile(r"https://github\.com/[^\s]+/pull/\d+")
+
+_HTTPS_REMOTE_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+_SSH_REMOTE_RE = re.compile(r"git@github\.com:(?P<repo>.+)")
+_ISSUE_URL_RE = re.compile(
+    r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/issues/(?P<number>\d+)/?$"
+)
+# `owner/repo#42` — the cross-repo shorthand `gh` itself accepts.
+_ISSUE_QUALIFIED_RE = re.compile(r"^(?P<repo>[^/\s#]+/[^/\s#]+)#(?P<number>\d+)$")
+_ISSUE_NUMBER_RE = re.compile(r"^#?(?P<number>\d+)$")
+
+
+def normalize_repo(url: str | None) -> str | None:
+    """Reduce a git remote URL to its lowercased `owner/repo`, else None.
+
+    Handles `https://github.com/owner/repo(.git)` and
+    `git@github.com:owner/repo.git`.
+    """
+    if not url:
+        return None
+    url = url.strip()
+    https = _HTTPS_REMOTE_RE.match(url)
+    if https is not None:
+        return https.group("repo").lower()
+    ssh = _SSH_REMOTE_RE.match(url)
+    if ssh is not None:
+        return ssh.group("repo").removesuffix(".git").lower()
+    return None
+
+
+@dataclass(frozen=True)
+class IssueRef:
+    """A parsed `--issue` argument.
+
+    `repo` is None for the bare-number form (`42`), which only resolves against
+    a repository the caller supplies; it is `owner/repo` for the URL and
+    `owner/repo#42` forms, which name their repository explicitly.
+    """
+
+    repo: str | None
+    number: int
+
+
+def parse_issue_ref(ref: str) -> IssueRef:
+    """Parse `42`, `#42`, `owner/repo#42`, or a full issue URL into an `IssueRef`."""
+    text = ref.strip()
+    url = _ISSUE_URL_RE.match(text)
+    if url is not None:
+        return IssueRef(
+            repo=url.group("repo").removesuffix(".git").lower(), number=int(url["number"])
+        )
+    qualified = _ISSUE_QUALIFIED_RE.match(text)
+    if qualified is not None:
+        return IssueRef(repo=qualified.group("repo").lower(), number=int(qualified["number"]))
+    bare = _ISSUE_NUMBER_RE.match(text)
+    if bare is not None:
+        return IssueRef(repo=None, number=int(bare["number"]))
+    raise GoblinError(
+        f"{ref!r} is not a GitHub issue reference.",
+        hint="Pass a number (42), owner/repo#42, or an issue URL.",
+    )
 
 
 @dataclass(frozen=True)
@@ -85,6 +145,92 @@ def pr_view(pr: str, *, cwd: Path) -> PrInfo:
         state=data.get("state", ""),
         is_cross_repository=bool(data.get("isCrossRepository", False)),
     )
+
+
+@dataclass(frozen=True)
+class IssueInfo:
+    """A GitHub issue as reported by `gh issue view --json`."""
+
+    number: int
+    repo: str
+    title: str
+    body: str
+    url: str
+    state: str
+    labels: tuple[str, ...]
+    assignees: tuple[str, ...]
+
+
+def issue_view(ref: IssueRef, *, cwd: Path) -> IssueInfo:
+    """Look up a GitHub issue via `gh issue view`.
+
+    `ref.repo` is passed as `--repo` when set, so the cross-repo forms resolve
+    regardless of `cwd`; a bare number resolves against the repo at `cwd`.
+    The returned `repo` is always the issue's own `owner/repo`, read back off
+    the URL `gh` reports rather than assumed from the input.
+    """
+    args = [
+        "issue",
+        "view",
+        str(ref.number),
+        "--json",
+        "number,title,body,url,state,labels,assignees",
+    ]
+    if ref.repo is not None:
+        args.extend(["--repo", ref.repo])
+    res = _run(args, cwd=cwd)
+    if res.returncode != 0:
+        label = f"{ref.repo}#{ref.number}" if ref.repo else f"#{ref.number}"
+        raise GoblinError(
+            f"No GitHub issue {label} found.",
+            hint=(res.stderr or res.stdout).strip() or None,
+        )
+    import json
+
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError as e:
+        raise GoblinError(
+            f"`gh issue view {ref.number}` returned output that wasn't valid JSON.",
+            hint=res.stdout.strip() or None,
+        ) from e
+    url = data.get("url", "")
+    from_url = _ISSUE_URL_RE.match(url)
+    repo = from_url.group("repo").lower() if from_url else (ref.repo or "")
+    return IssueInfo(
+        number=int(data.get("number", ref.number)),
+        repo=repo,
+        title=data.get("title", ""),
+        body=data.get("body") or "",
+        url=url,
+        state=str(data.get("state", "")),
+        labels=tuple(
+            str(item.get("name", "")) for item in data.get("labels") or [] if item.get("name")
+        ),
+        assignees=tuple(
+            str(item.get("login", "")) for item in data.get("assignees") or [] if item.get("login")
+        ),
+    )
+
+
+def issue_state(repo: str, number: int) -> str | None:
+    """Return an issue's state (`OPEN`, `CLOSED`) or None if `gh` can't read it.
+
+    Best-effort, like `pr_state`: a missing `gh` or a failed lookup reads as "no
+    signal" so callers keep whatever they had cached.
+    """
+    if shutil.which("gh") is None:
+        return None
+    res = _run(["issue", "view", str(number), "--repo", repo, "--json", "state"])
+    if res.returncode != 0:
+        return None
+    import json
+
+    try:
+        value = json.loads(res.stdout).get("state")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return str(value) if value else None
 
 
 def create_pr(

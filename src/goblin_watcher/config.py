@@ -55,6 +55,9 @@ class DefaultsConfig(BaseModel):
     # `gw status` re-fetches it. One API round-trip per Linear-backed task is
     # slow with many tasks; the cache keeps status snappy. 0 = always fetch.
     linear_state_ttl_seconds: int = 300
+    # Same, for a task's cached GitHub issue state (`gh issue view`). Cheaper
+    # than the Linear round-trip but still a subprocess per issue-backed task.
+    github_issue_state_ttl_seconds: int = 300
     # A session whose transcript was modified within this window shows as
     # `● active` in `gw status`; older activity shows as `idle <age>`.
     activity_active_seconds: int = 120

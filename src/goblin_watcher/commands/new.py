@@ -13,7 +13,7 @@ from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import agent_badge, console, print_settings, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.linear import LinearClient, parse_identifier
-from goblin_watcher.models import LinearIssue, Project, Task
+from goblin_watcher.models import GhIssue, LinearIssue, Project, Task
 from goblin_watcher.slug import branch_slug, random_branch_name, slugify
 from goblin_watcher.task_resolver import resolve_project
 from goblin_watcher.windowing import get_windower
@@ -166,6 +166,7 @@ def _handle_existing(
 
 def _source_label(
     linear: str | None,
+    issue: str | None,
     branch: str | None,
     branch_name: str | None,
     branch_auto: bool,
@@ -175,6 +176,8 @@ def _source_label(
 ) -> str:
     if linear is not None:
         return f"--linear {linear}"
+    if issue is not None:
+        return f"--issue {issue}"
     if pr is not None:
         return f"--pr {pr}"
     if branch is not None:
@@ -201,6 +204,11 @@ def new(
         "--branch-auto",
         help="New branch with an auto-generated name (e.g. goblin-watcher-falcon).",
     ),
+    issue: str | None = typer.Option(
+        None,
+        "--issue",
+        help="GitHub issue to work on: a number (42), owner/repo#42, or an issue URL.",
+    ),
     pr: str | None = typer.Option(
         None,
         "--pr",
@@ -211,8 +219,8 @@ def new(
         "--from",
         help=(
             "Base branch when creating a new branch. Applies to --linear, "
-            "--branch-name, and --branch-auto. If the base only exists on "
-            "origin, it is fetched automatically."
+            "--issue, --branch-name, and --branch-auto. If the base only exists "
+            "on origin, it is fetched automatically."
         ),
     ),
     dir: Path | None = typer.Option(None, "--dir", help="Existing directory to adopt as the task."),
@@ -227,8 +235,8 @@ def new(
         [],
         "--with-project",
         help="Additional registered project(s) to include in this task (repeatable). "
-        "Creates a multi-repo workspace; only valid with --linear/--branch/"
-        "--branch-name/--branch-auto.",
+        "Creates a multi-repo workspace; only valid with --linear/--issue/"
+        "--branch/--branch-name/--branch-auto.",
         autocompletion=complete_projects,
     ),
     repo: str | None = typer.Option(None, "--repo", help="Repo URL to clone if missing."),
@@ -277,7 +285,7 @@ def new(
         help="Seed the session with `/codex:adversarial-review`. Forces --agent claude.",
     ),
 ) -> None:
-    """Create a task from a source (Linear, GitHub PR, branch, new branch, or directory)."""
+    """Create a task from a source (Linear, GitHub issue or PR, branch, new branch, or dir)."""
     if prompt is not None and no_launch:
         raise GoblinError(
             "--prompt has no effect with --no-launch (no session is started).",
@@ -301,26 +309,33 @@ def new(
                 hint=f"Drop --agent {agent}, or drop --adversarial-review.",
             )
         agent = "claude"
-    sources: list[object] = [s for s in (linear, branch, branch_name, dir, pr) if s is not None]
+    sources: list[object] = [
+        s for s in (linear, issue, branch, branch_name, dir, pr) if s is not None
+    ]
     if branch_auto:
         sources.append("auto")
     if len(sources) != 1:
         raise GoblinError(
-            "Specify exactly one source: --linear, --branch, --branch-name, "
+            "Specify exactly one source: --linear, --issue, --branch, --branch-name, "
             "--branch-auto, --dir, or --pr.",
-            hint="e.g. `gw new --branch-auto` or `gw new --pr 42`.",
+            hint="e.g. `gw new --branch-auto` or `gw new --issue 42`.",
         )
 
     if with_project and (dir is not None or pr is not None):
         raise GoblinError(
             "--with-project is not supported with --dir or --pr.",
-            hint="Use --linear, --branch, --branch-name, or --branch-auto for multi-repo tasks.",
+            hint=(
+                "Use --linear, --issue, --branch, --branch-name, or --branch-auto "
+                "for multi-repo tasks."
+            ),
         )
 
     # --rm-force implies --rm; `force` lets removal proceed past a dirty worktree.
     remove = rm or rm_force
     if linear is not None:
         task = _from_linear(linear, project, repo, title, from_, remove, rm_force)
+    elif issue is not None:
+        task = _from_issue(issue, project, repo, title, from_, remove, rm_force)
     elif pr is not None:
         task = _from_pr(pr, project, repo, title, remove, rm_force)
     elif dir is not None:
@@ -347,7 +362,7 @@ def new(
     agent_name = agent or (cfg.defaults.agent) or "claude"
     windowing_mode = windowing or cfg.defaults.windowing
     unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
-    source_label = _source_label(linear, branch, branch_name, branch_auto, dir, pr, task)
+    source_label = _source_label(linear, issue, branch, branch_name, branch_auto, dir, pr, task)
 
     print_success(f"Created task {task.id!r} on branch {task.branch!r}")
     settings: list[tuple[str, str]] = [
@@ -365,6 +380,9 @@ def new(
         settings.append(("title", title))
     if task.linear is not None:
         settings.append(("linear", f"{task.linear.identifier}: {task.linear.title}"))
+    if task.github_issue is not None:
+        settings.append(("issue", f"{task.github_issue.reference}: {task.github_issue.title}"))
+        settings.append(("issue url", task.github_issue.url))
     if pr is not None and task.pr_url:
         settings.append(("pr", task.pr_url))
     settings += [
@@ -503,7 +521,6 @@ def _from_existing_branch(
 
 
 _PR_URL_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/\d+")
-_SSH_REMOTE_RE = re.compile(r"git@github\.com:(?P<repo>.+)")
 
 
 def _parse_pr_url(pr: str) -> str | None:
@@ -518,24 +535,6 @@ def _parse_pr_url(pr: str) -> str | None:
     return m.group("repo").removesuffix(".git").lower()
 
 
-def _normalize_repo(url: str | None) -> str | None:
-    """Reduce a git remote URL to its lowercased `owner/repo`, else None.
-
-    Handles `https://github.com/owner/repo(.git)` and
-    `git@github.com:owner/repo.git`.
-    """
-    if not url:
-        return None
-    url = url.strip()
-    https = re.match(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
-    if https is not None:
-        return https.group("repo").lower()
-    ssh = _SSH_REMOTE_RE.match(url)
-    if ssh is not None:
-        return ssh.group("repo").removesuffix(".git").lower()
-    return None
-
-
 def _project_for_repo(owner_repo: str) -> Project | None:
     """Find a registered project whose remote resolves to `owner/repo`."""
     needle = owner_repo.lower()
@@ -544,7 +543,7 @@ def _project_for_repo(owner_repo: str) -> Project | None:
             proj = state.get_project(name)
         except ProjectNotFoundError:
             continue
-        if _normalize_repo(proj.repo_url) == needle:
+        if gh.normalize_repo(proj.repo_url) == needle:
             return proj
     return None
 
@@ -668,30 +667,7 @@ def _resolve_or_register_linear_project(
             f"Linear team {team_key!r}.",
             hint=f"Run `gw project info {name}` and set its --team, or pick another --project.",
         )
-
-    projects_root = paths.projects_root()
-    projects_root.mkdir(parents=True, exist_ok=True)
-    dest = projects_root / name
-    if dest.exists():
-        raise GoblinError(
-            f"{dest} already exists; refusing to clone over it.",
-            hint=f"Pass --project to use an existing project, or move {dest} aside.",
-        )
-    console.print(f"Cloning [bold]{repo_url}[/] into {dest}…")
-    root = git.clone(repo_url, dest)
-    project = Project(
-        name=name,
-        root=root,
-        repo_url=repo_url,
-        default_branch=git.default_branch(root),
-        branch_prefix="",
-        linear_team_key=team_key.upper(),
-        created_at=_now(),
-    )
-    state.register_project(project)
-    git.add_to_local_exclude(root, ".goblin/")
-    git.add_to_local_exclude(root, ".worktrees/")
-    return project
+    return _clone_and_register_project(name, repo_url, team_key=team_key.upper())
 
 
 def _from_linear(
@@ -727,6 +703,169 @@ def _from_linear(
         id=task_id,
         project=proj.name,
         linear=_clone_linear_issue(issue),
+        branch=branch,
+        worktree_path=worktree_dir,
+        base_branch=base,
+        created_at=_now(),
+    )
+
+
+def _project_for_cwd() -> Project | None:
+    """The registered project containing the cwd, or None when outside one."""
+    try:
+        return _find_project_containing(Path.cwd())
+    except GoblinError:
+        return None
+
+
+def _clone_and_register_project(name: str, repo_url: str, team_key: str | None = None) -> Project:
+    """Clone `repo_url` into `~/goblin/<name>/` and register it as a project."""
+    if name in state.load_global().projects:
+        raise GoblinError(
+            f"A project named {name!r} is already registered.",
+            hint=f"Pass --project {name} to use it, or --project <other> to pick another.",
+        )
+    projects_root = paths.projects_root()
+    projects_root.mkdir(parents=True, exist_ok=True)
+    dest = projects_root / name
+    if dest.exists():
+        raise GoblinError(
+            f"{dest} already exists; refusing to clone over it.",
+            hint=f"Pass --project to use an existing project, or move {dest} aside.",
+        )
+    console.print(f"Cloning [bold]{repo_url}[/] into {dest}…")
+    root = git.clone(repo_url, dest)
+    project = Project(
+        name=name,
+        root=root,
+        repo_url=repo_url,
+        default_branch=git.default_branch(root),
+        branch_prefix="",
+        linear_team_key=team_key,
+        created_at=_now(),
+    )
+    state.register_project(project)
+    git.add_to_local_exclude(root, ".goblin/")
+    git.add_to_local_exclude(root, ".worktrees/")
+    return project
+
+
+def _project_for_repo_url(repo_url: str) -> Project:
+    """The registered project for `repo_url`, cloning and registering it if new.
+
+    The project name comes from the *URL's* repo, never the issue's — with a
+    cross-repo tracking issue those differ, and `--repo` names where the work
+    happens.
+    """
+    normalized = gh.normalize_repo(repo_url)
+    if normalized is not None:
+        existing = _project_for_repo(normalized)
+        if existing is not None:
+            return existing
+        name = slugify(normalized.split("/")[-1])
+    else:
+        # Not a GitHub URL (a local path, another host): fall back to the last
+        # path segment, the same shape `git clone` would give the directory.
+        name = slugify(repo_url.rstrip("/").split("/")[-1].removesuffix(".git"))
+    return _clone_and_register_project(name, repo_url)
+
+
+def _resolve_issue_project(
+    ref: gh.IssueRef, project_override: str | None, repo_url: str | None
+) -> Project:
+    """Resolve the project a `--issue` task works in.
+
+    Precedence: `--project` → the issue's own repo matched against registered
+    projects → the project containing the cwd → `--repo` (reuses a registered
+    project for that URL, else clones + registers).
+
+    The cwd fallback is what makes the cross-repo form usable: when the tracking
+    issue lives in another repository there is nothing in the reference that
+    names the repo to *work* in, so the surrounding worktree decides. A bare
+    number has no repo of its own at all, so it resolves through the cwd, then
+    `--repo`, then the project picker — all before the issue is even fetched,
+    since `gh issue view 42` is meaningless without a repo.
+    """
+    if project_override:
+        return state.get_project(project_override.strip().lower())
+
+    if ref.repo is None:
+        here = _project_for_cwd()
+        if here is not None:
+            return here
+        if repo_url is not None:
+            return _project_for_repo_url(repo_url)
+        return resolve_project(None)
+
+    matched = _project_for_repo(ref.repo)
+    if matched is not None:
+        return matched
+
+    here = _project_for_cwd()
+    if here is not None:
+        console.print(
+            f"[muted]Issue {ref.repo}#{ref.number} lives outside this project; "
+            f"working in {here.name} (from the current directory).[/]"
+        )
+        return here
+
+    if repo_url is not None:
+        return _project_for_repo_url(repo_url)
+
+    raise GoblinError(
+        f"No registered project matches the issue's repo {ref.repo!r}.",
+        hint=(
+            "Pass --project <name> to say which repo the work happens in, run from "
+            "inside that project's worktree, or pass --repo <url> to clone and "
+            "register it."
+        ),
+    )
+
+
+def _from_issue(
+    issue_ref: str,
+    project_override: str | None,
+    repo_url: str | None,
+    title: str | None,
+    from_: str | None,
+    rm: bool,
+    force: bool,
+) -> Task:
+    del title  # the issue's title supersedes
+    ref = gh.parse_issue_ref(issue_ref)
+    proj = _resolve_issue_project(ref, project_override, repo_url)
+    _reject_scratch_project(proj)
+    info = gh.issue_view(ref, cwd=proj.root)
+
+    # `gh-<number>` is unique per repo, not globally: a cross-repo issue #42
+    # can collide with the same-repo #42 already tracked here. We let the
+    # existing "task already exists" path refuse rather than inventing a
+    # disambiguating id for a collision that hasn't shown up in practice.
+    task_id = f"gh-{info.number}"
+    _handle_existing(proj, task_id, rm=rm, force=force, delete_branch=True, delete_worktree=True)
+
+    base = from_ or proj.default_branch
+    _refresh_base(proj.root, base)
+    branch = _ensure_unique_branch(
+        proj.root, branch_slug(task_id, info.title, prefix=proj.branch_prefix)
+    )
+    worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
+    if not worktree_dir.exists():
+        git.worktree_add(proj.root, worktree_dir, branch, base=base)
+    return Task(
+        id=task_id,
+        project=proj.name,
+        github_issue=GhIssue(
+            number=info.number,
+            repo=info.repo,
+            title=info.title,
+            body=info.body or None,
+            state=info.state,
+            url=info.url,
+            labels=list(info.labels),
+            assignees=list(info.assignees),
+        ),
+        github_issue_state_updated_at=_now(),
         branch=branch,
         worktree_path=worktree_dir,
         base_branch=base,

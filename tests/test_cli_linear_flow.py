@@ -6,7 +6,7 @@ from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
 from goblin_watcher import state
-from goblin_watcher.cli import _rewrite_linear_shortcut, app
+from goblin_watcher.cli import _rewrite_task_shortcut, app
 from goblin_watcher.linear.client import LINEAR_ENDPOINT
 
 
@@ -168,7 +168,7 @@ def test_linear_shortcut_dispatcher_drives_new(
 
     _mock_issue(httpx_mock, "ENG-99", "Hello")
 
-    rewritten = _rewrite_linear_shortcut(["ENG-99", "--no-launch"])
+    rewritten = _rewrite_task_shortcut(["ENG-99", "--no-launch"])
     res = runner.invoke(app, rewritten)
     assert res.exit_code == 0, res.output
     proj = state.get_project("eng")

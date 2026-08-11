@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from goblin_watcher import config, description, gh, git, sessions, state
+from goblin_watcher import config, description, gh, git, github_state, sessions, state
 from goblin_watcher.commands.task import (
     destroy_task,
     dirty_worktrees,
@@ -360,6 +360,15 @@ def _sync_task(
             current = linear.refresh(proj, current)
 
         guard("linear", _linear)
+
+    # 2b. GitHub issue open/closed state (TTL-gated inside the module).
+    if current.github_issue is not None:
+
+        def _github_issue() -> None:
+            nonlocal current
+            current = github_state.refresh(proj, current)
+
+        guard("github-issue", _github_issue)
 
     # 3. Reconcile + snippet summaries. Discovery is outside the task lock.
     def _reconcile() -> None:

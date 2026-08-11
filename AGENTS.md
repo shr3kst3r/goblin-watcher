@@ -6,8 +6,8 @@ Onboarding for AI coding agents (Claude Code, Codex, Gemini) and humans.
 
 **goblin-watcher** (`gw`) is a CLI that orchestrates AI coding agents in git worktrees. It replaces tools like Conductor and Superset. Four entry points:
 
-- `gw <LINEAR-ID>` — auto-pilot: clone/find repo, create branch + worktree from a Linear ticket, spawn the agent.
-- `gw new [--linear|--pr|--branch|--branch-name|--dir]` — explicit task creation from any source. `--pr` takes a GitHub PR number or URL and checks out its head branch (a URL also auto-resolves the project by repo).
+- `gw <LINEAR-ID>` — auto-pilot: clone/find repo, create branch + worktree from a Linear ticket, spawn the agent. `gw gh-<N>` is the same thing for a GitHub issue in the current repo (that pattern is claimed before the Linear one, so a Linear team keyed `GH` must use `gw new --linear GH-42`).
+- `gw new [--linear|--issue|--pr|--branch|--branch-name|--dir]` — explicit task creation from any source. `--pr` takes a GitHub PR number or URL and checks out its head branch (a URL also auto-resolves the project by repo). `--issue` takes a GitHub issue as `42`, `owner/repo#42`, or a URL; the task id is `gh-<N>` and the qualified forms support a tracking issue that lives outside the repo being worked in.
 - `gw run [PATH|TASK-ID]` — open a session picker for an existing task.
 - `gw scratch [NAME]` — a scratch space: a plain directory (no git repo, no project) at `~/goblin/scratch/<name>` with tracked, resumable sessions. Backed by the reserved `scratch` project (`Project.kind/Task.kind = "scratch"`); git/PR-flavored commands skip or reject scratch tasks. Clean up idle spaces with `gw task prune --scratch-older-than <days>`.
 
@@ -37,11 +37,12 @@ src/goblin_watcher/
 ├── locks.py               # advisory fcntl.flock on sidecar files (ADR 0004)
 ├── state.py               # JSON persistence: global registry + per-project tasks
 ├── linear_state.py        # TTL-cached Linear workflow-state refresh (status + sync)
+├── github_state.py        # TTL-cached GitHub issue-state refresh (status + sync)
 ├── paths.py               # XDG resolution + per-project paths
-├── models.py              # Pydantic: LinearIssue / Task / Project / SessionRecord / GlobalState
+├── models.py              # Pydantic: LinearIssue / GhIssue / Task / Project / SessionRecord / GlobalState
 ├── slug.py                # Branch / task-id slugification
 ├── git.py                 # Thin subprocess wrapper around git (clone, worktree_*, push, ...)
-├── gh.py                  # Thin wrapper around the `gh` CLI for PR ops
+├── gh.py                  # Thin wrapper around the `gh` CLI for PR + issue ops
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)

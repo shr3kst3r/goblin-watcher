@@ -433,3 +433,67 @@ def test_task_rename_ambiguous_without_project_errors(isolated_xdg: Path, tmp_pa
     assert res.exit_code != 0
     assert isinstance(res.exception, GoblinError)
     assert "more than one project" in res.exception.message
+
+
+def test_task_show_prints_the_github_issue(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.models import GhIssue
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    state.save_task(
+        proj,
+        task.model_copy(
+            update={
+                "github_issue": GhIssue(
+                    number=42,
+                    repo="org/repo",
+                    title="Add rate limit",
+                    state="OPEN",
+                    url="https://github.com/org/repo/issues/42",
+                )
+            }
+        ),
+    )
+
+    res = CliRunner().invoke(app, ["task", "show", task.id])
+    assert res.exit_code == 0, res.output
+    assert "org/repo#42" in res.output
+    # The state must survive Rich's markup parser (`[open]` would be eaten).
+    assert "(open)" in res.output
+    assert "https://github.com/org/repo/issues/42" in res.output
+
+
+def test_first_pr_for_task_matches_a_github_issue_branch() -> None:
+    """A re-created `gh-42` task lands on `gh-42-...-2`; the original PR is still
+    matched via the `gh-42` basename."""
+    from datetime import UTC, datetime
+
+    from goblin_watcher.commands.task import _first_pr_for_task
+    from goblin_watcher.models import GhIssue, Task
+
+    issue = GhIssue(
+        number=42,
+        repo="org/repo",
+        title="Add rate limit",
+        state="OPEN",
+        url="https://github.com/org/repo/issues/42",
+    )
+    task = Task(
+        id="gh-42",
+        project="alpha",
+        github_issue=issue,
+        branch="gh-42-add-rate-limit-2",
+        worktree_path=Path("/tmp/wt"),
+        base_branch="main",
+        created_at=datetime.now(UTC),
+    )
+    prs = [
+        {"headRefName": "unrelated", "url": "u1", "state": "OPEN", "number": "1"},
+        {"headRefName": "dennis/gh-42-add-rate-limit", "url": "u2", "state": "OPEN", "number": "2"},
+    ]
+    assert _first_pr_for_task(prs, task) == prs[1]
+
+    # No issue and no exact branch → no match, rather than a wrong one.
+    plain = task.model_copy(update={"github_issue": None})
+    assert _first_pr_for_task(prs, plain) is None

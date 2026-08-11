@@ -1,17 +1,17 @@
 ---
 name: goblin-watcher
-description: "Drive the goblin-watcher CLI (`gw`): create tasks (branch + git worktree) from Linear tickets, GitHub PRs, or branches, manage agent sessions, open PRs, and prune merged work. Trigger when the user mentions gw or goblin-watcher, or asks to 'spin up an agent on ENG-123', 'create a task/worktree for this ticket/PR/branch', 'list my gw tasks/sessions', 'open a PR for this task', 'prune merged tasks', or 'make a scratch space'."
-argument-hint: "<LINEAR-ID> | new --pr <n> | status | task prune"
+description: "Drive the goblin-watcher CLI (`gw`): create tasks (branch + git worktree) from Linear tickets, GitHub issues, GitHub PRs, or branches, manage agent sessions, open PRs, and prune merged work. Trigger when the user mentions gw or goblin-watcher, or asks to 'spin up an agent on ENG-123', 'work on issue 42', 'create a task/worktree for this ticket/issue/PR/branch', 'list my gw tasks/sessions', 'open a PR for this task', 'prune merged tasks', or 'make a scratch space'."
+argument-hint: "<LINEAR-ID> | gh-<n> | new --issue <n> | new --pr <n> | status | task prune"
 allowed-tools: [Bash]
 ---
 
 # goblin-watcher (`gw`) — parallel AI coding agents in git worktrees
 
-`gw` turns a Linear ticket / GitHub PR / branch into a **task**: a branch + git
-worktree under `<project_root>/.worktrees/<branch>/`, with one or more resumable
-agent **sessions** (claude / codex / gemini) on top. Published on `$PATH` via
-spg, so plain `gw ...` works anywhere; inside the goblin-watcher repo itself,
-`uv run gw ...` also works.
+`gw` turns a Linear ticket / GitHub issue / GitHub PR / branch into a **task**:
+a branch + git worktree under `<project_root>/.worktrees/<branch>/`, with one or
+more resumable agent **sessions** (claude / codex / gemini) on top. Published on
+`$PATH` via spg, so plain `gw ...` works anywhere; inside the goblin-watcher
+repo itself, `uv run gw ...` also works.
 
 ## Agent rules — read first
 
@@ -47,6 +47,7 @@ spg, so plain `gw ...` works anywhere; inside the goblin-watcher repo itself,
 | User intent | Command |
 |---|---|
 | "spin up an agent on ENG-123" (they'll run it) | `gw new --linear ENG-123 --no-launch`, then user runs `gw ENG-123` or `gw run eng-123` |
+| "work on GitHub issue 42" | `gw new --issue 42 --project <name> --no-launch` (task id `gh-42`; `owner/repo#42` or an issue URL also work) |
 | "create a task from PR 42 / a PR URL" | `gw new --pr 42 --project <name> --no-launch` (a URL auto-resolves the project) |
 | "task from an existing branch" | `gw new --branch feat/foo --project <name> --no-launch` |
 | "fresh task, new branch" | `gw new --branch-name spike/foo --title "..." --project <name> --no-launch` (or `--branch-auto`) |
@@ -80,6 +81,12 @@ spg, so plain `gw ...` works anywhere; inside the goblin-watcher repo itself,
 - **`gw <LINEAR-ID>` dispatcher**: `gw ENG-123` (no subcommand) is auto-pilot —
   resolve repo, create branch + worktree from the ticket, spawn the agent.
   Interactive; from a session prefer `gw new --linear ENG-123 --no-launch`.
+- **`gw gh-<N>` dispatcher**: same auto-pilot for a GitHub issue in the current
+  repo (`gw gh-42` ≡ `gw new --issue 42`). Needs an authenticated `gh`, not a
+  Linear key. Task id is `gh-42`; `gw pr open` then adds `Closes #42` to the PR
+  body. A tracking issue in another repo goes through
+  `gw new --issue owner/repo#42 --project <name>` (the shorthand is same-repo
+  only). From a session prefer `--no-launch`.
 - **Config** is TOML at `$XDG_CONFIG_HOME/goblin-watcher/config.toml`; edit via
   `gw config set <key> <value>` (validated), never by hand-editing blind.
   Notable keys: `defaults.unsafe`, `defaults.agent`, `windowing`

@@ -1,6 +1,6 @@
 {intro}
 
-{linear_id}: {title}
+{ticket_id}: {title}
 
 {repos_block}
 

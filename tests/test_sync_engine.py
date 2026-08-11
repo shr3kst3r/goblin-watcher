@@ -832,3 +832,47 @@ def test_one_crashing_task_does_not_wedge_the_pass(
     events = [e["event"] for e in journal.read_entries()]
     assert "task-crashed" in events
     assert "pass-end" in events, "pass must still finish and record itself"
+
+
+def test_sync_refreshes_a_github_issue_state(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """The issue-state step runs for issue-backed tasks and reports as a step."""
+    from goblin_watcher.models import GhIssue
+
+    project, task = demo
+    state.save_task(
+        project,
+        task.model_copy(
+            update={
+                "github_issue": GhIssue(
+                    number=42,
+                    repo="org/repo",
+                    title="Add rate limit",
+                    state="OPEN",
+                    url="https://github.com/org/repo/issues/42",
+                )
+            }
+        ),
+    )
+
+    with (
+        _run(notifier)[1],
+        patch("goblin_watcher.github_state.gh.issue_state", return_value="CLOSED"),
+    ):
+        report = engine.run_pass()
+
+    assert report.status == "ok"
+    assert any(s.step == "github-issue" and s.ok == 1 for s in report.steps)
+    refreshed = state.load_task(project, "demo-1")
+    assert refreshed.github_issue is not None
+    assert refreshed.github_issue.state == "CLOSED"
+
+
+def test_sync_skips_the_issue_step_without_an_issue(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    with (
+        _run(notifier)[1],
+        patch("goblin_watcher.github_state.gh.issue_state") as lookup,
+    ):
+        report = engine.run_pass()
+
+    lookup.assert_not_called()
+    assert not any(s.step == "github-issue" for s in report.steps)

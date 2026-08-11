@@ -35,6 +35,29 @@ class LinearIssue(_Frozen):
     comments: list[LinearComment] = Field(default_factory=list)
 
 
+class GhIssue(_Frozen):
+    """A GitHub issue snapshot, taken when the task was created.
+
+    `repo` is the issue's own lowercased `owner/repo`, which is not necessarily
+    the repo the task works in: a tracking issue may live in another repository,
+    which is what makes the qualified `reference` form the safe one to cite.
+    """
+
+    number: int
+    repo: str
+    title: str
+    body: str | None = None
+    state: str
+    url: str
+    labels: list[str] = Field(default_factory=list)
+    assignees: list[str] = Field(default_factory=list)
+
+    @property
+    def reference(self) -> str:
+        """The fully-qualified `owner/repo#42` form, safe to use cross-repo."""
+        return f"{self.repo}#{self.number}"
+
+
 class AgentRef(_Frozen):
     name: AgentName
 
@@ -75,6 +98,10 @@ class Task(_Frozen):
     kind: TaskKind = "repo"
     project: str
     linear: LinearIssue | None = None
+    # The GitHub issue this task tracks, for `--issue`-sourced tasks. Mutually
+    # exclusive with `linear` in practice (one source flag per `gw new`), but
+    # the model doesn't forbid both.
+    github_issue: GhIssue | None = None
     branch: str
     worktree_path: Path
     base_branch: str
@@ -91,10 +118,34 @@ class Task(_Frozen):
     # When the cached `linear.state` was last fetched from the API. Lets
     # `gw status` skip per-task Linear round-trips inside a TTL window.
     linear_state_updated_at: datetime | None = None
+    # Same idea for `github_issue.state`, refreshed via `gh issue view`.
+    github_issue_state_updated_at: datetime | None = None
 
     @property
     def is_multi_repo(self) -> bool:
         return bool(self.secondary_repos)
+
+    @property
+    def ticket_id(self) -> str:
+        """Human-facing id of the tracking item, or the task id when there isn't one.
+
+        Linear tickets report `ENG-123`; GitHub issues report the qualified
+        `owner/repo#42`, which stays unambiguous for a cross-repo tracking issue.
+        """
+        if self.linear is not None:
+            return self.linear.identifier
+        if self.github_issue is not None:
+            return self.github_issue.reference
+        return self.id.upper()
+
+    @property
+    def ticket_title(self) -> str | None:
+        """Title of the tracking item, or None when the task has no upstream."""
+        if self.linear is not None:
+            return self.linear.title
+        if self.github_issue is not None:
+            return self.github_issue.title
+        return None
 
     @property
     def agent_cwd(self) -> Path:

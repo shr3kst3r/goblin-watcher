@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import typer
 from rich.tree import Tree
 
-from goblin_watcher import config, description, git, sessions, state
+from goblin_watcher import config, description, git, github_state, sessions, state
 from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
@@ -108,6 +108,21 @@ def _linear_state_style(state: str) -> str:
     return _LINEAR_STATE_STYLES.get(state.strip().lower(), "white")
 
 
+def _ticket_suffix(task: Task) -> str:
+    """The `· <title> (linear: state)` fragment for a task's tracking item. '' when none."""
+    if task.linear:
+        style = _linear_state_style(task.linear.state)
+        return (
+            f" · {task.linear.title}  [muted](linear:[/] [{style}]{task.linear.state}[/][muted])[/]"
+        )
+    if task.github_issue:
+        issue = task.github_issue
+        state_name = issue.state.lower()
+        style = "bold green" if state_name == "closed" else "cyan"
+        return f" · {issue.title}  [muted]([/][{style}]{issue.reference} {state_name}[/][muted])[/]"
+    return ""
+
+
 def _fmt_relative(ts: datetime) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)
@@ -151,7 +166,9 @@ def status(
     no_linear: bool = typer.Option(
         False,
         "--no-linear",
-        help="Skip Linear state refresh (no network; cached states still shown).",
+        "--no-tickets",
+        help="Skip upstream ticket-state refresh — Linear and GitHub issues both "
+        "(no network; cached states still shown).",
     ),
     no_cache: bool = typer.Option(
         False,
@@ -195,23 +212,17 @@ def status(
             for task in tasks:
                 if not no_linear:
                     task = linear.refresh(proj, task)
+                    task = github_state.refresh(proj, task)
                 # Discovery walks each agent's on-disk session store, so it runs
                 # outside the task lock; only the resulting plan is applied under
                 # it (ADR 0004).
                 plan = sessions.plan_reconciliation(task)
                 if not plan.is_empty:
                     task = sessions.persist_refresh(proj, task, plan)
-                linear_suffix = ""
-                if task.linear:
-                    state_style = _linear_state_style(task.linear.state)
-                    linear_suffix = (
-                        f" · {task.linear.title}  [muted](linear:[/] "
-                        f"[{state_style}]{task.linear.state}[/][muted])[/]"
-                    )
                 sync_suffix = _sync_indicators(proj, task, use_cache=not no_cache)
                 task_label = (
                     f"[bold]{task.id}[/]"
-                    + linear_suffix
+                    + _ticket_suffix(task)
                     + f"  [muted][{task.status}][/]"
                     + sync_suffix
                 )

@@ -4,6 +4,7 @@
 
 ```text
 gw ENG-123                         # Linear ticket → clone repo → branch + worktree → agent
+gw gh-42                           # GitHub issue → branch + worktree → agent
 gw new --branch-name spike/foo --title "Trying a thing"
 gw new --branch-auto               # auto-named branch (e.g. swift-otter)
 gw new --branch feat/eng-456-token-bucket
@@ -87,12 +88,14 @@ Stored at:
 
 ### Task
 
-A unit of work: branch + worktree + optional Linear issue + a list of agent sessions. Created from one of five **sources**:
+A unit of work: branch + worktree + an optional tracking item (a Linear ticket or a GitHub issue) + a list of agent sessions. Created from one of these **sources**:
 
 | Source | Flag | Example |
 |---|---|---|
 | Linear ticket | `--linear` | `gw new --linear ENG-123 --repo git@github.com:org/repo.git` |
 | Linear ticket stacked on another PR | `--linear ... --from` | `gw new --linear ENG-123 --from feat/eng-456-token-bucket` |
+| GitHub issue | `--issue` | `gw new --issue 42`, `gw new --issue org/repo#42`, or the issue URL |
+| GitHub PR | `--pr` | `gw new --pr 42` (checks out the PR's head branch) |
 | Fresh branch | `--branch-name` | `gw new --branch-name spike/profiler --from main --title "Profile feed"` |
 | Auto-named branch | `--branch-auto` | `gw new --branch-auto` (yields e.g. `swift-otter`) |
 | Existing branch | `--branch` | `gw new --branch feat/eng-456-token-bucket` |
@@ -132,12 +135,33 @@ What it does (the first time):
 
 Subsequent invocations on the same ticket error out, because the task already exists. Resume with `gw run <task-id>` (e.g. `gw run eng-123`), fork a parallel session with `gw run <task-id> --new`, or pick a specific one with `gw run <task-id> --session <id>`.
 
+### `gw gh-42` — the same thing from a GitHub issue
+
+```bash
+gw gh-42                                   # issue #42 in the current project
+gw new --issue 42 --project my-repo        # same, explicit about which repo
+gw new --issue https://github.com/org/repo/issues/42
+gw new --issue org/tracker#3 --project my-repo   # tracking issue lives in another repo
+```
+
+For repos tracked in GitHub Issues instead of Linear. `gw gh-42` is exactly parallel to `gw ENG-123`:
+
+1. Reads the issue via `gh issue view` (no Linear key needed — just an authenticated `gh`).
+2. Task id is `gh-42`; branch is `gh-42-<slug-from-title>` off the default branch (or `--from`).
+3. Worktree at `<repo>/.worktrees/gh-42/`, and the agent's seed prompt carries the issue title, state, labels, and body.
+4. `gw pr open` then adds `Closes #42 — <title>` to the PR body, so landing the PR closes the issue.
+
+Which repo the work happens in: `--project` wins; otherwise a registered project whose remote matches the issue's `owner/repo`; otherwise the project you're standing in; otherwise `--repo <url>`, which clones and registers one. The cwd rule is what makes the cross-repo form work — when the tracking issue lives in `org/tracker` but the code is in `org/repo`, run it from inside `org/repo`'s checkout or pass `--project`. Cross-repo PRs get the qualified `Closes org/tracker#3` form, which GitHub only auto-closes when you can write to the issue's repo; otherwise it lands as a plain reference.
+
+The `gw gh-42` shorthand is same-repo only, and it claims `gh-<digits>` from the Linear shorthand — a Linear team literally keyed `GH` needs `gw new --linear GH-42`.
+
 ### `gw new` — explicit task creation
 
 The general form. Use this when:
 
-- You don't have a Linear ticket yet (`--branch-name`, `--dir`).
-- You're picking up a teammate's branch (`--branch`).
+- You don't have a ticket yet (`--branch-name`, `--dir`).
+- The work is tracked in GitHub Issues (`--issue`).
+- You're picking up a teammate's branch (`--branch`) or PR (`--pr`).
 - You want to skip the agent launch (`--no-launch`).
 
 Examples:
@@ -148,6 +172,8 @@ gw new --branch feat/eng-456-token-bucket          # pick up an existing branch
 gw new --dir ~/code/scratch-fork --title "Quick experiment"
 gw new --linear ENG-123 --no-launch                # create task, don't spawn agent
 gw new --linear ENG-123 --from feat/other-pr       # stack on a teammate's PR branch
+gw new --issue 42                                  # GitHub issue #42 in this repo
+gw new --issue org/tracker#3 --project my-repo     # tracking issue in another repo
 ```
 
 ### `gw run` — interactive session picker
@@ -188,7 +214,7 @@ gwfinder eng-123                                    # open the worktree in Finde
 gw pr open eng-123 [--project NAME] [--draft] [--notify-linear]
 ```
 
-Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. PR body is templated from the Linear issue (if any). The PR URL is persisted on the task record. Pass `--project` if the same task id exists in more than one registered project.
+Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. The PR is titled after the task's tracking item, and the body is templated from it: a Linear ticket contributes a `Resolves ENG-123` line plus its description and comment thread; a GitHub issue contributes a `Closes #42 — <title>` line (`Closes owner/repo#42` when the issue lives in another repo). The PR URL is persisted on the task record. Pass `--project` if the same task id exists in more than one registered project.
 
 Re-running is idempotent: if an open PR already exists for the branch, the push still happens but `gh pr create` is skipped. `--notify-linear` posts a comment with the PR URL(s) on the task's Linear issue — the only write `gw` ever performs against Linear.
 

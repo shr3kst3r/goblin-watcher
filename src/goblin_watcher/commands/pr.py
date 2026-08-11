@@ -38,7 +38,30 @@ def _commit_section(commits: list[tuple[str, str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _pr_body(task: Task, repo: TaskRepo, repo_root: Path, siblings: list[TaskRepo]) -> str:
+def _closes_line(task: Task, repo_root: Path, project_repo_url: str | None) -> str | None:
+    """The `Closes #42` line for a GitHub-issue task, or None when there isn't one.
+
+    Uses the bare `#42` form when the issue lives in the repo the PR targets and
+    the fully-qualified `owner/repo#42` form otherwise. GitHub only auto-closes
+    across repositories when the PR author can write to the issue's repo, so the
+    cross-repo form may land as a plain reference — the link is still correct
+    either way.
+    """
+    issue = task.github_issue
+    if issue is None:
+        return None
+    pr_repo = gh.normalize_repo(git.origin_url(repo_root)) or gh.normalize_repo(project_repo_url)
+    target = f"#{issue.number}" if pr_repo == issue.repo else issue.reference
+    return f"Closes {target} — {issue.title}"
+
+
+def _pr_body(
+    task: Task,
+    repo: TaskRepo,
+    repo_root: Path,
+    siblings: list[TaskRepo],
+    project_repo_url: str | None = None,
+) -> str:
     """Assemble a structured PR body for one repo: issue context + commits + diffstat.
 
     `siblings` are the task's other repos; when non-empty a "multi-repo change"
@@ -50,6 +73,10 @@ def _pr_body(task: Task, repo: TaskRepo, repo_root: Path, siblings: list[TaskRep
         sections.append(
             f"Resolves [{task.linear.identifier}]({task.linear.url}): {task.linear.title}"
         )
+
+    closes = _closes_line(task, repo_root, project_repo_url)
+    if closes is not None:
+        sections.append(closes)
 
     if siblings:
         sibling_lines = "\n".join(f"- `{s.project}` — branch `{s.branch}`" for s in siblings)
@@ -111,6 +138,13 @@ def _repo_root(proj: Project, repo: TaskRepo) -> Path:
     if repo.project == proj.name:
         return proj.root
     return state.get_project(repo.project).root
+
+
+def _repo_url(proj: Project, repo: TaskRepo) -> str | None:
+    """Registered remote URL for `repo`, used as a fallback when git has none."""
+    if repo.project == proj.name:
+        return proj.repo_url
+    return state.get_project(repo.project).repo_url
 
 
 def _set_pr_url(task: Task, project_name: str, url: str) -> Task:
@@ -191,8 +225,8 @@ def open_(
                 f"(#{existing.get('number', '?')}); branch pushed, skipping create.[/]"
             )
         else:
-            title = task.linear.title if task.linear else r.branch
-            body = _pr_body(task, r, repo_root, siblings)
+            title = task.ticket_title or r.branch
+            body = _pr_body(task, r, repo_root, siblings, project_repo_url=_repo_url(proj, r))
             url = gh.create_pr(
                 cwd=r.worktree_path,
                 title=title,

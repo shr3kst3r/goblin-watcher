@@ -347,3 +347,56 @@ def test_post_run_write_does_not_resurrect_a_deleted_task(
     assert [s.session_id for s in returned.sessions] == ["real-id"]
     # ...but nothing was written back to disk.
     assert state.list_tasks(proj) == []
+
+
+def test_build_seed_prompt_uses_github_issue_context(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+    from goblin_watcher.models import GhIssue
+
+    task = _bootstrap(tmp_path).model_copy(
+        update={
+            "github_issue": GhIssue(
+                number=42,
+                repo="org/repo",
+                title="Add rate limit",
+                body="We need a token bucket on the ingest path.",
+                state="OPEN",
+                url="https://github.com/org/repo/issues/42",
+                labels=["enhancement"],
+            )
+        }
+    )
+    seed = build_seed_prompt(task)
+    # Headline is the qualified reference plus the issue title.
+    assert "org/repo#42: Add rate limit" in seed
+    assert "GitHub issue org/repo#42 (open): https://github.com/org/repo/issues/42" in seed
+    assert "Labels: enhancement" in seed
+    assert "We need a token bucket on the ingest path." in seed
+    assert "no Linear issue" not in seed
+
+
+def test_build_seed_prompt_github_issue_without_body(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+    from goblin_watcher.models import GhIssue
+
+    task = _bootstrap(tmp_path).model_copy(
+        update={
+            "github_issue": GhIssue(
+                number=7,
+                repo="org/repo",
+                title="Fix it",
+                state="CLOSED",
+                url="https://github.com/org/repo/issues/7",
+            )
+        }
+    )
+    seed = build_seed_prompt(task)
+    assert "(The issue has no description.)" in seed
+
+
+def test_build_seed_prompt_without_any_ticket_says_so(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    seed = build_seed_prompt(_bootstrap(tmp_path))
+    assert "(no Linear issue or GitHub issue attached — fresh task)" in seed
+    assert "SPIKE-FOO" in seed

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from goblin_watcher.commands.pr import _pr_body
-from goblin_watcher.models import LinearComment, LinearIssue, Task, TaskRepo
+from goblin_watcher.models import GhIssue, LinearComment, LinearIssue, Task, TaskRepo
 
 
 def _init_repo_with_commits(repo: Path, branch: str) -> None:
@@ -134,3 +134,75 @@ def test_pr_body_cross_references_sibling_repos(tmp_path: Path) -> None:
     assert "Part of a multi-repo change" in body
     assert "`web`" in body
     assert "`feat/foo-web`" in body
+
+
+def _github_task(repo: Path, branch: str, issue: GhIssue) -> Task:
+    return Task(
+        id=f"gh-{issue.number}",
+        project="alpha",
+        github_issue=issue,
+        branch=branch,
+        worktree_path=repo,
+        base_branch="main",
+        created_at=datetime.now(UTC),
+    )
+
+
+def _gh_issue(number: int = 42, repo: str = "org/repo") -> GhIssue:
+    return GhIssue(
+        number=number,
+        repo=repo,
+        title="Add rate limit",
+        body="We need a token bucket.",
+        state="OPEN",
+        url=f"https://github.com/{repo}/issues/{number}",
+    )
+
+
+def test_pr_body_closes_same_repo_issue_with_bare_number(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_commits(repo, "gh-42-add-rate-limit")
+    task = _github_task(repo, "gh-42-add-rate-limit", _gh_issue())
+
+    body = _pr_body(
+        task,
+        task.primary_repo(),
+        repo,
+        [],
+        project_repo_url="git@github.com:org/repo.git",
+    )
+
+    assert "Closes #42 — Add rate limit" in body
+    assert "org/repo#42" not in body
+    # The issue body isn't duplicated — GitHub renders the link inline.
+    assert "token bucket" not in body
+    assert "## What changed" in body
+
+
+def test_pr_body_closes_cross_repo_issue_with_qualified_reference(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_commits(repo, "gh-3-ship-it")
+    task = _github_task(repo, "gh-3-ship-it", _gh_issue(number=3, repo="org/tracker"))
+
+    body = _pr_body(
+        task,
+        task.primary_repo(),
+        repo,
+        [],
+        project_repo_url="https://github.com/org/repo",
+    )
+
+    assert "Closes org/tracker#3 — Add rate limit" in body
+    assert "Closes #3" not in body
+
+
+def test_pr_body_unknown_pr_repo_falls_back_to_qualified_reference(tmp_path: Path) -> None:
+    """With no GitHub remote to compare against we can't claim same-repo, so we
+    emit the form that is correct either way."""
+    repo = tmp_path / "repo"
+    _init_repo_with_commits(repo, "gh-42-add-rate-limit")
+    task = _github_task(repo, "gh-42-add-rate-limit", _gh_issue())
+
+    body = _pr_body(task, task.primary_repo(), repo, [], project_repo_url=None)
+
+    assert "Closes org/repo#42" in body

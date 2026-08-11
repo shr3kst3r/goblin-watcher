@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 StepName = Literal[
     "fetch",
     "linear",
+    "github-issue",
     "reconcile",
     "summaries",
     "descriptions",

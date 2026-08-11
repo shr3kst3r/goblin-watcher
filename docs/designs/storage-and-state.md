@@ -135,6 +135,7 @@ files (the sync tier) and want the same guarantee.
   "id": "eng-123",
   "project": "eng",
   "linear": { "identifier": "ENG-123", "title": "...", "url": "...", ... },
+  "github_issue": null,
   "branch": "eng-123-add-rate-limit",
   "worktree_path": "/Users/you/code/eng-repo/.worktrees/eng-123",
   "base_branch": "main",
@@ -158,7 +159,8 @@ files (the sync tier) and want the same guarantee.
 ```
 
 - `sessions` is a list, **not** a dict keyed by agent — see `sessions-and-windowing.md` for why.
-- `linear` snapshot is frozen at task-creation time. Refetching Linear is out of scope for MVP.
+- `linear` / `github_issue` snapshots are taken at task-creation time. Only the workflow/open-closed **state** is refreshed afterwards, TTL-gated, by `linear_state.py` and `github_state.py` (timestamps: `linear_state_updated_at`, `github_issue_state_updated_at`). Titles, bodies, and comments stay as captured.
+- `github_issue` (default `null`) holds a `--issue`-sourced task's GitHub issue: `number`, `repo` (`owner/repo`), `title`, `body`, `state`, `url`, `labels`, `assignees`. `repo` is the *issue's* repo, which may differ from the task's project for a cross-repo tracking issue — that's what `gw pr open` checks to decide between `Closes #42` and `Closes owner/repo#42`.
 - `pr_url` is set by `gw pr open` and `gw pr status`.
 - `status` transitions: `open` → `pushed` (planned) → `pr-open` → `merged` | `closed` | `abandoned`. Today only `open` and `pr-open` are set automatically. For a multi-repo task it is a roll-up across repos.
 - `secondary_repos` (default `[]`) and `workspace_path` (default `null`) support multi-repo tasks (ADR 0003). The scalar `project`/`branch`/`worktree_path`/`base_branch`/`pr_url` fields describe the **primary** repo; each additional repo is a `TaskRepo` (same five fields) in `secondary_repos`. `Task.all_repos()` yields primary-first. Single-repo task JSON is unchanged — the new fields default empty, so older records validate without migration.

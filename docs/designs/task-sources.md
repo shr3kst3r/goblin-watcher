@@ -1,46 +1,57 @@
 # Task Sources
 
-Current-state design of how `gw new` creates a Task from one of four input sources.
+Current-state design of how `gw new` creates a Task from one of its input sources.
 
-## Why four sources
+## Why several sources
 
-A Task always carries a branch + worktree + optional Linear issue. The four input shapes match real workflows:
+A Task always carries a branch + worktree + an optional tracking item (a Linear ticket or a GitHub issue). The input shapes match real workflows:
 
-- **Linear ticket** — the daily driver. The ticket title drives the branch slug; the body becomes the seed prompt.
-- **Fresh branch by name** — exploring an idea without a ticket; the user supplies a slug and (optionally) a base.
-- **Existing branch** — picking up a teammate's work or a review fix-up. The branch already exists locally or on the remote.
-- **Existing directory** — adopting a worktree someone else (or a previous gw run on a different machine) already created.
+- **Linear ticket** (`--linear`) — the daily driver where work is tracked in Linear. The ticket title drives the branch slug; the body becomes the seed prompt.
+- **GitHub issue** (`--issue`) — the same loop for repos tracked in GitHub Issues. Title drives the branch slug, body seeds the prompt, and `gw pr open` writes a `Closes` line so landing the PR closes the issue.
+- **GitHub PR** (`--pr`) — reviewing or fixing up work that already exists; checks out the PR's head branch.
+- **Fresh branch by name** (`--branch-name` / `--branch-auto`) — exploring an idea without a ticket; the user supplies a slug (or gw generates one) and, optionally, a base.
+- **Existing branch** (`--branch`) — picking up a teammate's work or a review fix-up. The branch already exists locally or on the remote.
+- **Existing directory** (`--dir`) — adopting a worktree someone else (or a previous gw run on a different machine) already created.
 
-The four sources collapse to the same Task shape, so downstream commands (`run`, `pr`, `task show`, `status`) don't need to care which source produced a task.
+Every source collapses to the same Task shape, so downstream commands (`run`, `pr`, `task show`, `status`) don't need to care which one produced a task.
 
 ## Resolution flow
 
 ```
-                    gw new ...
-                        │
-                ┌───────┴───────┐
-                │ source flag?  │
-                └───────┬───────┘
-        ┌───────┬───────┼───────┬────────┐
-   --linear  --branch-name  --branch  --dir
-        │       │           │         │
-   _from_linear │       _from_existing │
-        │   _from_new_branch  _branch  │
-        │       │           │   _from_existing_dir
-        └───────┴───────┬───┴─────────┘
-                        │
-                ┌───────┴───────┐
-                │ Task record   │
-                │   .goblin/    │
-                │   tasks/X.json│
-                └───────┬───────┘
-                        │
-                ┌───────┴───────┐
-                │ Launch agent? │  (skip if --no-launch)
-                └───────────────┘
+                          gw new ...
+                              │
+                      ┌───────┴───────┐
+                      │ source flag?  │
+                      └───────┬───────┘
+    ┌───────┬─────────┬───────┼─────────┬─────────┬────────┐
+--linear  --issue    --pr  --branch-name  --branch  --dir
+    │        │         │       │            │         │
+_from_    _from_   _from_pr  _from_    _from_existing │
+linear    issue              new_branch  _branch      │
+    │        │         │       │            │  _from_existing_dir
+    └────────┴─────────┴───────┴────────────┴─────────┘
+                              │
+                      ┌───────┴───────┐
+                      │ Task record   │
+                      │   .goblin/    │
+                      │   tasks/X.json│
+                      └───────┬───────┘
+                              │
+                      ┌───────┴───────┐
+                      │ Launch agent? │  (skip if --no-launch)
+                      └───────────────┘
 ```
 
 Exactly **one** source flag must resolve. Conflicting flags (`--linear ... --branch ...`) raise `GoblinError` before any side effects.
+
+## Shorthand dispatch
+
+`cli._rewrite_task_shortcut` turns a bare first positional into a `new` invocation before Click ever sees argv:
+
+- `gw gh-42` → `gw new --issue 42` (matched first)
+- `gw ENG-123` / `gw eng-123` → `gw new --linear ENG-123`
+
+Reserving `gh-<digits>` for GitHub issues means a Linear team whose key is literally `GH` is unreachable via the shorthand and must use `gw new --linear GH-42`. That tradeoff is deliberate and noted next to the pattern in `cli.py`. The shorthand is same-repo only; a cross-repo issue goes through `gw new --issue owner/repo#42`.
 
 ## Per-source behaviour
 
@@ -59,6 +70,30 @@ Exactly **one** source flag must resolve. Conflicting flags (`--linear ... --bra
 7. Base = `--from <branch>` or `project.default_branch`. Lets the user stack a Linear ticket on top of another PR's branch (auto-fetched if only on origin).
 8. Worktree at `<repo>/.worktrees/eng-123/`; reused if it already exists.
 9. Persist the `LinearIssue` snapshot on the task.
+
+### `--issue <ref>`
+
+Accepts three forms, parsed by `gh.parse_issue_ref`:
+
+| Form | Example | Repo known up front? |
+| --- | --- | --- |
+| bare number | `42`, `#42` | no |
+| qualified | `shr3kst3r/spg#3` | yes |
+| URL | `https://github.com/shr3kst3r/spg/issues/3` | yes |
+
+1. Resolve the project the work happens in, **before** fetching (the bare form can't be looked up without a repo):
+   - `--project <name>` wins if given.
+   - Bare number → the project containing the cwd, else `--repo <url>`, else `resolve_project` (picker, auto-picking a lone project).
+   - Qualified/URL → a registered project whose remote normalizes to the issue's `owner/repo`; else the project containing the cwd (this is the cross-repo case: the tracking issue names a repo that is *not* the one being worked in, so the surrounding worktree decides); else `--repo <url>`; else `GoblinError`.
+   - `--repo <url>` reuses a registered project with that remote and otherwise clones + registers one, named after the **URL's** repo. Not the issue's — with a cross-repo tracking issue those differ, and `--repo` says where the work happens.
+2. Fetch the issue via `gh issue view --json number,title,body,url,state,labels,assignees`, passing `--repo` for the qualified/URL forms so it resolves regardless of cwd.
+3. Task id: `gh-<number>` (e.g. `gh-42`).
+4. Branch name: `branch_slug("gh-42", title, prefix)` → e.g. `gh-42-add-rate-limit`.
+5. Base = `--from <branch>` or `project.default_branch`, same as `--linear`.
+6. Worktree at `<repo>/.worktrees/gh-42/`; reused if it already exists.
+7. Persist a `GhIssue` snapshot (number, `owner/repo`, title, body, state, url, labels, assignees) on the task, plus a `github_issue_state_updated_at` stamp for the state-refresh TTL.
+
+`gh-<number>` is unique per repo, not globally: a cross-repo issue #42 collides with the same-repo #42 already tracked in that project. gw refuses via the ordinary "task already exists" path (`--rm` to replace, `--branch-name` as the escape hatch) rather than inventing a disambiguating id for a collision that hasn't shown up in practice.
 
 ### `--branch-name <name>`
 
@@ -89,12 +124,35 @@ Exactly **one** source flag must resolve. Conflicting flags (`--linear ... --bra
 
 After Task creation (and unless `--no-launch`), the launcher needs a prompt string for `agent.spawn_command(prompt=...)`.
 
-`agents/launcher.build_seed_prompt(task)` uses `templates/spawn_prompt.md`:
+`agents/launcher.build_seed_prompt(task)` uses `templates/spawn_prompt.md`, whose `{ticket_id}` / `{title}` / `{description}` slots are filled from whichever tracking item the task carries (`Task.ticket_id` / `Task.ticket_title`):
 
-- For `--linear` tasks: identifier + title + description.
-- For `--branch-name` / `--branch` / `--dir`: identifier slot becomes `task.id.upper()`, title slot becomes `task.id`, description slot becomes `(no Linear issue attached — fresh task)` plus whatever the user passed as `--title`.
+- For `--linear` tasks: `ENG-123` + title + description + the Linear comment thread.
+- For `--issue` tasks: `owner/repo#42` + title + a header line (state, URL, labels) + the issue body. The qualified form is used even same-repo, so a cross-repo tracking issue is never ambiguous.
+- For `--branch-name` / `--branch` / `--dir` / `--pr`: id slot becomes `task.id.upper()`, title slot becomes `task.id`, description slot becomes `(no Linear issue or GitHub issue attached — fresh task)`.
 
-This means a non-Linear task gets a thinner prompt — that's correct; the user has more responsibility for orienting the agent when they didn't go through Linear.
+This means a task with no tracking item gets a thinner prompt — that's correct; the user has more responsibility for orienting the agent when they didn't go through a tracker.
+
+## Tracking-item state refresh
+
+A task's cached tracking state goes stale as soon as someone moves the ticket. Both trackers refresh the same way — lazily on the `gw status` render path and again in every background sync pass — behind a TTL stamped on the task:
+
+| Tracker | Module | Task fields | TTL config key |
+| --- | --- | --- | --- |
+| Linear | `linear_state.py` | `linear.state`, `linear_state_updated_at` | `defaults.linear_state_ttl_seconds` |
+| GitHub issue | `github_state.py` | `github_issue.state`, `github_issue_state_updated_at` | `defaults.github_issue_state_ttl_seconds` |
+
+Both write through a narrow patch under the task lock (ADR 0004) and degrade to the cached value on any failure — a missing `gh`, an unresolvable secret, an unreachable API — leaving the timestamp untouched so the next pass retries. `gw status --no-linear` (alias `--no-tickets`) skips both.
+
+## PR linking
+
+`gw pr open` titles the PR from `Task.ticket_title` and, for an issue-backed task, prepends a close line built by `commands/pr._closes_line`:
+
+- Same repo (the PR's `origin` normalizes to the issue's `owner/repo`) → `Closes #42 — <title>`.
+- Different repo, or no GitHub remote to compare against → `Closes owner/repo#42 — <title>`.
+
+GitHub only auto-closes across repositories when the PR author can write to the issue's repo, so the qualified form may land as a plain reference. That's the honest failure mode: the link is correct either way, and gw doesn't promise a close it can't make happen.
+
+The issue body is deliberately **not** copied into the PR body (unlike the Linear path, where reviewers may not have Linear access) — on GitHub the linked issue is one click away.
 
 ## Multi-repo tasks
 
@@ -129,22 +187,29 @@ and `gw task rm` tears down every worktree + the workspace directory.
 
 - **Branch collisions on `--linear` reruns.** `_ensure_unique_branch` appends `-2`, `-3` so reruns don't blow up the worktree, but they also don't reuse it — by design, a second `gw ENG-123` after a name collision creates `eng-123-..-2`. If you actually want to resume, use `gw run eng-123` instead of re-creating.
 - **`--dir` outside any registered project.** Without `git-common-dir` matching a registered `project.root`, gw can't know where Task state should live. We raise `GoblinError` and tell the user to `gw project new` first.
-- **`--from` ignored for `--branch`.** Existing branches have a base whether we like it or not. `--from` applies to fresh-branch creation — `--branch-name`, `--branch-auto`, and `--linear` (which always creates a fresh branch from the ticket slug).
+- **`--from` ignored for `--branch`.** Existing branches have a base whether we like it or not. `--from` applies to fresh-branch creation — `--branch-name`, `--branch-auto`, `--linear`, and `--issue` (all of which create a fresh branch from the ticket slug).
+- **`gw gh-42` from outside a project.** The bare-number form has no repo of its own, so it resolves through the cwd's project and then the picker. Run it from anywhere with exactly one project registered and it still works; with several and no cwd match, you get the picker.
 - **`base_branch` field for non-Linear sources.** Set to `project.default_branch`, even though the actual base is unknowable for `--branch` / `--dir`. Good enough for the PR body template; if it ever matters for behaviour we'll need to track it more carefully.
 
 ## Code map
 
+- `src/goblin_watcher/cli.py` — `_rewrite_task_shortcut` (the `gw gh-42` / `gw ENG-123` shorthands).
 - `src/goblin_watcher/commands/new.py` — entry point, source dispatch, `--with-project`.
 - `src/goblin_watcher/commands/task.py` — `gw task add-repo`, multi-repo teardown.
 - `src/goblin_watcher/workspace.py` — workspace promotion + repo attachment.
 - `src/goblin_watcher/slug.py` — `branch_slug`, `slugify`.
 - `src/goblin_watcher/git.py` — `branch_exists`, `remote_branch_exists`, `create_branch_from_remote`, `worktree_add`, `main_repo_root`.
 - `src/goblin_watcher/linear/client.py` — `parse_identifier`, `LinearClient.fetch_issue`.
+- `src/goblin_watcher/gh.py` — `parse_issue_ref`, `issue_view`, `issue_state`, `normalize_repo`.
+- `src/goblin_watcher/github_state.py` — TTL-cached issue-state refresh.
 - `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`.
 
 ## Tests
 
 - `tests/test_slug.py` — slug rules for the branch name builder.
-- `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`.
+- `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`.
 - `tests/test_cli_linear_flow.py` — end-to-end for `--linear` (with `pytest-httpx` mock).
+- `tests/test_cli_issue_flow.py` — end-to-end for `--issue` and the `gw gh-42` shorthand.
+- `tests/test_gh_issues.py` — reference parsing and the `gh issue` wrappers.
+- `tests/test_github_state.py` — the issue-state TTL + `gw status` rendering.
 - `tests/test_git_worktree.py` — the `worktree_add` / branch-existence primitives.

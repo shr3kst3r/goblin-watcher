@@ -97,7 +97,7 @@ app.add_typer(
 
 app.command(
     "new",
-    help="Create a task from a Linear ticket, GitHub PR, branch, new branch, or directory.",
+    help="Create a task from a Linear ticket, GitHub issue or PR, branch, new branch, or dir.",
 )(new_cmd.new)
 app.command(
     "cd",
@@ -128,20 +128,31 @@ def _root(debug: bool = typer.Option(False, "--debug", envvar="GW_DEBUG")) -> No
         install_rich_traceback(show_locals=False)
 
 
+_re = __import__("re")
+
 # Case-insensitive and 1+ char team key, matching `linear.parse_identifier` —
 # `gw eng-123` should work the same as `gw ENG-123`. No subcommand name can
 # collide: they're all bare lowercase words with no `-<digits>` suffix.
-_LINEAR_ID = __import__("re").compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+_LINEAR_ID = _re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+# `gh-42` is a GitHub issue in the *current* repo, and is matched before
+# `_LINEAR_ID` (which would otherwise swallow it and hand `gh-42` to the Linear
+# API). Deliberate tradeoff: a Linear team whose key is literally `GH` can't use
+# the shorthand and must go through `gw new --linear GH-42`. Cross-repo issues
+# have no shorthand — use `gw new --issue owner/repo#42`.
+_GH_ISSUE_ID = _re.compile(r"^gh-(?P<number>\d+)$", _re.IGNORECASE)
 
 
-def _rewrite_linear_shortcut(argv: list[str]) -> list[str]:
-    """`gw ENG-123 ...` → `gw new --linear ENG-123 ...`.
+def _rewrite_task_shortcut(argv: list[str]) -> list[str]:
+    """`gw ENG-123 ...` → `gw new --linear ENG-123 ...`; `gw gh-42 ...` → `--issue 42`.
 
     Pattern-match the first non-flag positional. Leave the rest of argv intact.
     """
     for i, arg in enumerate(argv):
         if arg.startswith("-"):
             continue
+        gh_issue = _GH_ISSUE_ID.match(arg)
+        if gh_issue is not None:
+            return [*argv[:i], "new", "--issue", gh_issue.group("number"), *argv[i + 1 :]]
         if _LINEAR_ID.match(arg):
             return [*argv[:i], "new", "--linear", arg, *argv[i + 1 :]]
         return argv
@@ -195,7 +206,7 @@ def _inject_project_sentinel(argv: list[str]) -> list[str]:
 
 def main() -> None:
     raw_argv = sys.argv[1:]
-    argv = _rewrite_linear_shortcut(raw_argv)
+    argv = _rewrite_task_shortcut(raw_argv)
     argv = _inject_session_pick_sentinel(argv)
     argv = _inject_project_sentinel(argv)
     with command_log.record_invocation(raw_argv) as entry:

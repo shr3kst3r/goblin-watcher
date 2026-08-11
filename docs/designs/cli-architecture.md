@@ -25,30 +25,37 @@ app.command("version")(version_cmd.version)
 
 Each `commands/<group>.py` exports `app = typer.Typer(...)` and registers its leaf commands locally. The root `cli.py` doesn't know about individual subcommand signatures — it just wires the groups.
 
-## The Linear shortcut: `gw <LINEAR-ID>`
+## The ticket shortcuts: `gw <LINEAR-ID>` and `gw gh-<N>`
 
-`gw ENG-123` is sugar over `gw new --linear ENG-123`. Typer can't naturally dispatch a positional argument to a subcommand (every Typer command is a registered name), so we rewrite argv in `main()` before handing it to the app:
+`gw ENG-123` is sugar over `gw new --linear ENG-123`, and `gw gh-42` over `gw new --issue 42`. Typer can't naturally dispatch a positional argument to a subcommand (every Typer command is a registered name), so we rewrite argv in `main()` before handing it to the app:
 
 ```python
-_LINEAR_ID = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
+_LINEAR_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+_GH_ISSUE_ID = re.compile(r"^gh-(?P<number>\d+)$", re.IGNORECASE)
 
-def _rewrite_linear_shortcut(argv):
+def _rewrite_task_shortcut(argv):
     for i, arg in enumerate(argv):
         if arg.startswith("-"):       # skip global flags like --debug
             continue
+        gh_issue = _GH_ISSUE_ID.match(arg)
+        if gh_issue is not None:      # checked FIRST — `gh-42` also matches _LINEAR_ID
+            return [*argv[:i], "new", "--issue", gh_issue["number"], *argv[i + 1 :]]
         if _LINEAR_ID.match(arg):
             return [*argv[:i], "new", "--linear", arg, *argv[i + 1 :]]
-        return argv                   # first non-flag isn't a Linear id → no rewrite
+        return argv                   # first non-flag isn't a ticket id → no rewrite
     return argv
 ```
 
-Three properties worth knowing:
+Four properties worth knowing:
 
 1. **Only the first non-flag positional** is checked. `gw new ENG-123` (with `new` explicitly typed) is left alone.
 2. **Global flags pass through.** `gw --debug ENG-123` becomes `gw --debug new --linear ENG-123`.
-3. **The regex is conservative.** `eng-123` (lowercase) or `ENG123` (no dash) is not rewritten. That's intentional — false positives turning random arguments into Linear lookups would be worse than requiring the standard format.
+3. **Order matters.** `gh-42` matches both patterns, so the GitHub-issue check runs first. The cost is that a Linear team keyed literally `GH` loses the shorthand and needs `gw new --linear GH-42` — a deliberate tradeoff, flagged in a comment next to the pattern.
+4. **Both patterns are case-insensitive but shape-strict.** `eng-123` and `GH-42` are rewritten; `ENG123` and `gh-42x` are not. False positives turning random arguments into ticket lookups would be worse than requiring the standard format.
 
-The rewriter is a pure function and is tested directly in `tests/test_cli_new_sources.py::test_linear_shortcut_dispatcher_rewrites_argv`.
+No subcommand name can collide with either pattern: they're all bare lowercase words with no `-<digits>` suffix.
+
+The rewriter is a pure function, tested directly in `tests/test_cli_new_sources.py::test_linear_shortcut_dispatcher_rewrites_argv` and `tests/test_cli_issue_flow.py::test_gh_shorthand_rewrites_to_issue_source`.
 
 ## Error propagation
 
@@ -58,7 +65,7 @@ Single root exception: `errors.GoblinError(message, hint=None, exit_code=1)`. Su
 
 ```python
 def main():
-    argv = _rewrite_linear_shortcut(sys.argv[1:])
+    argv = _rewrite_task_shortcut(sys.argv[1:])
     try:
         app(args=argv, prog_name="gw", standalone_mode=False)
     except GoblinError as err:
@@ -97,7 +104,8 @@ The `agent_badge(name)` helper wraps an agent name in its theme token. Used by `
 
 ```
 gw <LINEAR-ID> [options]               → sugar over `gw new --linear`
-gw new --linear|--branch|--branch-name|--dir [options]
+gw gh-<N> [options]                    → sugar over `gw new --issue`
+gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir [options]
 gw run [PATH|TASK-ID] [options]
 gw status
 

@@ -475,24 +475,24 @@ def test_new_linear_without_key_errors(isolated_xdg: Path, monkeypatch) -> None:
 
 def test_linear_shortcut_dispatcher_rewrites_argv() -> None:
     # Smoke: the rewriter recognizes Linear ids and rewrites the args.
-    from goblin_watcher.cli import _rewrite_linear_shortcut
+    from goblin_watcher.cli import _rewrite_task_shortcut
 
-    assert _rewrite_linear_shortcut(["ENG-123"]) == ["new", "--linear", "ENG-123"]
-    assert _rewrite_linear_shortcut(["ENG-123", "--agent", "claude"]) == [
+    assert _rewrite_task_shortcut(["ENG-123"]) == ["new", "--linear", "ENG-123"]
+    assert _rewrite_task_shortcut(["ENG-123", "--agent", "claude"]) == [
         "new",
         "--linear",
         "ENG-123",
         "--agent",
         "claude",
     ]
-    assert _rewrite_linear_shortcut(["--debug", "ENG-123"]) == [
+    assert _rewrite_task_shortcut(["--debug", "ENG-123"]) == [
         "--debug",
         "new",
         "--linear",
         "ENG-123",
     ]
     # Non-Linear positional is untouched.
-    assert _rewrite_linear_shortcut(["project", "ls"]) == ["project", "ls"]
+    assert _rewrite_task_shortcut(["project", "ls"]) == ["project", "ls"]
 
 
 def test_new_branch_name_task_id_collision_errors(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -644,11 +644,11 @@ def test_new_dir_rm_resets_record_only(isolated_xdg: Path, tmp_path: Path) -> No
 
 
 def test_linear_shortcut_dispatcher_is_case_insensitive() -> None:
-    from goblin_watcher.cli import _rewrite_linear_shortcut
+    from goblin_watcher.cli import _rewrite_task_shortcut
 
-    assert _rewrite_linear_shortcut(["eng-123"]) == ["new", "--linear", "eng-123"]
+    assert _rewrite_task_shortcut(["eng-123"]) == ["new", "--linear", "eng-123"]
     # Single-char team keys are valid Linear identifiers too.
-    assert _rewrite_linear_shortcut(["X-1"]) == ["new", "--linear", "X-1"]
+    assert _rewrite_task_shortcut(["X-1"]) == ["new", "--linear", "X-1"]
     # Subcommands keep winning: no digits-suffix pattern, no rewrite.
-    assert _rewrite_linear_shortcut(["run", "eng-123"]) == ["run", "eng-123"]
-    assert _rewrite_linear_shortcut(["status"]) == ["status"]
+    assert _rewrite_task_shortcut(["run", "eng-123"]) == ["run", "eng-123"]
+    assert _rewrite_task_shortcut(["status"]) == ["status"]

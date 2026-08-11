@@ -44,6 +44,7 @@ Per project, then per task (iterating `task.all_repos()` for multi-repo tasks):
 |---|---|---|
 | 1 | `git fetch` | Skipped for scratch and for local-only projects (no `repo_url`) |
 | 2 | Linear state | TTL-gated via `linear_state.LinearStateFetcher`, shared with `gw status` |
+| 2b | GitHub issue state | `github-issue` step; TTL-gated via `github_state.refresh`, also shared with `gw status` |
 | 3 | Reconcile + summaries | Discovery outside the lock, plan applied inside |
 | 4 | Descriptions | Invoked inline, with failure backoff |
 | 5 | PR state + CI checks | `gh.pr_state` / `gh.pr_checks`; drives `Task.status` transitions |
