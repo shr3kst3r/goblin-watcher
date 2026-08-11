@@ -434,15 +434,23 @@ def rm(
     print_success(f"Removed task {task.id!r}")
 
 
-def merge_detection(proj: Project, task: Task) -> str | None:
+def merge_detection(
+    proj: Project, task: Task, *, snapshot: gh.PrSnapshot | None = None
+) -> str | None:
     """How the task's branch was detected as merged: "PR", "ancestry", or None.
 
     PR state wins when available; falls back to ancestry. Returning the method
     (rather than a bool) lets the prune table render it without a second
     `gh pr view` round-trip per task.
+
+    Pass `snapshot` when the caller has already looked this PR up — the sync
+    pass fetches every task's state in one batched query, and re-fetching here
+    would restore the per-task round-trip that batching exists to remove. A
+    snapshot whose `state` is None means "we asked and got no signal", so it
+    still suppresses the lookup and falls through to ancestry.
     """
     if task.pr_url:
-        pr = gh.pr_state(task.pr_url)
+        pr = snapshot.state if snapshot is not None else gh.pr_state(task.pr_url)
         if pr == "MERGED":
             return "PR"
         if pr in {"OPEN", "CLOSED"}:

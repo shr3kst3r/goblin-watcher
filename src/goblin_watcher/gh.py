@@ -31,6 +31,9 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
 
 
 _PR_URL_RE = re.compile(r"https://github\.com/[^\s]+/pull/\d+")
+_PR_URL_PARSE_RE = re.compile(
+    r"^https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/(?P<number>\d+)(?:[/?#].*)?$"
+)
 
 _HTTPS_REMOTE_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 _SSH_REMOTE_RE = re.compile(r"git@github\.com:(?P<repo>.+)")
@@ -365,6 +368,115 @@ def pr_checks(url: str) -> str | None:
         if legacy_state in pending or still_running or unknown:
             saw_pending = True
     return "pending" if saw_pending else "passing"
+
+
+def parse_pr_url(url: str) -> tuple[str, int] | None:
+    """Split a github.com PR URL into `(owner/repo, number)`, else None.
+
+    Only github.com matches. Anything else — a GitHub Enterprise host, a URL
+    shape `gh` accepts but we don't recognise — reads as "not batchable", and
+    callers fall back to the per-PR lookups.
+    """
+    m = _PR_URL_PARSE_RE.match(url.strip())
+    if m is None:
+        return None
+    return m.group("repo").removesuffix(".git").lower(), int(m.group("number"))
+
+
+@dataclass(frozen=True)
+class PrSnapshot:
+    """One PR's state and CI rollup, as gw's coarse vocabulary.
+
+    `state` is `OPEN`/`CLOSED`/`MERGED` (as `pr_state` returns) and `checks` is
+    `passing`/`failing`/`pending` (as `pr_checks` returns). Either is None when
+    there was no signal, which callers treat as "keep what you had".
+    """
+
+    state: str | None = None
+    checks: str | None = None
+
+
+# GitHub's own `StatusCheckRollup.state`, mapped onto the same three buckets
+# `pr_checks` derives by hand from the individual check runs. Letting GitHub do
+# the aggregation is what makes the batched query cheap: we ask for one enum per
+# PR instead of every check run's status and conclusion.
+_ROLLUP_STATES: dict[str, str] = {
+    "SUCCESS": "passing",
+    "FAILURE": "failing",
+    "ERROR": "failing",
+    "PENDING": "pending",
+    "EXPECTED": "pending",
+}
+
+# Aliases per GraphQL query. Each query costs one rate-limit point regardless of
+# how many PRs it names, so this only bounds the request body — big enough that
+# realistic repos take a single round-trip.
+_PR_BATCH_SIZE = 100
+
+
+def pr_snapshots(repo: str, numbers: list[int]) -> dict[int, PrSnapshot]:
+    """State + CI rollup for many PRs in one repo, in one API call per 100.
+
+    A single aliased GraphQL query costs one rate-limit point no matter how many
+    PRs it names, where `pr_state` + `pr_checks` cost two points *per PR*.
+
+    Best-effort throughout, matching `pr_state`: a missing `gh`, an unreachable
+    API, or a deleted PR all read as "no signal". Numbers that resolve to
+    nothing are simply absent from the returned mapping rather than mapped to an
+    empty snapshot, so a caller can tell "we asked and got nothing" from "we
+    never asked".
+    """
+    if shutil.which("gh") is None or not numbers:
+        return {}
+    owner, _, name = repo.partition("/")
+    if not owner or not name:
+        return {}
+
+    import json
+
+    out: dict[int, PrSnapshot] = {}
+    unique = sorted(set(numbers))
+    for start in range(0, len(unique), _PR_BATCH_SIZE):
+        chunk = unique[start : start + _PR_BATCH_SIZE]
+        # `owner`/`name` go through GraphQL variables; the numbers are already
+        # ints, so the aliases are the only interpolation and they cannot carry
+        # anything but digits.
+        fields = "\n".join(
+            f"    p{n}: pullRequest(number: {n}) {{ state statusCheckRollup {{ state }} }}"
+            for n in chunk
+        )
+        query = (
+            "query($owner: String!, $name: String!) {\n"
+            "  repository(owner: $owner, name: $name) {\n"
+            f"{fields}\n"
+            "  }\n"
+            "}"
+        )
+        res = _run(
+            ["api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"query={query}"]
+        )
+        # A PR that no longer exists makes `gh` exit non-zero *and* still return
+        # the data for every other alias, so the return code is not a usable
+        # signal here — parse stdout either way and let missing aliases fall out
+        # as "no snapshot".
+        try:
+            payload = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            continue
+        repo_data = (payload.get("data") or {}).get("repository")
+        if not isinstance(repo_data, dict):
+            continue
+        for n in chunk:
+            pr = repo_data.get(f"p{n}")
+            if not isinstance(pr, dict):
+                continue
+            rollup = pr.get("statusCheckRollup")
+            rollup_state = rollup.get("state") if isinstance(rollup, dict) else None
+            out[n] = PrSnapshot(
+                state=str(pr["state"]) if pr.get("state") else None,
+                checks=_ROLLUP_STATES.get(str(rollup_state or "").upper()),
+            )
+    return out
 
 
 def pr_status(*, cwd: Path) -> dict[str, str]:

@@ -47,7 +47,7 @@ Per project, then per task (iterating `task.all_repos()` for multi-repo tasks):
 | 2b | GitHub issue state | `github-issue` step; TTL-gated via `github_state.refresh`, also shared with `gw status` |
 | 3 | Reconcile + summaries | Discovery outside the lock, plan applied inside |
 | 4 | Descriptions | Invoked inline, with failure backoff |
-| 5 | PR state + CI checks | `gh.pr_state` / `gh.pr_checks`; drives `Task.status` transitions |
+| 5 | PR state + CI checks | Read from the pass's batched lookup (below); drives `Task.status` transitions |
 | 6 | Indicator cache | Uncommitted / ahead / PR / checks written to the sidecar cache |
 | 7 | Prune | Merged **and** clean only; never `--force` |
 | 8 | Notifications | Edge-triggered; see below |
@@ -57,6 +57,45 @@ An unexpected (non-`GoblinError`) exception is *not* isolated: it is journaled a
 a bug exits 1 into the launchd log instead of quietly halving a pass. Skipped
 passes are journaled too — a wedged holder of the single-instance lock shows up
 as a run of `pass-skipped` records rather than silence.
+
+### PR lookups are batched per repo, not per task
+
+Steps 5 and 7 both need a task's PR state, and asking `gh` per task made a pass
+cost three GitHub round-trips for every PR-bearing task — `pr_state`,
+`pr_checks`, then `pr_state` again from `merge_detection` inside prune. At a
+five-minute interval that scaled linearly with task count and never decayed.
+
+`_collect_pr_snapshots` now runs once per project, before the task loop, and
+returns a `gh.PrSnapshot` per PR URL that steps 5 and 7 both read. Step 7 passes
+its snapshot to `merge_detection(…, snapshot=…)`, which is what stops the prune
+step re-asking. The mapping is *total* over PR-bearing tasks — a lookup that
+produced nothing still gets an all-`None` snapshot — so "already asked, got no
+signal" stays distinguishable from "no PR here", and a failed batch falls
+through to ancestry rather than fanning back out into per-task calls.
+
+Three tiers, cheapest first:
+
+- A task already recorded as `merged` is not looked up at all. `MERGED` is the
+  only terminal PR state and a merged PR's CI result is not actionable, so its
+  `checks` indicator is dropped rather than frozen. This matters because merged
+  tasks accumulate: prune refuses to delete one with a dirty worktree, and those
+  used to poll forever. `CLOSED` is deliberately *not* treated as terminal — a
+  closed PR can be reopened, and it rides along in the batch at no extra cost.
+- github.com PRs are grouped by repo and fetched with `gh.pr_snapshots`, one
+  aliased GraphQL query per repo (chunked at 100 PRs). GitHub charges **one**
+  rate-limit point per query regardless of how many PRs it names, and
+  `statusCheckRollup { state }` returns a pre-aggregated
+  SUCCESS/PENDING/FAILURE, so there is no per-check payload to walk.
+- Anything else — a GitHub Enterprise host, a URL shape `gh` accepts but
+  `gh.parse_pr_url` doesn't recognise — falls back to the per-PR
+  `pr_state` + `pr_checks` pair, which is what every PR used before batching.
+
+Measured on a real 50-task registry: 36 rate-limit points per pass became 3, and
+the cost is now O(repos with unlanded PRs) rather than O(tasks).
+
+`gh api graphql` exits non-zero when *any* alias fails to resolve while still
+returning every other alias's data, so `pr_snapshots` parses stdout regardless of
+the return code and lets unresolvable PRs fall out as absent entries.
 
 ### What prune refuses to touch
 
@@ -200,10 +239,13 @@ $XDG_DATA_HOME/goblin-watcher/
   re-reading, interleaved narrow patches.
 - `tests/test_sync_engine.py` — full passes over real git repos with `gh` and the
   notifier faked: PR transitions, edge-trigger once-only, prune safety (including
-  the multi-repo guard), backoff, crash and skip bookkeeping.
+  the multi-repo guard), backoff, crash and skip bookkeeping, and the batched PR
+  lookup — one query per repo, no second fetch inside prune, no fetch at all for
+  an already-merged task.
 - `tests/test_sync_cache.py` — `gw status` preferring, ageing out, and bypassing
   the indicator cache.
 - `tests/test_sync_store.py`, `test_sync_journal.py`, `test_sync_notify.py`,
-  `test_sync_launchd.py`, `test_cli_sync.py`, `test_gh_pr_checks.py`.
+  `test_sync_launchd.py`, `test_cli_sync.py`, `test_gh_pr_checks.py`,
+  `test_gh_pr_snapshots.py`.
 
 Nothing in the suite invokes real `launchctl`, `osascript`, `gh`, or the network.

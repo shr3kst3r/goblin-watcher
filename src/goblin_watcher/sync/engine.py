@@ -208,7 +208,13 @@ def _execute(
                     report.errors.append(f"{proj.name}: fetch: {e.message}")
                     emit("error", "fetch-failed", project=proj.name, detail=e.message)
 
-            for task in state.list_tasks(proj):
+            tasks = state.list_tasks(proj)
+            # 1b. Every PR this project's tasks point at, looked up together.
+            #     One batched query per repo replaces two `gh pr view` calls per
+            #     task, so the pass's API cost stops scaling with task count.
+            snapshots = _collect_pr_snapshots(tasks, emit, warned)
+
+            for task in tasks:
                 report.tasks += 1
                 live_tasks.add(store.cache_key(proj.name, task.id))
                 live_sessions.update(s.session_id for s in task.sessions)
@@ -221,10 +227,10 @@ def _execute(
                         cache=cache,
                         notifier=notifier,
                         linear=linear,
+                        snapshot=snapshots.get(task.pr_url or ""),
                         steps=steps,
                         emit=emit,
                         report=report,
-                        warned=warned,
                     )
                 except Exception as e:
                     # Per-step `GoblinError`s are already handled inside
@@ -326,6 +332,72 @@ def _resolve_projects(
     return out
 
 
+def _collect_pr_snapshots(
+    tasks: list[Task], emit: Callable[..., None], warned: set[str]
+) -> dict[str, gh.PrSnapshot]:
+    """State + checks for every PR these tasks point at, keyed by PR URL.
+
+    The result is *total* over PR-bearing tasks: every such task gets an entry,
+    even when the lookup produced nothing (an all-None snapshot). That is what
+    lets `_sync_task` distinguish "already looked up, don't look again" from
+    "no PR here", and keeps the prune step from re-fetching what this already
+    fetched.
+
+    Three tiers, cheapest first:
+
+    * A task already recorded as `merged` is not looked up at all. MERGED is the
+      one terminal PR state, and a merged PR's CI result is not actionable — so
+      a repo whose tasks have all landed costs zero API calls, forever, instead
+      of two per task per pass. (CLOSED is deliberately *not* terminal: a closed
+      PR can be reopened, and it rides along in the batch for free.)
+    * github.com PRs are grouped by repo and fetched in one query each.
+    * Anything else — a GitHub Enterprise host, an unparseable URL — falls back
+      to the per-PR `pr_view` pair, which is what this code did for everything
+      before batching.
+    """
+    by_repo: dict[str, dict[int, str]] = {}
+    out: dict[str, gh.PrSnapshot] = {}
+    fallback: list[str] = []
+
+    for task in tasks:
+        url = task.pr_url
+        if not url or task.kind == "scratch":
+            continue
+        if task.status == "merged":
+            out[url] = gh.PrSnapshot(state="MERGED", checks=None)
+            continue
+        parsed = gh.parse_pr_url(url)
+        if parsed is None:
+            fallback.append(url)
+            continue
+        repo, number = parsed
+        by_repo.setdefault(repo, {})[number] = url
+
+    if not by_repo and not fallback:
+        return out
+
+    # Journal a missing `gh` once per pass rather than once per PR, but don't
+    # branch on it: each lookup below already answers "no signal" on its own
+    # when the binary is absent.
+    if shutil.which("gh") is None and "gh" not in warned:
+        warned.add("gh")
+        emit(
+            "info",
+            "gh-unavailable",
+            detail="`gh` is not on PATH; PR state and CI checks skipped this pass",
+        )
+
+    for repo, urls in by_repo.items():
+        found = gh.pr_snapshots(repo, list(urls))
+        for number, url in urls.items():
+            out[url] = found.get(number, gh.PrSnapshot())
+
+    for url in fallback:
+        out[url] = gh.PrSnapshot(state=gh.pr_state(url), checks=gh.pr_checks(url))
+
+    return out
+
+
 def _sync_task(
     *,
     proj: Project,
@@ -335,10 +407,10 @@ def _sync_task(
     cache: IndicatorCache,
     notifier: Notifier,
     linear: LinearStateFetcher,
+    snapshot: gh.PrSnapshot | None,
     steps: _Steps,
     emit: Callable[..., None],
     report: PassReport,
-    warned: set[str],
 ) -> None:
     def guard(step: StepName, fn: Callable[[], None]) -> None:
         """Run one step; journal a failure and carry on."""
@@ -392,13 +464,13 @@ def _sync_task(
         current = _refresh_pr_and_indicators(
             proj=proj,
             task=current,
+            snapshot=snapshot,
             cache=cache,
             st=st,
             notifier=notifier,
             cfg=cfg,
             emit=emit,
             report=report,
-            warned=warned,
         )
 
     guard("indicators", _indicators)
@@ -406,7 +478,10 @@ def _sync_task(
     # 7. Prune, and 8. idle notification.
     guard("notify", lambda: _notify_activity(proj, current, st, notifier, cfg, emit, report))
     if cfg.sync.prune:
-        guard("prune", lambda: _maybe_prune(proj, current, cfg, st, cache, notifier, emit, report))
+        guard(
+            "prune",
+            lambda: _maybe_prune(proj, current, snapshot, cfg, st, cache, notifier, emit, report),
+        )
 
 
 def _refresh_descriptions(
@@ -473,13 +548,13 @@ def _refresh_pr_and_indicators(
     *,
     proj: Project,
     task: Task,
+    snapshot: gh.PrSnapshot | None,
     cache: IndicatorCache,
     st: SyncState,
     notifier: Notifier,
     cfg: config.Config,
     emit: Callable[..., None],
     report: PassReport,
-    warned: set[str],
 ) -> Task:
     """Recompute this task's derived indicators and cache them.
 
@@ -514,18 +589,12 @@ def _refresh_pr_and_indicators(
                     owner.root, f"{repo.base_branch}..{repo.branch}"
                 )
 
-    # PR state + checks. `pr_state`/`pr_checks` return None when gh is absent,
-    # which reads as "no signal" and leaves the previous edge-trigger value.
+    # PR state + checks, from the pass's batched lookup. Either field is None
+    # when there was no signal (gh absent, API unreachable, PR deleted), which
+    # leaves the previous edge-trigger value alone.
     updated = task
-    if task.pr_url:
-        if shutil.which("gh") is None and "gh" not in warned:
-            warned.add("gh")
-            emit(
-                "info",
-                "gh-unavailable",
-                detail="`gh` is not on PATH; PR state and CI checks skipped this pass",
-            )
-        pr_state = gh.pr_state(task.pr_url)
+    if snapshot is not None:
+        pr_state = snapshot.state
         if pr_state is not None:
             indicators.pr_state = pr_state
             _fire_pr_transition(proj, task, pr_state, st, notifier, cfg, emit, report)
@@ -544,10 +613,9 @@ def _refresh_pr_and_indicators(
                     task=task.id,
                     detail=new_status,
                 )
-        checks = gh.pr_checks(task.pr_url)
-        if checks is not None:
-            indicators.checks = checks
-            _fire_checks_transition(proj, task, checks, st, notifier, cfg, emit, report)
+        if snapshot.checks is not None:
+            indicators.checks = snapshot.checks
+            _fire_checks_transition(proj, task, snapshot.checks, st, notifier, cfg, emit, report)
 
     cache.entries[store.cache_key(proj.name, task.id)] = indicators
     return updated
@@ -713,6 +781,7 @@ def _notify_activity(
 def _maybe_prune(
     proj: Project,
     task: Task,
+    snapshot: gh.PrSnapshot | None,
     cfg: config.Config,
     st: SyncState,
     cache: IndicatorCache,
@@ -736,7 +805,10 @@ def _maybe_prune(
             return
         reason = f"idle {idle.days}d"
     else:
-        detected = merge_detection(proj, task)
+        # The batched lookup above already answered "is this PR merged?" for
+        # this exact task; re-asking `gh` here is the duplicate round-trip that
+        # made every PR-bearing task cost three calls a pass instead of two.
+        detected = merge_detection(proj, task, snapshot=snapshot)
         if detected is None:
             return
         reason = detected

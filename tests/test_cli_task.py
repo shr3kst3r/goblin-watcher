@@ -314,6 +314,50 @@ def test_task_prune_skips_unmerged(isolated_xdg: Path, tmp_path: Path) -> None:
     assert len(state.list_tasks(proj)) == 1
 
 
+def test_merge_detection_fetches_when_given_no_snapshot(isolated_xdg: Path, tmp_path: Path) -> None:
+    """The foreground path (`gw task prune`) has nothing pre-fetched — it must ask."""
+    from unittest.mock import patch
+
+    from goblin_watcher.commands.task import merge_detection
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    task = state.update_task(
+        proj, task.id, lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1"})
+    )
+
+    with patch("goblin_watcher.commands.task.gh.pr_state", return_value="MERGED") as pr_state:
+        assert merge_detection(proj, task) == "PR"
+    pr_state.assert_called_once_with("https://gh/pr/1")
+
+
+def test_merge_detection_trusts_a_supplied_snapshot(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A snapshot means "already looked up" — even one carrying no signal.
+
+    A failed batch must fall through to ancestry rather than re-asking `gh` per
+    task, which is exactly the fan-out batching exists to prevent.
+    """
+    from unittest.mock import patch
+
+    from goblin_watcher import gh as gh_module
+    from goblin_watcher.commands.task import merge_detection
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    task = state.update_task(
+        proj, task.id, lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1"})
+    )
+
+    with patch("goblin_watcher.commands.task.gh.pr_state") as pr_state:
+        assert merge_detection(proj, task, snapshot=gh_module.PrSnapshot(state="MERGED")) == "PR"
+        assert merge_detection(proj, task, snapshot=gh_module.PrSnapshot(state="OPEN")) is None
+        # No signal: not "merged via PR", and still no second round-trip.
+        assert merge_detection(proj, task, snapshot=gh_module.PrSnapshot()) is None
+    pr_state.assert_not_called()
+
+
 def test_task_prune_skips_stale_project_registration(isolated_xdg: Path, tmp_path: Path) -> None:
     """A registered project whose metadata is gone must not abort pruning for
     the healthy projects."""
