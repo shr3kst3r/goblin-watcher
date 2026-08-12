@@ -101,7 +101,7 @@ def installed_interval() -> int | None:
     try:
         with target.open("rb") as f:
             payload = plistlib.load(f)
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except OSError, plistlib.InvalidFileException, ValueError:
         return None
     value = payload.get("StartInterval") if isinstance(payload, dict) else None
     return value if isinstance(value, int) else None

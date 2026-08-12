@@ -231,7 +231,7 @@ def issue_state(repo: str, number: int) -> str | None:
 
     try:
         value = json.loads(res.stdout).get("state")
-    except (json.JSONDecodeError, AttributeError):
+    except json.JSONDecodeError, AttributeError:
         return None
     return str(value) if value else None
 
@@ -322,7 +322,7 @@ def pr_state(url: str) -> str | None:
 
     try:
         return json.loads(res.stdout).get("state")
-    except (json.JSONDecodeError, AttributeError):
+    except json.JSONDecodeError, AttributeError:
         return None
 
 
@@ -346,7 +346,7 @@ def pr_checks(url: str) -> str | None:
 
     try:
         rollup = json.loads(res.stdout).get("statusCheckRollup")
-    except (json.JSONDecodeError, AttributeError):
+    except json.JSONDecodeError, AttributeError:
         return None
     if not rollup:
         return None

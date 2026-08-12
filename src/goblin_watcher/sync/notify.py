@@ -52,7 +52,7 @@ class MacosNotifier:
                 timeout=10,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except OSError, subprocess.SubprocessError:
             return False
         return proc.returncode == 0
 
@@ -80,7 +80,7 @@ class CommandNotifier:
                 timeout=30,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except OSError, subprocess.SubprocessError:
             return False
         return proc.returncode == 0
 

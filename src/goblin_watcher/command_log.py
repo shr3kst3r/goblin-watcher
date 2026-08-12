@@ -111,7 +111,7 @@ def _split_by_age(older_than_days: int) -> tuple[list[str], list[str]]:
             if isinstance(ts_raw, str):
                 ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
                 is_old = ts < cutoff
-        except (json.JSONDecodeError, ValueError, TypeError):
+        except json.JSONDecodeError, ValueError, TypeError:
             pass
         (to_remove if is_old else to_keep).append(line)
     return (to_remove, to_keep)

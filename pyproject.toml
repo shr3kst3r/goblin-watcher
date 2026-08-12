@@ -3,7 +3,7 @@ name = "goblin-watcher"
 version = "0.1.0"
 description = "Parallel AI coding agents in git worktrees. Replaces Conductor/Superset."
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.14,<3.15"
 license = { text = "Proprietary" }
 authors = [{ name = "goblin-watcher contributors" }]
 dependencies = [
@@ -42,7 +42,7 @@ packages = ["src/goblin_watcher"]
 python-preference = "only-system"
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 100
 src = ["src", "tests"]
 

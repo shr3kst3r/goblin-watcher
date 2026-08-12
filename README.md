@@ -33,7 +33,7 @@ Prerequisites:
 Quickstart:
 
 ```bash
-asdf install              # installs Python 3.12.8 and just 1.40.0 per .tool-versions
+asdf install              # installs Python 3.14.0 and just 1.40.0 per .tool-versions
 uv sync --extra dev
 uv run gw --help
 uv run gw doctor          # confirms which agent CLIs and helpers are on PATH
