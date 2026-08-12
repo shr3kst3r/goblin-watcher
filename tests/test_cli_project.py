@@ -72,6 +72,16 @@ def test_project_ls_shows_registered(isolated_xdg: Path, tmp_path: Path) -> None
     assert "alpha" in result.output
 
 
+def test_project_list_shows_registered(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    result = runner.invoke(app, ["project", "list"])
+    assert result.exit_code == 0
+    assert "alpha" in result.output
+
+
 def test_project_info_auto_picks_when_single_project(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = tmp_path / "alpha"
     _init_repo(repo)
