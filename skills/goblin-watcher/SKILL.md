@@ -9,7 +9,7 @@ allowed-tools: [Bash]
 
 `gw` turns a Linear ticket / GitHub issue / GitHub PR / branch into a **task**:
 a branch + git worktree under `<project_root>/.worktrees/<branch>/`, with one or
-more resumable agent **sessions** (claude / codex / gemini) on top. Published on
+more resumable agent **sessions** (claude / codex / gemini / antigravity) on top. Published on
 `$PATH` via spg, so plain `gw ...` works anywhere; inside the goblin-watcher
 repo itself, `uv run gw ...` also works.
 

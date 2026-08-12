@@ -38,7 +38,7 @@ class TmuxConfig(BaseModel):
 
 
 class DefaultsConfig(BaseModel):
-    agent: str | None = None  # "claude" | "codex" | "gemini"
+    agent: str | None = None  # "claude" | "codex" | "gemini" | "antigravity"
     windowing: Windowing = "inline"
     summary_ttl_seconds: int = 30
     unsafe: bool = True  # Default to bypass-permission mode; set `unsafe = false` to opt out.

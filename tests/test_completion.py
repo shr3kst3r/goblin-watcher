@@ -145,7 +145,7 @@ def test_static_zsh_project_new_name_does_not_complete_projects() -> None:
 def test_static_zsh_agent_flag_lists_choices() -> None:
     """`--agent` should advertise the known agent set via a static Choice list."""
     script = _static_zsh_script()
-    assert "(claude codex gemini managed)" in script
+    assert "(claude codex gemini antigravity managed)" in script
 
 
 def test_static_zsh_windowing_flag_lists_choices() -> None:

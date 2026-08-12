@@ -41,7 +41,7 @@ class TranscriptSummary:
 
 @runtime_checkable
 class Agent(Protocol):
-    """One concrete agent (claude / codex / gemini)."""
+    """One concrete agent (claude / codex / gemini / antigravity)."""
 
     name: str
     binary: str

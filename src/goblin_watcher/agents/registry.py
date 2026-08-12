@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from goblin_watcher.agents.antigravity import AntigravityAgent
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.agents.claude import ClaudeAgent
 from goblin_watcher.agents.codex import CodexAgent
@@ -13,6 +14,7 @@ registry: dict[str, type[Agent]] = {
     "claude": ClaudeAgent,
     "codex": CodexAgent,
     "gemini": GeminiAgent,
+    "antigravity": AntigravityAgent,
     "managed": ManagedAgent,
 }
 
@@ -41,7 +43,7 @@ def validate_agent_for_project(agent_name: str, project: Project) -> None:
     if project.kind == "scratch":
         raise GoblinError(
             "The managed agent can't run in a scratch space (no git remote to clone).",
-            hint="Pick a local agent (claude/codex/gemini).",
+            hint="Pick a local agent (claude/codex/gemini/antigravity).",
         )
     if project.repo_url:
         return
@@ -50,6 +52,6 @@ def validate_agent_for_project(agent_name: str, project: Project) -> None:
         hint=(
             "Local-only checkouts can't be cloned by the managed sandbox. "
             "Add a remote to the project (or re-register it via `gw project new --repo URL`) "
-            "or pick a local agent (claude/codex/gemini)."
+            "or pick a local agent (claude/codex/gemini/antigravity)."
         ),
     )

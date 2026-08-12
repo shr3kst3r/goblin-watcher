@@ -47,7 +47,7 @@ def test_managed_is_registered() -> None:
 def test_validator_allows_local_agents_regardless_of_remote() -> None:
     # Local agents have no project-level prerequisites.
     proj = _project(repo_url=None)
-    for name in ("claude", "codex", "gemini"):
+    for name in ("claude", "codex", "gemini", "antigravity"):
         validate_agent_for_project(name, proj)  # does not raise
 
 
