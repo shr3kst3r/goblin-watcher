@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from goblin_watcher import state
 from goblin_watcher.cli import app
+from goblin_watcher.models import Task
 
 
 def _init_repo(path: Path) -> None:
@@ -190,6 +191,127 @@ def test_run_adversarial_review_rejects_non_claude_agent(
     assert res.exit_code != 0
     assert res.exception is not None
     assert "requires --agent claude" in str(res.exception)
+
+
+def _issue_backed_alpha_task(tmp_path: Path) -> Task:
+    """`spike/foo` in alpha, retrofitted with a GitHub issue to research."""
+    from goblin_watcher.models import GhIssue
+
+    _bootstrap_two_projects(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    task = task.model_copy(
+        update={
+            "github_issue": GhIssue(
+                number=11,
+                repo="org/repo",
+                title="Add a research option",
+                body="Investigate the ticket and report back.",
+                state="OPEN",
+                url="https://github.com/org/repo/issues/11",
+            )
+        }
+    )
+    state.save_task(proj, task)
+    return task
+
+
+def test_run_research_seeds_the_research_brief(isolated_xdg: Path, tmp_path: Path) -> None:
+    task = _issue_backed_alpha_task(tmp_path)
+
+    runner = CliRunner()
+    with patch(
+        "goblin_watcher.commands.run.launch_agent",
+        return_value=(0, task),
+    ) as launch:
+        res = runner.invoke(app, ["run", task.id, "--project", "alpha", "--research"])
+    assert res.exit_code == 0, res.output
+    choice = launch.call_args.kwargs["choice"]
+    # Fresh, not Resume — research always starts a new session.
+    assert type(choice).__name__ == "Fresh"
+    assert choice.prompt.startswith("Research task —")
+    assert "org/repo#11: Add a research option" in choice.prompt
+    assert "Investigate the ticket and report back." in choice.prompt
+    assert "open a PR via" not in choice.prompt
+
+
+def test_run_research_prompt_narrows_the_focus(isolated_xdg: Path, tmp_path: Path) -> None:
+    """--prompt composes with --research instead of conflicting with it."""
+    task = _issue_backed_alpha_task(tmp_path)
+
+    runner = CliRunner()
+    with patch(
+        "goblin_watcher.commands.run.launch_agent",
+        return_value=(0, task),
+    ) as launch:
+        res = runner.invoke(
+            app,
+            ["run", task.id, "--project", "alpha", "--research", "--prompt", "Only the sync path."],
+        )
+    assert res.exit_code == 0, res.output
+    choice = launch.call_args.kwargs["choice"]
+    assert "Focus this research on the following" in choice.prompt
+    assert "Only the sync path." in choice.prompt
+    assert "open a PR via" not in choice.prompt
+
+
+def test_run_research_conflicts_with_session(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Both `--session <id>` and the bare-`--session` picker sentinel (spliced in
+    by `cli._inject_session_pick_sentinel`) are refused, so `--research` can
+    never reach a picker branch."""
+    from goblin_watcher.picker import SESSION_PICK_SENTINEL
+
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    for value in ("x", SESSION_PICK_SENTINEL):
+        with patch("goblin_watcher.commands.run.choose_session") as picker:
+            res = runner.invoke(
+                app, ["run", "spike-foo", "--project", "alpha", "--research", "--session", value]
+            )
+        assert res.exit_code != 0
+        assert res.exception is not None
+        assert "--research and --session are mutually exclusive" in str(res.exception), value
+        picker.assert_not_called()
+
+
+def test_run_research_conflicts_with_adversarial_review(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["run", "spike-foo", "--project", "alpha", "--research", "--adversarial-review"]
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "--research and --adversarial-review are mutually exclusive" in str(res.exception)
+
+
+def test_run_research_and_adversarial_review_conflict_is_reported_first(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The mode conflict outranks --adversarial-review's own checks: --agent and
+    --prompt are both fine with --research, so pointing at them would send the
+    user off fixing the wrong flag."""
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    for extra in (["--agent", "codex"], ["--prompt", "focus on sync"]):
+        args = ["run", "spike-foo", "--project", "alpha", "--research", "--adversarial-review"]
+        res = runner.invoke(app, [*args, *extra])
+        assert res.exit_code != 0
+        assert res.exception is not None
+        assert "--research and --adversarial-review are mutually exclusive" in str(res.exception), (
+            extra
+        )
+
+
+def test_run_research_requires_a_tracking_item(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.run.launch_agent") as launch:
+        res = runner.invoke(app, ["run", "spike-foo", "--project", "alpha", "--research"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "has no Linear ticket or GitHub issue to research" in str(res.exception)
+    launch.assert_not_called()
 
 
 def test_run_project_flag_task_missing_in_scope_errors(isolated_xdg: Path, tmp_path: Path) -> None:

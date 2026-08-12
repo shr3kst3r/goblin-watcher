@@ -124,13 +124,25 @@ Accepts three forms, parsed by `gh.parse_issue_ref`:
 
 After Task creation (and unless `--no-launch`), the launcher needs a prompt string for `agent.spawn_command(prompt=...)`.
 
-`agents/launcher.build_seed_prompt(task)` uses `templates/spawn_prompt.md`, whose `{ticket_id}` / `{title}` / `{description}` slots are filled from whichever tracking item the task carries (`Task.ticket_id` / `Task.ticket_title`):
+`agents/launcher.build_seed_prompt(task)` selects one of two templates and fills the same context slots in either — a **work brief** (`templates/spawn_prompt.md`, the default) or a **research brief** (`templates/research_prompt.md`, when `research=True`). ADR 0006 records why a work mode is an alternate template rather than a canned `--prompt` or a slash-command bypass like `--adversarial-review`.
+
+The `{ticket_id}` / `{title}` / `{description}` slots are filled from whichever tracking item the task carries (`Task.ticket_id` / `Task.ticket_title`):
 
 - For `--linear` tasks: `ENG-123` + title + description + the Linear comment thread.
 - For `--issue` tasks: `owner/repo#42` + title + a header line (state, URL, labels) + the issue body. The qualified form is used even same-repo, so a cross-repo tracking issue is never ambiguous.
 - For `--branch-name` / `--branch` / `--dir` / `--pr`: id slot becomes `task.id.upper()`, title slot becomes `task.id`, description slot becomes `(no Linear issue or GitHub issue attached — fresh task)`.
 
 This means a task with no tracking item gets a thinner prompt — that's correct; the user has more responsibility for orienting the agent when they didn't go through a tracker.
+
+### Research mode (`--research`)
+
+`gw new --research` and `gw run --research` seed the research brief instead. It carries the same ticket context and repos block, drops the work brief's standing "open a PR via `gw pr open`" instruction, spells out what the agent may and may not do, and asks for findings **in the session** rather than in a file. `--prompt` composes with it, narrowing the investigation's focus instead of replacing the trailer.
+
+Three things to know:
+
+- **It requires a tracking item.** `gw new --research` is refused for `--branch`, `--branch-name`, `--branch-auto`, `--dir`, and `--pr`; `gw run --research` is refused for any task carrying neither a Linear ticket nor a GitHub issue (scratch tasks included). A research brief about nothing is a silent no-op, so gw refuses loudly.
+- **The read-only boundary is advisory, not enforced.** `defaults.unsafe = true` is the documented default, so the agent runs with bypassed permissions and could still push or comment. What research mode buys is that the agent is not *instructed* to mutate anything; gw gates no command on it.
+- **The mode is a property of the session, not the task.** Nothing is persisted on `Task`, so a research session can be followed by an ordinary implementation session on the same task; `gw run --research` re-derives the mode from the flag each time.
 
 ## Tracking-item state refresh
 
@@ -203,6 +215,8 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `src/goblin_watcher/gh.py` — `parse_issue_ref`, `issue_view`, `issue_state`, `normalize_repo`.
 - `src/goblin_watcher/github_state.py` — TTL-cached issue-state refresh.
 - `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`.
+- `src/goblin_watcher/templates/spawn_prompt.md` — the work brief.
+- `src/goblin_watcher/templates/research_prompt.md` — the `--research` brief (ADR 0006).
 
 ## Tests
 
@@ -210,6 +224,8 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`.
 - `tests/test_cli_linear_flow.py` — end-to-end for `--linear` (with `pytest-httpx` mock).
 - `tests/test_cli_issue_flow.py` — end-to-end for `--issue` and the `gw gh-42` shorthand.
+- `tests/test_launcher.py` — `build_seed_prompt` for both the work and research briefs.
+- `tests/test_cli_run.py` — `gw run`, including `--research` validation and seeding.
 - `tests/test_gh_issues.py` — reference parsing and the `gh issue` wrappers.
 - `tests/test_github_state.py` — the issue-state TTL + `gw status` rendering.
 - `tests/test_git_worktree.py` — the `worktree_add` / branch-existence primitives.

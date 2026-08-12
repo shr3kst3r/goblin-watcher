@@ -174,7 +174,22 @@ gw new --linear ENG-123 --no-launch                # create task, don't spawn ag
 gw new --linear ENG-123 --from feat/other-pr       # stack on a teammate's PR branch
 gw new --issue 42                                  # GitHub issue #42 in this repo
 gw new --issue org/tracker#3 --project my-repo     # tracking issue in another repo
+gw new --issue 42 --research                       # investigate and report back, don't implement
 ```
+
+#### `--research` — spawn an investigation instead of an implementation
+
+```bash
+gw new --linear ENG-123 --research
+gw new --issue 42 --research --prompt "just the sync path"   # narrows the focus
+```
+
+The agent gets the same ticket context as usual, but a different standing brief: read the code, search history, run tests and linters, make read-only fetches — then report its findings **in the session** rather than implementing anything, opening a PR, or commenting on the ticket. `--prompt` narrows the investigation instead of replacing the brief.
+
+Two honest caveats:
+
+- **It needs a ticket.** `--research` is only valid with `--linear` or `--issue`; the other sources carry no tracking item, so gw refuses rather than seeding a research brief about nothing. Same for `gw run --research` on a task with neither.
+- **The boundary is instruction-level, not enforced.** With `defaults.unsafe = true` (the default) the agent still *can* push or comment — it's just not told to. gw doesn't gate `gw pr open` or anything else on research mode. See [ADR 0006](docs/adrs/0006-research-mode-seed-prompt.md).
 
 ### `gw run` — interactive session picker
 
@@ -191,7 +206,10 @@ gw run --session                                    # force the picker even if t
 gw run --new                                        # force fresh
 gw run --agent codex                                # pick a non-default agent
 gw run --project my-repo                       # scope task lookup + picker to one project
+gw run eng-123 --research                           # fresh read-only research session on the ticket
 ```
+
+`--research` always starts a fresh session (so it can't be combined with `--session`) and needs the task to carry a Linear ticket or GitHub issue. Same caveats as `gw new --research` above: the read-only boundary is what the agent is told, not what it's prevented from doing.
 
 The picker chain auto-skips a level when there's only one option: one project → goes straight to its tasks; one task → goes straight to its sessions.
 
@@ -464,9 +482,9 @@ The agents will execute everything they decide to do without asking. If you'd ra
 gw <LINEAR-ID> [--project NAME] [--repo URL] [--agent ...]
                [--windowing inline|tmux] [--unsafe|--no-unsafe]
 gw new --linear|--branch|--branch-name|--branch-auto|--dir [--title ...] [--from ...]
-       [--project NAME] [--agent ...]
+       [--project NAME] [--agent ...] [--research]
        [--no-launch] [--windowing ...] [--unsafe|--no-unsafe]
-gw run [PATH|TASK-ID] [--agent ...] [--session [ID]] [--new]
+gw run [PATH|TASK-ID] [--agent ...] [--session [ID]] [--new] [--research]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
 gw status [--project NAME] [--no-linear] [--no-cache]   # tree view of projects → tasks → sessions

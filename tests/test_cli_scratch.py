@@ -104,6 +104,20 @@ def test_run_resumes_scratch_task(isolated_xdg: Path) -> None:
     assert kwargs["project"].name == "scratch"
 
 
+def test_run_research_rejects_scratch_task(isolated_xdg: Path) -> None:
+    """A scratch space carries no Linear ticket and no GitHub issue, so there is
+    nothing to research — refuse instead of seeding a brief about nothing
+    (ADR 0006). The repo research template would also misdescribe a plain dir."""
+    assert _scratch("foo", "--no-launch").exit_code == 0
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.run.launch_agent") as launch:
+        res = runner.invoke(app, ["run", "foo", "--research"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "has no Linear ticket or GitHub issue to research" in str(res.exception)
+    launch.assert_not_called()
+
+
 def test_new_rejects_scratch_project(isolated_xdg: Path) -> None:
     assert _scratch("foo", "--no-launch").exit_code == 0
     runner = CliRunner()
