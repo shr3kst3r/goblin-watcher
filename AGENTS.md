@@ -48,7 +48,7 @@ src/goblin_watcher/
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── picker.py              # questionary-backed interactive session picker
 ├── linear/                # GraphQL client + queries (httpx)
-├── agents/                # Agent protocol + claude/codex/gemini impls + launcher
+├── agents/                # Agent protocol + claude/codex/gemini/antigravity impls + launcher
 ├── windowing/             # Windower protocol + Inline + Tmux impls
 ├── sync/                  # background sync: engine, journal, indicator cache, notify, launchd
 ├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / sync / doctor / history / version)
@@ -103,7 +103,7 @@ The same command set runs in CI (`.github/workflows/verify.yml`).
 
 ## Adding an agent
 
-The registered set is `claude`, `codex`, `gemini`, plus `managed` (scaffold; see ADR 0002 and `docs/designs/sessions-and-windowing.md`). To wire another:
+The registered set is `claude`, `codex`, `gemini`, `antigravity` (Google Antigravity's `agy` CLI), plus `managed` (scaffold; see ADR 0002 and `docs/designs/sessions-and-windowing.md`). To wire another:
 1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `env`.
 2. Add it to `models.AgentName`.
 3. Add it to `agents/registry.registry`.
@@ -120,7 +120,7 @@ Resist adding entry-point discovery or a plugin system — keep it static.
 - One window per task, named after `task.id` (e.g. `eng-123`).
 - One pane per agent session (additional sessions on the same task `split-window`). `tmux.split = "vertical"` (default) stacks panes top/bottom; `"horizontal"` is side-by-side.
 - `attach_on_spawn = true` (default) means `gw` will `os.execvp` into `tmux attach` if invoked from outside tmux. From inside, it uses `tmux switch-window`.
-- `mark_idle = true` (default `false`) sets `monitor-silence <mark_idle_seconds>` on each task window — when claude/codex/gemini goes quiet (done or waiting for input), tmux marks the window with a `~` in the status bar. No bell, no banner, no focus-stealing. `mark_idle_seconds` defaults to `5`. Caveat: any agent that streams a heartbeat/spinner will never trigger this; verify your agent actually falls silent at its prompt.
+- `mark_idle = true` (default `false`) sets `monitor-silence <mark_idle_seconds>` on each task window — when the agent goes quiet (done or waiting for input), tmux marks the window with a `~` in the status bar. No bell, no banner, no focus-stealing. `mark_idle_seconds` defaults to `5`. Caveat: any agent that streams a heartbeat/spinner will never trigger this; verify your agent actually falls silent at its prompt.
 
 Test against a fake `tmux` (see `tests/test_windowing_tmux.py`) — never call the real binary in tests.
 

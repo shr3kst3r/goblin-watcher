@@ -95,6 +95,7 @@ The `--debug` global flag (also via `GW_DEBUG=1` env var) installs `rich.traceba
 - `agent.claude` → `bold magenta`
 - `agent.codex` → `bold cyan`
 - `agent.gemini` → `bold green`
+- `agent.antigravity` → `bold blue`
 
 Every output goes through this console (or `err_console` for stderr). `print` is banned by convention; ruff doesn't enforce that yet, but it would be a one-line `flake8-print` add if drift creeps in.
 

@@ -41,9 +41,11 @@ Both ship in MVP. Config switches; CLI flag `--windowing` overrides per invocati
 - `read_transcript(session_id, cwd)` — for summary refresh.
 - `env()` — extra environment overlay.
 
-Three concrete impls in `agents/{claude,codex,gemini}.py`. Static registry in `agents/registry.py`. **No plugin system.** Adding a fourth agent is a small documented checklist in root `AGENTS.md`.
+Four concrete impls in `agents/{claude,codex,gemini,antigravity}.py`. Static registry in `agents/registry.py`. **No plugin system.** Adding another agent is a small documented checklist in root `AGENTS.md`.
 
 Claude has the most thorough implementation today (`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` is well-documented). Codex and Gemini fall back to cwd-scoped resume and stub `list_sessions`/`read_transcript` until their session-store layouts are confirmed.
+
+Antigravity (`agy`) sits in between: its conversations live in an internal SQLite store we don't parse, so transcripts are stubbed, but its documented workspace cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`, a map of absolute workspace path → most recent conversation id) lets `capture_session_id` recover the real id after an inline run and resume it by id later. Note that `agy -p` is *headless* print mode — spawning an interactive session uses `--prompt-interactive`.
 
 ### Managed agent (scaffold only)
 

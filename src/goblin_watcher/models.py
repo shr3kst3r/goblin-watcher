@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-AgentName = Literal["claude", "codex", "gemini", "managed"]
+AgentName = Literal["claude", "codex", "gemini", "antigravity", "managed"]
 TaskStatus = Literal["open", "pushed", "pr-open", "merged", "closed", "abandoned"]
 # "git" projects are repos gw manages worktrees in; the single reserved
 # "scratch" project is a plain-directory container for `gw scratch` spaces.

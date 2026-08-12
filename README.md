@@ -399,7 +399,7 @@ gw config edit                       # $EDITOR, validated on save
 
 ```toml
 [defaults]
-agent = "claude"                  # "claude" | "codex" | "gemini"
+agent = "claude"                  # "claude" | "codex" | "gemini" | "antigravity"
 windowing = "inline"              # "inline" | "tmux"
 summary_ttl_seconds = 30          # how long a session summary is considered fresh
 unsafe = true                     # spawn agents with their bypass-permission flag (see below)
@@ -441,6 +441,7 @@ Inline mode (default) just blocks on the agent process and returns when it exits
 | **claude** (Claude Code) | `claude "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
 | **codex** | `codex "<prompt>"` | `codex resume <id>` | Partial — synthesizes a UUID; transcript parsing stubbed |
 | **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | Partial — cwd-scoped checkpoints, no stable id |
+| **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Partial — conversation id recovered from `~/.gemini/antigravity-cli/cache/last_conversations.json`; transcripts live in SQLite and aren't parsed |
 
 `gw doctor` checks which binaries are on PATH and resolves the Linear key.
 
@@ -453,6 +454,7 @@ Inline mode (default) just blocks on the agent process and returns when it exits
 | claude | `--dangerously-skip-permissions` |
 | codex | `--dangerously-bypass-approvals-and-sandbox` |
 | gemini | `--yolo` |
+| antigravity | `--dangerously-skip-permissions` |
 
 The agents will execute everything they decide to do without asking. If you'd rather be prompted, set `defaults.unsafe = false` in your config.
 

@@ -153,6 +153,8 @@ def doctor() -> None:
         _binary_check("claude", required=False),
         _binary_check("codex", required=False),
         _binary_check("gemini", required=False),
+        # Google Antigravity's CLI installs as `agy`, not `antigravity`.
+        _binary_check("agy", required=False),
         _managed_agent_check(),
         _windowing_check(cfg),
         _omz_update_prompt_check(cfg),

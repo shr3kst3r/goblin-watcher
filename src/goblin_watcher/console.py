@@ -5,6 +5,7 @@ AGENT_STYLES = {
     "claude": "bold magenta",
     "codex": "bold cyan",
     "gemini": "bold green",
+    "antigravity": "bold blue",
 }
 
 _theme = Theme(
@@ -16,6 +17,7 @@ _theme = Theme(
         "agent.claude": AGENT_STYLES["claude"],
         "agent.codex": AGENT_STYLES["codex"],
         "agent.gemini": AGENT_STYLES["gemini"],
+        "agent.antigravity": AGENT_STYLES["antigravity"],
     }
 )
 

@@ -96,7 +96,8 @@ class NotConfiguredClient:
     _MSG = "Managed-agent backend is not configured."
     _HINT = (
         "ADR 0002 describes the intended integration. No remote-execution "
-        "backend ships with gw yet — pick a local agent (claude/codex/gemini) "
+        "backend ships with gw yet — pick a local agent "
+        "(claude/codex/gemini/antigravity) "
         "or wire a ManagedClient implementation."
     )
 
