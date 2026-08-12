@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -8,9 +9,12 @@ from goblin_watcher.errors import GitCommandError
 
 
 def _run(args: list[str], cwd: Path | None = None) -> str:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     res = subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
+        env=env,
         capture_output=True,
         text=True,
         check=False,

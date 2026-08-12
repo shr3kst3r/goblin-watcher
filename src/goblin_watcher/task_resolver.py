@@ -79,7 +79,7 @@ def resolve_task(target: str | None, project_filter: str | None) -> Task:
             try:
                 proj = state.get_project(name)
                 matches.append(state.load_task(proj, target))
-            except (GoblinError, TaskNotFoundError):
+            except GoblinError, TaskNotFoundError:
                 continue
         if len(matches) == 1:
             return matches[0]

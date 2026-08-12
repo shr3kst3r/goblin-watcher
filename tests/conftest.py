@@ -16,4 +16,5 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     monkeypatch.setenv("XDG_DATA_HOME", str(data))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     yield tmp_path

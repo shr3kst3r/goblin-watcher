@@ -68,7 +68,7 @@ src/goblin_watcher/
 
 ## Toolchain
 
-[asdf](https://asdf-vm.com/) manages local tool versions. `.tool-versions` pins `python 3.12.8` and `just 1.40.0`. Fresh setup:
+[asdf](https://asdf-vm.com/) manages local tool versions. `.tool-versions` pins `python 3.14.0` and `just 1.40.0`. Fresh setup:
 
 ```
 asdf install              # ensures pinned Python + just are installed
