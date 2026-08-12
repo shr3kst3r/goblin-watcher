@@ -106,6 +106,7 @@ def new(
 
 
 @app.command("ls")
+@app.command("list")
 def ls() -> None:
     """List registered projects."""
     global_state = state.load_global()
