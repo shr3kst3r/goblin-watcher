@@ -290,6 +290,72 @@ def test_new_adversarial_review_rejects_non_claude_agent(
     assert "requires --agent claude" in str(res.exception)
 
 
+def test_new_research_rejects_no_launch(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["new", "--issue", "42", "--research", "--no-launch"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "--research has no effect with --no-launch" in str(res.exception)
+
+
+def test_new_research_conflicts_with_adversarial_review(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["new", "--issue", "42", "--research", "--adversarial-review"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "--research and --adversarial-review are mutually exclusive" in str(res.exception)
+
+
+def test_new_research_and_adversarial_review_conflict_is_reported_first(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The mode conflict outranks --adversarial-review's own checks: --agent and
+    --prompt are both fine with --research, so pointing at them would send the
+    user off fixing the wrong flag."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    for extra in (["--agent", "codex"], ["--prompt", "focus on sync"], ["--no-launch"]):
+        res = runner.invoke(
+            app, ["new", "--issue", "42", "--research", "--adversarial-review", *extra]
+        )
+        assert res.exit_code != 0
+        assert res.exception is not None
+        assert "--research and --adversarial-review are mutually exclusive" in str(res.exception), (
+            extra
+        )
+
+
+def test_new_research_requires_a_tracking_item(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A research brief about nothing is a silent no-op, so the sources that
+    attach no tracking item are refused before anything is created (ADR 0006)."""
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch") as launch:
+        res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--research"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "--research requires a tracking item to research." in str(res.exception)
+    launch.assert_not_called()
+    # Refused before the branch/worktree was created.
+    assert state.list_tasks(state.get_project("alpha")) == []
+
+
 def _clone_with_pr_branch(tmp_path: Path, *, head: str = "feat/pr-42", base: str = "main") -> Path:
     """Build an upstream carrying a PR head branch, clone it, return the clone."""
     upstream = tmp_path / "upstream"

@@ -223,6 +223,64 @@ def test_new_issue_twice_refuses_without_rm(isolated_xdg: Path, tmp_path: Path) 
     assert task.github_issue is not None and task.github_issue.repo == "org/tracker"
 
 
+def test_new_issue_research_seeds_the_research_brief(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register(repo)
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.gh.issue_view", return_value=_issue()),
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch,
+    ):
+        res = runner.invoke(app, ["new", "--issue", "42", "--project", "alpha", "--research"])
+    assert res.exit_code == 0, res.output
+
+    choice = launch.call_args.kwargs["choice"]
+    assert type(choice).__name__ == "Fresh"
+    assert choice.prompt.startswith("Research task —")
+    assert "Report your findings here, in this session" in choice.prompt
+    # The issue context survives, the PR-opening instruction does not.
+    assert "org/repo#42: Add rate limit" in choice.prompt
+    assert "We need a token bucket." in choice.prompt
+    assert "open a PR via" not in choice.prompt
+
+
+def test_new_issue_research_composes_with_prompt(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`--prompt` narrows a research session instead of conflicting with it
+    (ADR 0006) — the combination the README leads with."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register(repo)
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.gh.issue_view", return_value=_issue()),
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch,
+    ):
+        res = runner.invoke(
+            app,
+            [
+                "new",
+                "--issue",
+                "42",
+                "--project",
+                "alpha",
+                "--research",
+                "--prompt",
+                "Just the sync path.",
+            ],
+        )
+    assert res.exit_code == 0, res.output
+
+    choice = launch.call_args.kwargs["choice"]
+    assert choice.prompt.startswith("Research task —")
+    assert "Focus this research on the following" in choice.prompt
+    assert "Just the sync path." in choice.prompt
+    # The focus narrows the brief; it does not become the work template's trailer.
+    assert "open a PR via" not in choice.prompt
+
+
 def test_new_issue_conflicts_with_other_sources(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = tmp_path / "alpha"
     _init_repo(repo)

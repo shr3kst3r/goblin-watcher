@@ -284,12 +284,28 @@ def new(
         "--adversarial-review",
         help="Seed the session with `/codex:adversarial-review`. Forces --agent claude.",
     ),
+    research: bool = typer.Option(
+        False,
+        "--research",
+        help="Seed a read-only research session on the ticket: investigate and "
+        "report findings in the session, don't implement, don't touch "
+        "GitHub/Linear/Slack. Requires --linear or --issue.",
+    ),
 ) -> None:
     """Create a task from a source (Linear, GitHub issue or PR, branch, new branch, or dir)."""
     if prompt is not None and no_launch:
         raise GoblinError(
             "--prompt has no effect with --no-launch (no session is started).",
             hint="Drop --no-launch, or drop --prompt.",
+        )
+    # Hoisted above both mode blocks: when the caller asked for two modes at
+    # once, that conflict is the operative error. Reporting --adversarial-review's
+    # own checks first (--prompt, --agent) would send the user off changing a
+    # flag that --research accepts perfectly well.
+    if research and adversarial_review:
+        raise GoblinError(
+            "--research and --adversarial-review are mutually exclusive.",
+            hint="Pass one or the other.",
         )
     if adversarial_review:
         if no_launch:
@@ -309,6 +325,11 @@ def new(
                 hint=f"Drop --agent {agent}, or drop --adversarial-review.",
             )
         agent = "claude"
+    if research and no_launch:
+        raise GoblinError(
+            "--research has no effect with --no-launch (no session is started).",
+            hint="Drop --no-launch, or drop --research.",
+        )
     sources: list[object] = [
         s for s in (linear, issue, branch, branch_name, dir, pr) if s is not None
     ]
@@ -319,6 +340,14 @@ def new(
             "Specify exactly one source: --linear, --issue, --branch, --branch-name, "
             "--branch-auto, --dir, or --pr.",
             hint="e.g. `gw new --branch-auto` or `gw new --issue 42`.",
+        )
+
+    # A research brief about nothing is a silent no-op, so refuse the sources
+    # that attach no tracking item (ADR 0006).
+    if research and linear is None and issue is None:
+        raise GoblinError(
+            "--research requires a tracking item to research.",
+            hint="Pass --linear <ID> or --issue <ref>.",
         )
 
     if with_project and (dir is not None or pr is not None):
@@ -390,6 +419,7 @@ def new(
         ("windowing", windowing_mode),
         ("unsafe", str(unsafe_mode).lower()),
         ("no_launch", str(no_launch).lower()),
+        ("research", str(research).lower()),
     ]
     print_settings(settings)
 
@@ -407,7 +437,7 @@ def new(
     seed_prompt = (
         "/codex:adversarial-review --wait"
         if adversarial_review
-        else build_seed_prompt(task, user_prompt=prompt)
+        else build_seed_prompt(task, user_prompt=prompt, research=research)
     )
     choice = Fresh(prompt=seed_prompt)
     console.print(f"Launching {agent_badge(agent_name)} (fresh) in [muted]{windowing_mode}[/]…")

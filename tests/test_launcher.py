@@ -394,6 +394,135 @@ def test_build_seed_prompt_github_issue_without_body(isolated_xdg: Path, tmp_pat
     assert "(The issue has no description.)" in seed
 
 
+def _flat(text: str) -> str:
+    """Collapse the brief's hard wrapping so assertions read as sentences.
+
+    Without this a test fails whenever a paragraph is re-wrapped, which says
+    nothing about whether the instruction is still there.
+    """
+    return " ".join(text.split())
+
+
+def _issue_backed_task(tmp_path: Path) -> Task:
+    from goblin_watcher.models import GhIssue
+
+    return _bootstrap(tmp_path).model_copy(
+        update={
+            "github_issue": GhIssue(
+                number=11,
+                repo="org/repo",
+                title="Add a research option",
+                body="Spawn the agent to investigate the ticket and report back.",
+                state="OPEN",
+                url="https://github.com/org/repo/issues/11",
+            )
+        }
+    )
+
+
+def test_research_prompt_keeps_the_ticket_context(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A research brief is the work brief's context with different standing
+    instructions — the ticket is the whole input, so it must survive (ADR 0006)."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _issue_backed_task(tmp_path)
+    seed = build_seed_prompt(task, research=True)
+    assert "org/repo#11: Add a research option" in seed
+    assert f"Branch: {task.branch} (off {task.base_branch})" in seed
+    assert f"Worktree: {task.worktree_path}" in seed
+    assert "Spawn the agent to investigate the ticket and report back." in seed
+    assert "{focus}" not in seed
+
+
+def test_research_prompt_does_not_instruct_to_open_a_pr(isolated_xdg: Path, tmp_path: Path) -> None:
+    """The one instruction that must not appear: the work template's standing
+    "open a PR" line, which no --prompt value can suppress."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _issue_backed_task(tmp_path)
+    seed = build_seed_prompt(task, research=True)
+    assert "open a PR via" not in seed
+    assert "When this task is ready for review" not in seed
+    # Sanity: the default template still carries it.
+    assert "open a PR via `gw pr open`" in build_seed_prompt(task)
+
+
+def test_research_prompt_names_the_prohibitions(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Every boundary ADR 0006 asks the brief to draw, named explicitly rather
+    than by category — dropping any one of them is a silent regression."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    seed = _flat(build_seed_prompt(_issue_backed_task(tmp_path), research=True))
+    assert "Do not:" in seed
+    # Scoped to the prohibition sentence, so a phrase that happens to occur in
+    # the ticket body can't satisfy the assertion.
+    prohibited = seed.split("Do not:", 1)[1].split("Report your findings", 1)[0]
+    for phrase in (
+        "push",
+        "commit",
+        "open or comment on a pull request",
+        "run `gw pr open`",
+        "comment on, assign, or transition the Linear ticket or the GitHub issue",
+        "post to Slack or any other external service",
+        "modify this project's source",
+    ):
+        assert phrase in prohibited, phrase
+
+
+def test_research_prompt_reports_in_session_not_to_a_file(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    seed = _flat(build_seed_prompt(_issue_backed_task(tmp_path), research=True))
+    assert "Report your findings here, in this session" in seed
+    assert "do not write them to a file" in seed
+
+
+def test_research_prompt_opens_with_the_research_marker(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`_label_from_prompt` takes the first 80 chars for the session label, so a
+    research session is recognizable in the picker (ADR 0006's mitigation)."""
+    from goblin_watcher.agents.launcher import _label_from_prompt, build_seed_prompt
+
+    seed = build_seed_prompt(_issue_backed_task(tmp_path), research=True)
+    assert seed.startswith("Research task —")
+    assert _label_from_prompt(seed).startswith("Research task — investigate")
+
+
+def test_research_prompt_user_prompt_becomes_a_focus(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _issue_backed_task(tmp_path)
+    seed = build_seed_prompt(task, user_prompt="Only the sync path.", research=True)
+    assert "Focus this research on the following" in seed
+    assert "Only the sync path." in seed
+    # The focus narrows the brief; it doesn't replace the constraints.
+    assert seed.index("Only the sync path.") > seed.index("run `gw pr open`")
+
+
+def test_research_prompt_without_user_prompt_has_no_focus(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _issue_backed_task(tmp_path)
+    assert "Focus this research on" not in build_seed_prompt(task, research=True)
+    # Whitespace-only is treated as absent, as in the default template.
+    assert "Focus this research on" not in build_seed_prompt(task, user_prompt="  ", research=True)
+
+
+def test_research_prompt_keeps_the_prompt_addition(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher import prompt_addition
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _issue_backed_task(tmp_path)
+    prompt_addition.save_global("Always run `just verify`.")
+    seed = build_seed_prompt(task, research=True)
+    assert "Always run `just verify`." in seed
+    # Sits before the constraints, so those read as the operative instruction.
+    assert seed.index("Always run") < seed.index("Do not: push")
+
+
 def test_build_seed_prompt_without_any_ticket_says_so(isolated_xdg: Path, tmp_path: Path) -> None:
     from goblin_watcher.agents.launcher import build_seed_prompt
 

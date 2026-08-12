@@ -72,6 +72,14 @@ def run(
         help="Start a fresh session seeded with `/codex:adversarial-review`. "
         "Forces --agent claude.",
     ),
+    research: bool = typer.Option(
+        False,
+        "--research",
+        help="Start a fresh session seeded with a read-only research brief on the "
+        "task's ticket: investigate and report findings in the session, don't "
+        "implement, don't touch GitHub/Linear/Slack. Needs a Linear ticket or "
+        "GitHub issue on the task.",
+    ),
 ) -> None:
     """Pick a session for an existing task and spawn the agent."""
     if new and session is not None:
@@ -86,6 +94,15 @@ def run(
         )
     if prompt is not None:
         new = True
+    # Hoisted above both mode blocks: when the caller asked for two modes at
+    # once, that conflict is the operative error. Reporting --adversarial-review's
+    # own checks first (--prompt, --agent) would send the user off changing a
+    # flag that --research accepts perfectly well.
+    if research and adversarial_review:
+        raise GoblinError(
+            "--research and --adversarial-review are mutually exclusive.",
+            hint="Pass one or the other.",
+        )
     if adversarial_review:
         if session is not None:
             raise GoblinError(
@@ -106,6 +123,16 @@ def run(
             )
         agent = "claude"
         new = True
+    if research:
+        # Covers `--session <id>` and the bare-`--session` picker sentinel alike,
+        # so research can never reach a picker branch below.
+        if session is not None:
+            raise GoblinError(
+                "--research and --session are mutually exclusive "
+                "(it always starts a fresh session).",
+                hint="Drop --session.",
+            )
+        new = True
     project_filter: str | None = None
     if project is not None:
         normalized = project.strip().lower()
@@ -114,6 +141,13 @@ def run(
         state.get_project(normalized)
         project_filter = normalized
     task = resolve_task(target, project_filter)
+    # Needs the resolved task: only now do we know whether there's anything to
+    # research (ADR 0006). Scratch tasks carry neither and land here too.
+    if research and task.linear is None and task.github_issue is None:
+        raise GoblinError(
+            f"Task {task.id!r} has no Linear ticket or GitHub issue to research.",
+            hint="--research needs a task created from --linear or --issue.",
+        )
     proj = state.get_project(task.project)
     cfg = config.load()
     agent_name = agent or cfg.defaults.agent or "claude"
@@ -165,7 +199,7 @@ def run(
         if adversarial_review:
             choice = Fresh(prompt="/codex:adversarial-review --wait")
         else:
-            choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt))
+            choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt, research=research))
     else:
         plan = sessions.plan_reconciliation(task)
         refreshed_task = sessions.refresh_task_summaries(sessions.apply_reconciliation(task, plan))

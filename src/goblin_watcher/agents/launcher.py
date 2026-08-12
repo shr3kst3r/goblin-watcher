@@ -178,17 +178,41 @@ _PROMPTED_INTRO = (
 )
 
 
-def build_seed_prompt(task: Task, user_prompt: str | None = None) -> str:
+def build_seed_prompt(task: Task, user_prompt: str | None = None, *, research: bool = False) -> str:
     """Construct the prompt seeded into a fresh agent session.
 
-    When `user_prompt` is provided, the trailing "wait for my next message"
-    line is replaced with the user's prompt and the intro is rephrased so the
-    agent treats it as the task to begin working on.
+    Two work modes, both rendered from a template carrying the same task-context
+    slots (ADR 0006):
+
+    - Default: `spawn_prompt.md`. When `user_prompt` is provided, the trailing
+      "wait for my next message" line is replaced with the user's prompt and the
+      intro is rephrased so the agent treats it as the task to begin working on.
+    - `research=True`: `research_prompt.md`. The standing instruction to open a
+      PR is replaced with a read-only boundary and a request to report findings
+      in the session. `user_prompt` narrows the investigation's focus instead of
+      becoming the trailer.
     """
     templates_dir = Path(__file__).parent.parent / "templates"
     addition = prompt_addition.resolve_for_task_project(task.project).strip()
     addition_block = f"{addition}\n\n" if addition else ""
     prompt = (user_prompt or "").strip()
+    if research:
+        # Returns before the intro/trailer machinery below: the mode fixes both,
+        # and `user_prompt` becomes a focus paragraph instead. There is no
+        # scratch variant either — the command layer is the guard, rejecting
+        # --research for any task with no tracking item (scratch tasks included).
+        return (
+            (templates_dir / "research_prompt.md")
+            .read_text()
+            .format(
+                ticket_id=task.ticket_id,
+                title=task.ticket_title or task.id,
+                repos_block=_format_repos_block(task),
+                description=_format_ticket_context(task),
+                addition_block=addition_block,
+                focus=_format_research_focus(prompt),
+            )
+        )
     intro = _PROMPTED_INTRO if prompt else _DEFAULT_INTRO
     trailer = prompt if prompt else _DEFAULT_TRAILER
     if task.kind == "scratch":
@@ -214,6 +238,20 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None) -> str:
         description=_format_ticket_context(task),
         addition_block=addition_block,
         trailer=trailer,
+    )
+
+
+def _format_research_focus(prompt: str) -> str:
+    """Render the optional focus paragraph of the research brief.
+
+    `--prompt` narrows a research session rather than replacing its trailer, so
+    an absent (or whitespace-only) prompt renders nothing at all.
+    """
+    if not prompt:
+        return ""
+    return (
+        "\nFocus this research on the following, and say so if it turns out to "
+        f"be the wrong thing to look at:\n\n{prompt}"
     )
 
 

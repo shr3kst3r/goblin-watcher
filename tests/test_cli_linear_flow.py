@@ -231,6 +231,29 @@ def test_gw_new_linear_rerun_errors_when_task_exists(
     assert persisted.linear.title == "Initial title"
 
 
+def test_gw_new_linear_research_seeds_the_research_brief(
+    isolated_xdg: Path, tmp_path: Path, httpx_mock: HTTPXMock, env_key: None
+) -> None:
+    from unittest.mock import patch
+
+    repo = tmp_path / "eng-repo"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "eng", "--dir", str(repo), "--team", "ENG"])
+
+    _mock_issue(httpx_mock, "ENG-123", "Add rate limit", body="A description for the model.")
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(app, ["new", "--linear", "ENG-123", "--research"])
+    assert res.exit_code == 0, res.output
+
+    choice = launch.call_args.kwargs["choice"]
+    assert type(choice).__name__ == "Fresh"
+    assert choice.prompt.startswith("Research task —")
+    assert "ENG-123: Add rate limit" in choice.prompt
+    assert "A description for the model." in choice.prompt
+    assert "open a PR via" not in choice.prompt
+
+
 def test_linear_comments_land_in_seed_prompt(
     isolated_xdg: Path, tmp_path: Path, httpx_mock: HTTPXMock, env_key: None
 ) -> None:
