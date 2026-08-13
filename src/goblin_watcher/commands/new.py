@@ -366,7 +366,9 @@ def new(
     mode: str | None = typer.Option(
         None,
         "--mode",
-        help="Named work mode to seed the session with (see `[modes.*]` in config).",
+        # Escaped: Typer renders help through Rich, which parses `[modes.*]` as a
+        # style tag and silently drops it, leaving an empty pair of backticks.
+        help="Named work mode to seed the session with (see `\\[modes.*]` in config).",
         autocompletion=complete_modes,
     ),
     adversarial_review: bool = typer.Option(
