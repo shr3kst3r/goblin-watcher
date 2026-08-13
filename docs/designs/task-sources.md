@@ -134,7 +134,41 @@ The `{ticket_id}` / `{title}` / `{description}` slots are filled from whichever 
 
 This means a task with no tracking item gets a thinner prompt — that's correct; the user has more responsibility for orienting the agent when they didn't go through a tracker.
 
-### Research mode (`--research`)
+### Work modes (`--mode`)
+
+A **work mode** changes the agent's standing instructions without changing the task. `gw new --mode <name>` selects one from a registry in `modes.py`; the boolean flags are aliases (`--research` → `--mode research`, `--adversarial-review` → `--mode adversarial-review`), kept for compatibility. ADR 0009 records why selection is a registry rather than a flag each.
+
+A mode is a `ModeSpec` and is exactly one of two shapes:
+
+| Field | Meaning |
+| --- | --- |
+| `template` | Brief to render through `build_seed_prompt`, with the shared task-context slots. A bare name matching a packaged template (`research_prompt.md`) wins; anything else is the user's own file, `~`-expanded and resolved against the config dir. |
+| `seed` | Literal first message, used verbatim with no task context. Exists for Claude Code slash commands, whose parser only fires when the command is the whole user message. |
+| `agent` | Pins the agent. `--agent` may agree with it, never contradict it. |
+| `requires_ticket` | Refuse the mode when the task carries no Linear ticket / GitHub issue. |
+| `focus_lead` | Sentence introducing the `{focus}` paragraph `--prompt` renders into. |
+| `summary` | One line for help text and error hints. |
+
+Template slots available to a mode's brief: `{ticket_id}`, `{title}`, `{repos_block}`, `{description}`, `{addition_block}`, `{focus}`. Anything else is a `GoblinError` naming the valid set.
+
+Validation is data-driven — no consumer branches on a mode's name:
+
+- **`--mode` is a single value.** Two *different* modes (however requested, flag or alias) is one error. The same mode named twice is fine.
+- **`--prompt`** is refused when the mode's `allows_prompt` is false, which is derived from the shape: a template mode has a `{focus}` slot, a seed mode has nowhere to put it.
+- **`--no-launch`** is refused for any mode — no mode has an effect when no session starts.
+- **`--agent`** is refused when it contradicts `spec.agent`; otherwise the mode's agent is forced.
+- **`requires_ticket`** modes are refused for `--branch`, `--branch-name`, `--branch-auto`, `--dir`, and `--pr`.
+
+Users add their own under `[modes.<name>]` in `config.toml` (dict-valued, so `gw config edit` rather than `gw config set`). A user entry with a built-in's name replaces it whole — no per-field merge — mirroring how a project's `setup.toml` replaces the global `[setup]` table. A malformed entry is caught at resolve time, so it breaks only `--mode <that name>`.
+
+```toml
+[modes.spike]
+template = "spike_prompt.md"   # relative → $XDG_CONFIG_HOME/goblin-watcher/spike_prompt.md
+```
+
+`gw run` still selects its modes with the three boolean flags; converting it is follow-up work, held back because `--address-review` needs a data-gathering step (the review feed) that `ModeSpec` deliberately can't express.
+
+### Research mode (`--mode research` / `--research`)
 
 `gw new --research` and `gw run --research` seed the research brief instead. It carries the same ticket context and repos block, drops the work brief's standing "open a PR via `gw pr open`" instruction, spells out what the agent may and may not do, and asks for findings **in the session** rather than in a file. `--prompt` composes with it, narrowing the investigation's focus instead of replacing the trailer.
 
@@ -258,7 +292,8 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `src/goblin_watcher/gh.py` — `parse_issue_ref`, `issue_view`, `issue_state`, `normalize_repo`, `pr_review`, `check_run_log`.
 - `src/goblin_watcher/github_state.py` — TTL-cached issue-state refresh.
 - `src/goblin_watcher/review_feed.py` — PR-feedback gathering + the embedding bounds (ADR 0008).
-- `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`, `format_review_block`.
+- `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`, `render_mode_prompt`, `format_review_block`.
+- `src/goblin_watcher/modes.py` — the `--mode` registry: `ModeSpec`, `BUILTIN_MODES`, `resolve`, `template_path` (ADR 0009).
 - `src/goblin_watcher/templates/spawn_prompt.md` — the work brief.
 - `src/goblin_watcher/templates/research_prompt.md` — the `--research` brief (ADR 0006).
 - `src/goblin_watcher/templates/address_review_prompt.md` — the `--address-review` brief (ADR 0008).
@@ -267,7 +302,8 @@ and `gw task rm` tears down every worktree + the workspace directory.
 
 - `tests/test_slug.py` — slug rules for the branch name builder.
 - `tests/test_stacked_tasks.py` — `--from` parent resolution and every surface that reads it.
-- `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`.
+- `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`, and `--mode` (built-in, alias, and user-defined).
+- `tests/test_modes.py` — the registry itself: lookup, spec validation, template resolution.
 - `tests/test_cli_linear_flow.py` — end-to-end for `--linear` (with `pytest-httpx` mock).
 - `tests/test_cli_issue_flow.py` — end-to-end for `--issue` and the `gw gh-42` shorthand.
 - `tests/test_launcher.py` — `build_seed_prompt` for all three briefs.

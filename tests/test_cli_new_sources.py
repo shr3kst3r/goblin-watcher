@@ -350,10 +350,199 @@ def test_new_research_requires_a_tracking_item(isolated_xdg: Path, tmp_path: Pat
         res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--research"])
     assert res.exit_code != 0
     assert res.exception is not None
-    assert "--research requires a tracking item to research." in str(res.exception)
+    assert "--research requires a tracking item." in str(res.exception)
     launch.assert_not_called()
     # Refused before the branch/worktree was created.
     assert state.list_tasks(state.get_project("alpha")) == []
+
+
+# ---------- `--mode` (ADR 0009): the registry the boolean flags are aliases for.
+
+
+def test_new_mode_adversarial_review_matches_the_alias(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(
+            app, ["new", "--branch-name", "spike/foo", "--mode", "adversarial-review"]
+        )
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["choice"].prompt == "/codex:adversarial-review --wait"
+    assert launch.call_args.kwargs["agent"].name == "claude"
+
+
+def test_new_mode_research_matches_the_alias(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from goblin_watcher.gh import IssueInfo
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    info = IssueInfo(
+        number=42,
+        repo="org/repo",
+        title="Add rate limit",
+        body="We need a token bucket.",
+        state="OPEN",
+        url="https://github.com/org/repo/issues/42",
+        labels=(),
+        assignees=(),
+    )
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.gh.issue_view", return_value=info),
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch,
+    ):
+        res = runner.invoke(
+            app, ["new", "--issue", "42", "--project", "alpha", "--mode", "research"]
+        )
+    assert res.exit_code == 0, res.output
+    prompt = launch.call_args.kwargs["choice"].prompt
+    assert prompt.startswith("Research task —")
+    assert "org/repo#42: Add rate limit" in prompt
+
+
+def test_new_mode_and_a_matching_alias_are_not_a_conflict(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """`--mode research --research` names one mode twice, which is harmless.
+    Only two *different* modes conflict."""
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)):
+        res = runner.invoke(
+            app,
+            [
+                "new",
+                "--branch-name",
+                "spike/foo",
+                "--mode",
+                "adversarial-review",
+                "--adversarial-review",
+            ],
+        )
+    assert res.exit_code == 0, res.output
+
+
+def test_new_mode_conflicting_with_an_alias_is_refused(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["new", "--branch-name", "spike/foo", "--mode", "research", "--adversarial-review"]
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "--mode research and --adversarial-review are mutually exclusive" in str(res.exception)
+
+
+def test_new_unknown_mode_lists_the_available_ones(isolated_xdg: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--mode", "reserch"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "Unknown mode 'reserch'" in str(res.exception)
+
+
+def test_new_user_defined_mode_seeds_its_own_template(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A mode added to config.toml works without patching new.py — the point of
+    the registry (ADR 0009)."""
+    from unittest.mock import patch
+
+    from goblin_watcher import config, paths
+    from goblin_watcher.modes import ModeSpec
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    paths.config_dir().mkdir(parents=True, exist_ok=True)
+    (paths.config_dir() / "spike_prompt.md").write_text(
+        "Spike on {ticket_id}: {title}\n\n{repos_block}\n\n{description}\n{focus}"
+    )
+    cfg = config.load()
+    cfg.modes["spike"] = ModeSpec(template="spike_prompt.md")
+    config.save(cfg)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(
+            app,
+            ["new", "--branch-name", "spike/foo", "--mode", "spike", "--prompt", "the retry loop"],
+        )
+    assert res.exit_code == 0, res.output
+    prompt = launch.call_args.kwargs["choice"].prompt
+    assert prompt.startswith("Spike on SPIKE-FOO: spike-foo")
+    # --prompt composes with a template mode, as a focus paragraph.
+    assert "Focus on the following in particular:" in prompt
+    assert "the retry loop" in prompt
+    # A user mode inherits no built-in's constraints: `spike` never set
+    # `requires_ticket`, so a --branch-name task is a valid target.
+    assert "(no Linear issue or GitHub issue attached — fresh task)" in prompt
+
+
+def test_new_user_mode_with_an_unknown_slot_is_a_goblin_error(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    from goblin_watcher import config, paths
+    from goblin_watcher.modes import ModeSpec
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    paths.config_dir().mkdir(parents=True, exist_ok=True)
+    (paths.config_dir() / "bad_prompt.md").write_text("Work on {ticket_id} in {sprint}.")
+    cfg = config.load()
+    cfg.modes["bad"] = ModeSpec(template="bad_prompt.md")
+    config.save(cfg)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--mode", "bad"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "references a slot gw doesn't fill" in str(res.exception)
+
+
+def test_new_user_seed_mode_rejects_prompt(isolated_xdg: Path, tmp_path: Path) -> None:
+    """The `--prompt` refusal is derived from the mode's shape, not hardcoded
+    per mode — a user's own seed mode gets it for free."""
+    from goblin_watcher import config
+    from goblin_watcher.modes import ModeSpec
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    cfg = config.load()
+    cfg.modes["shipit"] = ModeSpec(seed="/ship")
+    config.save(cfg)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["new", "--branch-name", "spike/foo", "--mode", "shipit", "--prompt", "go"]
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "--mode shipit and --prompt are mutually exclusive" in str(res.exception)
 
 
 def _clone_with_pr_branch(tmp_path: Path, *, head: str = "feat/pr-42", base: str = "main") -> Path:
