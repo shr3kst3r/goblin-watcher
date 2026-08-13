@@ -147,3 +147,17 @@ def test_inject_project_sentinel_skips_when_no_prompt_subcommand() -> None:
         "--project",
         "alpha",
     ]
+
+
+def test_help_does_not_swallow_bracketed_config_tables() -> None:
+    """A config table named in help text has to survive Rich (gh-61).
+
+    Typer renders help through Rich, which reads `[modes.*]` as a style tag and
+    drops it unless the bracket is escaped. Nothing raises when that happens —
+    the name just goes missing and the sentence points at nothing, which is why
+    it shipped. The empty backtick pair is the signature to assert against.
+    """
+    res = _run_gw("new", "--help")
+    assert res.returncode == 0, res.stderr
+    assert "modes" in res.stdout, "the `[modes.*]` config reference went missing"
+    assert "``" not in res.stdout, "Rich swallowed a bracketed name, leaving empty backticks"
