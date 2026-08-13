@@ -117,11 +117,12 @@ Two invariants when touching this:
 
 The registered set is `claude`, `codex`, `gemini`, `antigravity` (Google Antigravity's `agy` CLI), plus `managed` (scaffold; see ADR 0002 and `docs/designs/sessions-and-windowing.md`). To wire another:
 1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `headless_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `env`.
-2. Add it to `models.AgentName`.
-3. Add it to `agents/registry.registry`.
-4. Add a row to `commands/doctor.py`'s binary check list. Agents with no local binary (e.g. `managed`) get a custom check function instead.
-5. If the agent has project-level prerequisites (e.g. `managed` requires a remote), extend `agents.registry.validate_agent_for_project` and call it from `commands/new.py` and `commands/run.py`.
-6. Tests under `tests/test_agents_<name>.py`.
+2. Declare `transcripts: TranscriptCapability` on the class — `PARSEABLE_TRANSCRIPTS` if `read_transcript` / `render_transcript` are real, otherwise `TranscriptCapability(parseable=False, reason="…")`. Stubbing them silently empties out session summaries, descriptions, turn counts, the `● active` badge, and the `agent-idle` notification; the declaration is what `gw doctor` warns from, so it has to be honest. `tests/test_agents_transcript_capability.py` asserts the declaration matches what the methods actually return.
+3. Add it to `models.AgentName`.
+4. Add it to `agents/registry.registry`.
+5. Add a row to `commands/doctor.py`'s binary check list. Agents with no local binary (e.g. `managed`) get a custom check function instead. The per-agent transcript row is generated from the registry — no doctor edit needed for that one.
+6. If the agent has project-level prerequisites (e.g. `managed` requires a remote), extend `agents.registry.validate_agent_for_project` and call it from `commands/new.py` and `commands/run.py`.
+7. Tests under `tests/test_agents_<name>.py`.
 
 Resist adding entry-point discovery or a plugin system — keep it static.
 

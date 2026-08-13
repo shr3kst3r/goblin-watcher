@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from goblin_watcher.agents.base import RawSession, TranscriptSummary
+from goblin_watcher.agents.base import RawSession, TranscriptCapability, TranscriptSummary
 from goblin_watcher.errors import GoblinError
 
 
@@ -140,6 +140,10 @@ class ManagedAgent:
 
     name = "managed"
     binary = ""  # No local binary; doctor's binary-check row skips this agent.
+    transcripts: TranscriptCapability = TranscriptCapability(
+        parseable=False,
+        reason="no backend is wired yet, so nothing is written locally; see ADR 0002",
+    )
 
     def __init__(self, client: ManagedClient | None = None) -> None:
         self.client: ManagedClient = client or NotConfiguredClient()
