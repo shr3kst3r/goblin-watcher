@@ -12,9 +12,12 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from goblin_watcher import locks, paths
 from goblin_watcher.errors import ProjectNotFoundError, TaskNotFoundError
@@ -183,17 +186,89 @@ def update_task(project: Project, task_id: str, mutate: Callable[[Task], Task]) 
         return updated
 
 
-def list_tasks(project: Project) -> list[Task]:
+@dataclass(frozen=True)
+class UnreadableTask:
+    """A task record on disk that this build of gw could not parse.
+
+    `unknown_fields` is the tell that matters. `Task` is `extra="forbid"`, so a
+    record carrying a field this process has never heard of was written by a
+    *newer* gw — which is not corruption, it is version skew, and the fix is to
+    restart rather than to repair anything. That distinction is the whole reason
+    this type exists: silently skipping the file made a stale long-running
+    `gw status --watch` render an empty tree with no way to tell why (gh-51).
+    """
+
+    path: Path
+    error: str
+    unknown_fields: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def task_id(self) -> str:
+        return self.path.stem
+
+    @property
+    def newer_schema(self) -> bool:
+        """True when the record looks like it came from a newer gw."""
+        return bool(self.unknown_fields)
+
+
+@dataclass(frozen=True)
+class TaskScan:
+    """Everything `<project>/.goblin/tasks/` had to say: what loaded, what didn't."""
+
+    tasks: list[Task] = field(default_factory=list)
+    unreadable: list[UnreadableTask] = field(default_factory=list)
+
+    @property
+    def newer_schema(self) -> list[UnreadableTask]:
+        return [u for u in self.unreadable if u.newer_schema]
+
+
+def _unknown_fields(error: Exception) -> tuple[str, ...]:
+    """Field names pydantic rejected as unknown, in order. () for other errors."""
+    if not isinstance(error, ValidationError):
+        return ()
+    names: list[str] = []
+    for err in error.errors():
+        if err.get("type") != "extra_forbidden":
+            continue
+        loc = err.get("loc") or ()
+        name = str(loc[-1]) if loc else "?"
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def scan_tasks(project: Project) -> TaskScan:
+    """Load every task record, keeping the failures instead of dropping them.
+
+    Callers that only need the healthy records use `list_tasks`. Anything that
+    reports to a human should use this, so "no tasks" and "gw could not read
+    these tasks" don't render identically.
+    """
     d = paths.project_tasks_dir(project.root)
     if not d.exists():
-        return []
+        return TaskScan()
     tasks: list[Task] = []
+    unreadable: list[UnreadableTask] = []
     for f in sorted(d.glob("*.json")):
         try:
             tasks.append(Task.model_validate_json(f.read_text()))
-        except Exception:  # nosec B112 - skip unreadable task files rather than crash listing
-            continue
-    return tasks
+        except Exception as e:  # a bad record must not break listing
+            unreadable.append(
+                UnreadableTask(path=f, error=str(e).strip(), unknown_fields=_unknown_fields(e))
+            )
+    return TaskScan(tasks=tasks, unreadable=unreadable)
+
+
+def list_tasks(project: Project) -> list[Task]:
+    """Every task record that parses. Unreadable ones are skipped silently.
+
+    Kept for the many callers that act on tasks and have no way to report a
+    broken record anyway. Use `scan_tasks` when a human is going to read the
+    result.
+    """
+    return scan_tasks(project).tasks
 
 
 def delete_task_record(project: Project, task_id: str) -> None:

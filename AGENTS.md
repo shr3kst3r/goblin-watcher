@@ -118,6 +118,17 @@ Two rules when extending it:
 - **Repair is only for fixes that cannot lose work.** `drift.REPAIRABLE_KINDS` is the whitelist and `Finding.__post_init__` enforces it, so a new kind cannot quietly opt itself into being auto-fixed. Anything holding commits or files (an untracked worktree, a task whose branch survived its worktree) stays a report — the same posture as sync's prune, which refuses to force-delete a branch it can't prove is safe.
 - **Detection is read-only and must not raise.** A project whose root or repo is unreadable is skipped, not crashed on: a drift report that dies on the first broken project is worse than one that skips it.
 
+## Reading task records (`state.scan_tasks`)
+
+`state.scan_tasks(project)` returns a `TaskScan`: the records that parsed, plus an `UnreadableTask` for each that didn't. `state.list_tasks` is the thin wrapper returning only the healthy ones. **Anything that renders task records to a human calls `scan_tasks` and surfaces the failures** — `gw status` prints a banner above the tree, `drift.py` raises an `unreadable-record` finding. Silently skipping is what made "this project has no tasks" and "gw cannot read this project's tasks" render identically (gh-51).
+
+Two things to keep true:
+
+- **Distinguish skew from corruption.** `Task` is `extra="forbid"`, so a record carrying an unknown field was written by a *newer* gw — the record is fine and the *reader* is stale. `UnreadableTask.unknown_fields` is that test, and the remedies differ: restart the command versus run `gw doctor`. Never merge the two messages.
+- **`unreadable-record` is never repairable.** The file is the only copy, and it is most likely current. "Repairing" it would turn a version skew into data loss.
+
+The skew is structural, not a fluke: gw installs editable, a `gw status --watch` holds the models it imported at startup, and agents land model changes to `main` all day. `gw sync` rewrites every record each pass, so one or two intervals is enough for a resident watch to lose every task. Assume any long-running gw process is running yesterday's code.
+
 ## Worktree setup
 
 A new worktree is a bare checkout, so `worktree_setup.py` applies a declared bootstrap to it: `copy` (gitignored files pulled in from the project root), `link` (symlinks for the big rebuildable ones), then `run` (commands executed in the new worktree). Config comes from the global `[setup]` table, or from `<project_root>/.goblin/setup.toml` when the project has one — the project file replaces the global table whole, mirroring `prompt.md`. See ADR 0007 and `docs/designs/worktree-setup.md`.

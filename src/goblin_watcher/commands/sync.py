@@ -193,11 +193,34 @@ def status() -> None:
         detail = f"{last.status} · {last.tasks} task(s) · {age}"
         if last.errors:
             detail += f" · {len(last.errors)} error(s)"
-        rows.append(("last run", last.status in {"ok", "skipped"}, detail))
+        # A pass that dies before it can journal — a broken checkout, an
+        # interpreter the source no longer parses under — leaves this row frozen
+        # at the last *good* pass while launchd goes on firing, so the recorded
+        # status stays `ok` forever. Age it out against the schedule instead.
+        # Same definition `gw doctor` uses, so the two can't disagree.
+        overdue = (
+            launchd.staleness(last_finished=launchd.last_pass_at(last), interval=scheduled_interval)
+            if scheduled_interval is not None
+            else None
+        )
+        if overdue:
+            detail += f" — {overdue}"
+        rows.append(("last run", last.status in {"ok", "skipped"} and overdue is None, detail))
         if last.finished_at and scheduled_interval is not None:
             next_at = last.finished_at.timestamp() + scheduled_interval
             remaining = int(next_at - datetime.now(UTC).timestamp())
             rows.append(("next run", True, "due now" if remaining <= 0 else f"in ~{remaining}s"))
+
+    checkout = launchd.editable_checkout()
+    if checkout is not None:
+        rows.append(
+            (
+                "gw source",
+                True,
+                f"editable install from {checkout} — a broken working tree there "
+                "breaks every scheduled pass",
+            )
+        )
 
     try:
         secrets.get_linear_api_key()
@@ -303,6 +326,15 @@ def install(
     path = launchd.install(seconds)
     print_success(f"Scheduled `gw sync run` every {seconds}s")
     console.print(f"  plist   {path}")
+    checkout = launchd.editable_checkout()
+    if checkout is not None:
+        console.print(
+            f"  [hint]Note: this gw is an editable install from {checkout}. Every pass runs "
+            "whatever is in that tree at the time, so a half-finished edit or a drifted "
+            "interpreter there stops sync for all projects — and a pass that dies at import "
+            "journals nothing. `gw sync status` ages the last run out against the schedule "
+            "so that shows up.[/]"
+        )
     console.print("  [muted]Check on it with `gw sync status`, watch it with `gw sync watch`.[/]")
 
 
