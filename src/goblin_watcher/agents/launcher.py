@@ -138,7 +138,11 @@ def launch(
     )
     task = _persist_record(project, task, pre_record, create_if_missing=True)
 
-    exit_code = windower.run(task=task, cmd=cmd, cwd=cwd, env=extra_env)
+    # `session_id` is what lets `gw session send` address this run later: tmux
+    # stamps it on the pane it opens.
+    exit_code = windower.run(
+        task=task, cmd=cmd, cwd=cwd, env=extra_env, session_id=pre_record.session_id
+    )
 
     # Tmux hands the agent off to a background pane and returns while the agent
     # is still starting up, so a post-launch `capture_session_id` would race

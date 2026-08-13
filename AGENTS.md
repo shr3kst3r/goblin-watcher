@@ -120,6 +120,7 @@ Resist adding entry-point discovery or a plugin system — keep it static.
 - One window per task, named after `task.id` (e.g. `eng-123`).
 - One pane per agent session (additional sessions on the same task `split-window`). `tmux.split = "vertical"` (default) stacks panes top/bottom; `"horizontal"` is side-by-side.
 - `attach_on_spawn = true` (default) means `gw` will `os.execvp` into `tmux attach` if invoked from outside tmux. From inside, it uses `tmux switch-window`.
+- Each pane is stamped with its session id (`@gw_session` pane option) at creation, which is how `gw session send <task-id> "…"` finds the right pane to type into. tmux holds that mapping for the pane's lifetime — gw stores no pane ids.
 - `mark_idle = true` (default `false`) sets `monitor-silence <mark_idle_seconds>` on each task window — when the agent goes quiet (done or waiting for input), tmux marks the window with a `~` in the status bar. No bell, no banner, no focus-stealing. `mark_idle_seconds` defaults to `5`. Caveat: any agent that streams a heartbeat/spinner will never trigger this; verify your agent actually falls silent at its prompt.
 
 Test against a fake `tmux` (see `tests/test_windowing_tmux.py`) — never call the real binary in tests.

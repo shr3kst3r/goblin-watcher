@@ -2,6 +2,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from goblin_watcher.errors import GoblinError
 from goblin_watcher.models import Task
 from goblin_watcher.windowing.inline import InlineWindower
 
@@ -52,3 +55,12 @@ def test_inline_windower_propagates_exit_code(tmp_path: Path) -> None:
             env={},
         )
     assert rc == 42
+
+
+def test_inline_windower_send_explains_there_is_no_pane(tmp_path: Path) -> None:
+    """`gw session send` against inline windowing must fail legibly, not obscurely."""
+    with pytest.raises(GoblinError) as exc:
+        InlineWindower().send(task=_task(tmp_path), text="also fix the tests")
+    assert "no pane to send to" in exc.value.message
+    assert exc.value.hint is not None
+    assert "tmux" in exc.value.hint

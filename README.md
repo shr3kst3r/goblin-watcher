@@ -320,6 +320,7 @@ gw status --project my-repo            # limit to one project
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
+gw session send eng-123 "also fix the tests"  # type into a running agent's tmux pane
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
 gw config show                              # resolved config (file merged over defaults)
 gw sync status                              # is background sync scheduled? when did it last run?
@@ -452,6 +453,20 @@ Set `windowing = "tmux"` in `config.toml`, or pass `--windowing tmux` on any spa
 
 Inline mode (default) just blocks on the agent process and returns when it exits.
 
+### Talk to a running agent
+
+```bash
+gw session send eng-123 "also fix the tests"
+gw session send eng-123 "..." --session <id>   # when the task has several live panes
+gw session send eng-123 "" --no-enter          # type without submitting (--no-enter), or Enter alone ("")
+```
+
+The text is typed into the agent's pane and submitted, exactly as if you had attached and typed it — so you can steer six agents from one terminal instead of six.
+
+`gw` labels each pane with its session id when it opens it, so `--session` addresses one conversation on a task running several. With a single live pane the session is unambiguous and `--session` is optional. Panes that predate this labelling (or an agent spawned by hand) still take input as long as they're the only pane on the task.
+
+Inline windowing has no pane to address — the agent owns the terminal it was launched from — so `gw session send` says so rather than failing obscurely.
+
 ## Agent support
 
 | Agent | Spawn | Resume | Session discovery |
@@ -501,7 +516,7 @@ gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gw
 
 gw project new|ls|info|rm
 gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch/--scratch-older-than)
-gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
+gw session ls|show|send|refresh|rm|prune  # `send` types into a live pane (tmux); `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
 gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
 gw sync run|watch|status|install|uninstall|prune-journal   # background refresh; `run` is what the scheduler calls
 gw prompt show|set|edit|clear           # text appended to every fresh-spawn prompt

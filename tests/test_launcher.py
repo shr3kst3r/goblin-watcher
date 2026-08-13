@@ -61,10 +61,20 @@ class _AsyncWindower:
 
     def __init__(self) -> None:
         self.observed_task: Task | None = None
+        self.observed_session_id: str | None = None
 
-    def run(self, *, task: Task, cmd: list[str], cwd: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        *,
+        task: Task,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        session_id: str | None = None,
+    ) -> int:
         del cmd, cwd, env
         self.observed_task = task
+        self.observed_session_id = session_id
         return 0
 
     def is_live(self, task: Task) -> bool:
@@ -75,8 +85,16 @@ class _AsyncWindower:
 class _InlineWindower:
     name = "inline"
 
-    def run(self, *, task: Task, cmd: list[str], cwd: Path, env: dict[str, str]) -> int:
-        del task, cmd, cwd, env
+    def run(
+        self,
+        *,
+        task: Task,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        session_id: str | None = None,
+    ) -> int:
+        del task, cmd, cwd, env, session_id
         return 0
 
     def is_live(self, task: Task) -> bool:
@@ -134,6 +152,9 @@ def test_async_windower_persists_session_before_dispatch(
     assert record.label == "kick off"
     # The returned task matches what we persisted.
     assert returned.sessions == persisted.sessions
+    # And the windower was told which session it is hosting, so a pane-based
+    # windower can label it for `gw session send`.
+    assert windower.observed_session_id == record.session_id
 
 
 def test_preassigned_id_survives_async_windower(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -312,8 +333,16 @@ class _DeletingWindower:
 
     name = "inline"
 
-    def run(self, *, task: Task, cmd: list[str], cwd: Path, env: dict[str, str]) -> int:
-        del cmd, cwd, env
+    def run(
+        self,
+        *,
+        task: Task,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        session_id: str | None = None,
+    ) -> int:
+        del cmd, cwd, env, session_id
         state.delete_task_record(state.get_project(task.project), task.id)
         return 0
 

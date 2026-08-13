@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from goblin_watcher.errors import GoblinError
 from goblin_watcher.models import Task
 from goblin_watcher.windowing.tmux import TmuxWindower
 
@@ -294,6 +295,202 @@ def fake_tmux_with_window(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
     return calls
+
+
+def _fake_tmux_panes(monkeypatch: pytest.MonkeyPatch, panes: list[tuple[str, str]]):
+    """Fake tmux whose `eng-123` window holds `panes` as (pane_id, @gw_session).
+
+    An empty session id models a pane gw never tagged (spawned by hand, or by
+    an older gw).
+    """
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    calls: list[list[str]] = []
+
+    class _FakeRes:
+        def __init__(self, code: int = 0, stdout: str = "") -> None:
+            self.returncode = code
+            self.stdout = stdout
+            self.stderr = ""
+
+    def _fake_run(cmd, capture_output, text, check):
+        calls.append(cmd)
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "list-panes":
+            if "goblin:eng-123" not in cmd:
+                return _FakeRes(1)
+            return _FakeRes(0, stdout="".join(f"{pid}\t{sid}\n" for pid, sid in panes))
+        return _FakeRes(0)
+
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
+    return calls
+
+
+def test_run_tags_pane_with_session_id(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pane gw opens is stamped with the session id, so `send` can find it.
+
+    tmux itself holds the mapping for the pane's lifetime — nothing is written
+    to gw's state, which matters because the tmux path may `execvp` away before
+    any post-launch write could happen.
+    """
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+    monkeypatch.setenv("TMUX", "tmux-1234,1,0")
+    calls: list[list[str]] = []
+
+    class _FakeRes:
+        def __init__(self, code: int = 0, stdout: str = "") -> None:
+            self.returncode = code
+            self.stdout = stdout
+            self.stderr = ""
+
+    def _fake_run(cmd, capture_output, text, check):
+        calls.append(cmd)
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "list-windows":
+            return _FakeRes(0, stdout="eng-123\n")
+        if sub in ("split-window", "new-window"):
+            # `-P -F '#{pane_id}'` makes tmux print the new pane's id.
+            return _FakeRes(0, stdout="%7\n")
+        return _FakeRes(0)
+
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
+
+    TmuxWindower().run(
+        task=_task(tmp_path),
+        cmd=["claude", "hi"],
+        cwd=tmp_path,
+        env={},
+        session_id="sess-abc",
+    )
+    flat = [" ".join(c) for c in calls]
+    assert any("split-window -v -t goblin:eng-123" in c and "-P -F #{pane_id}" in c for c in flat)
+    assert ["tmux", "set-option", "-p", "-t", "%7", "@gw_session", "sess-abc"] in calls
+
+
+def test_run_without_session_id_skips_tagging(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _patch_inside_tmux_with_existing_window(monkeypatch)
+    TmuxWindower().run(task=_task(tmp_path), cmd=["claude", "hi"], cwd=tmp_path, env={})
+    assert not any("set-option" in c for c in [" ".join(x) for x in calls])
+
+
+def test_send_types_text_then_enter(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Text goes literally (`-l --`), Enter as a key name — two separate calls."""
+    calls = _fake_tmux_panes(monkeypatch, [("%3", "sess-abc")])
+
+    where = TmuxWindower().send(task=_task(tmp_path), text="-also fix the tests")
+
+    assert where == "goblin:eng-123 pane %3"
+    assert ["tmux", "send-keys", "-t", "%3", "-l", "--", "-also fix the tests"] in calls
+    assert ["tmux", "send-keys", "-t", "%3", "Enter"] in calls
+
+
+def test_send_no_enter_leaves_text_unsubmitted(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _fake_tmux_panes(monkeypatch, [("%3", "sess-abc")])
+
+    TmuxWindower().send(task=_task(tmp_path), text="draft", enter=False)
+
+    assert ["tmux", "send-keys", "-t", "%3", "-l", "--", "draft"] in calls
+    assert not any(c[-1] == "Enter" for c in calls)
+
+
+def test_send_picks_the_pane_matching_the_session(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _fake_tmux_panes(monkeypatch, [("%3", "sess-abc"), ("%4", "sess-def")])
+
+    TmuxWindower().send(task=_task(tmp_path), text="hi", session_id="sess-def")
+
+    assert ["tmux", "send-keys", "-t", "%4", "-l", "--", "hi"] in calls
+
+
+def test_send_prefers_the_newest_pane_for_a_resumed_session(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming a session opens a second pane with the same tag; the live one is
+    the newer, so the older (whose agent has exited) must not swallow input."""
+    calls = _fake_tmux_panes(monkeypatch, [("%3", "sess-abc"), ("%9", "sess-abc")])
+
+    TmuxWindower().send(task=_task(tmp_path), text="hi", session_id="sess-abc")
+
+    assert ["tmux", "send-keys", "-t", "%9", "-l", "--", "hi"] in calls
+
+
+def test_send_is_ambiguous_across_several_panes(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_tmux_panes(monkeypatch, [("%3", "sess-abc"), ("%4", "sess-def")])
+
+    with pytest.raises(GoblinError) as exc:
+        TmuxWindower().send(task=_task(tmp_path), text="hi")
+    assert "2 live panes" in exc.value.message
+    assert exc.value.hint is not None
+    assert "sess-abc" in exc.value.hint and "sess-def" in exc.value.hint
+
+
+def test_send_falls_back_to_the_only_pane_when_untagged(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Panes from before gw tagged them still take input — there's only one target."""
+    calls = _fake_tmux_panes(monkeypatch, [("%3", "")])
+
+    TmuxWindower().send(task=_task(tmp_path), text="hi", session_id="sess-abc")
+
+    assert ["tmux", "send-keys", "-t", "%3", "-l", "--", "hi"] in calls
+
+
+def test_send_rejects_an_unmatched_session_among_many_panes(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_tmux_panes(monkeypatch, [("%3", "sess-abc"), ("%4", "")])
+
+    with pytest.raises(GoblinError) as exc:
+        TmuxWindower().send(task=_task(tmp_path), text="hi", session_id="sess-zzz")
+    assert "sess-zzz" in exc.value.message
+    assert exc.value.hint is not None
+    assert "%4 (untagged)" in exc.value.hint
+
+
+def test_send_without_a_live_window_errors(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_tmux_panes(monkeypatch, [])
+
+    with pytest.raises(GoblinError) as exc:
+        TmuxWindower().send(task=_task(tmp_path, "eng-999"), text="hi")
+    assert "No live tmux pane" in exc.value.message
+
+
+def test_send_surfaces_tmux_failure(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: "/usr/bin/tmux")
+
+    class _FakeRes:
+        def __init__(self, code: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = code
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, capture_output, text, check):
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "list-panes":
+            return _FakeRes(0, stdout="%3\tsess-abc\n")
+        if sub == "send-keys":
+            return _FakeRes(1, stderr="can't find pane %3")
+        return _FakeRes(0)
+
+    monkeypatch.setattr("goblin_watcher.windowing.tmux.subprocess.run", _fake_run)
+
+    with pytest.raises(GoblinError, match="can't find pane"):
+        TmuxWindower().send(task=_task(tmp_path), text="hi")
 
 
 def test_rename_window_renames_live_window(isolated_xdg: Path, fake_tmux_with_window) -> None:

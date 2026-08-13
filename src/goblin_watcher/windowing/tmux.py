@@ -21,6 +21,12 @@ We also export `DISABLE_AUTO_UPDATE=true` for that shell. With keystrokes gone,
 oh-my-zsh's update prompt would otherwise *block* the pane waiting for a keypress
 (its `read` never returns), stalling the agent launch; suppressing it lets the
 shell proceed straight to the agent.
+
+`send` is the one place we *do* type into a pane — that's the whole point of
+`gw session send`, which delivers a follow-up instruction to an agent already at
+its prompt. Panes are addressed by the `@gw_session` pane option we stamp on
+them at creation: tmux holds the session-id → pane mapping for exactly as long
+as the pane lives, which is the correct lifetime and needs no state file.
 """
 
 from __future__ import annotations
@@ -29,12 +35,27 @@ import os
 import shlex
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from goblin_watcher import config
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, MissingDependencyError
 from goblin_watcher.models import Task
+
+# Pane-scoped user option carrying the gw session id a pane was launched for.
+# tmux keeps user options (`@name`) on the pane until it dies, and exposes them
+# to `-F` formats as `#{@name}` — so the mapping is queryable without gw
+# recording pane ids anywhere.
+_SESSION_OPTION = "@gw_session"
+
+
+@dataclass(frozen=True)
+class _Pane:
+    """A live pane, and the gw session id it was stamped with (if any)."""
+
+    pane_id: str
+    session_id: str | None
 
 
 def _ensure_tmux() -> str:
@@ -55,6 +76,10 @@ def _run_tmux(*args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def _describe(panes: list[_Pane]) -> str:
+    return ", ".join(p.session_id or f"{p.pane_id} (untagged)" for p in panes)
 
 
 class TmuxWindower:
@@ -118,25 +143,33 @@ class TmuxWindower:
         cmd: list[str],
         cwd: Path,
         env: dict[str, str],
+        session_id: str | None = None,
     ) -> int:
         _ensure_tmux()
         self._ensure_session()
         s = self._session()
         target = f"{s}:{task.id}"
         pane_cmd = self._pane_command(cmd, extra_env=env)
+        # `-P -F '#{pane_id}'` makes tmux print the new pane's id (`%12`) so we
+        # can stamp the session id on it below.
+        print_pane = ("-P", "-F", "#{pane_id}")
         if self._window_exists(task.id):
             # Add a pane to the existing window for this additional session.
             # `-v` stacks top/bottom, `-h` places side-by-side. `vertical` ==
             # panes-stacked-vertically matches tmux's `-v` flag letter.
             split_flag = "-h" if config.load().tmux.split == "horizontal" else "-v"
-            res = _run_tmux("split-window", split_flag, "-t", target, "-c", str(cwd), pane_cmd)
+            res = _run_tmux(
+                "split-window", split_flag, "-t", target, "-c", str(cwd), *print_pane, pane_cmd
+            )
         else:
             # `-a` inserts the window *after* the session's current window and
             # shifts the rest up. Without it, `new-window -t <session>` targets
             # the current window's index and fails with "index N in use"
             # whenever that slot is occupied (the common case once the session
             # has windows) — silently leaving the agent unspawned.
-            res = _run_tmux("new-window", "-a", "-t", s, "-n", task.id, "-c", str(cwd), pane_cmd)
+            res = _run_tmux(
+                "new-window", "-a", "-t", s, "-n", task.id, "-c", str(cwd), *print_pane, pane_cmd
+            )
         if res.returncode != 0:
             raise GoblinError(
                 f"tmux failed to open a window/pane for task '{task.id}': "
@@ -144,6 +177,7 @@ class TmuxWindower:
                 hint="Run `tmux ls` to inspect the goblin session, "
                 "or switch to windowing = 'inline'.",
             )
+        self._tag_pane(res.stdout.strip(), session_id)
 
         cfg = config.load()
         if cfg.tmux.mark_idle:
@@ -177,6 +211,98 @@ class TmuxWindower:
                 os.execvp(tmux, [tmux, "attach", "-t", s])
 
         return 0
+
+    @staticmethod
+    def _tag_pane(pane_id: str, session_id: str | None) -> None:
+        """Stamp `session_id` on the pane so `send` can find it again.
+
+        Best-effort on purpose: a failed tag (tmux older than 3.0 has no
+        pane-scoped options) costs `gw session send` its precision on a
+        multi-pane window, which is not worth failing a spawn over.
+        """
+        if not pane_id or not session_id:
+            return
+        _run_tmux("set-option", "-p", "-t", pane_id, _SESSION_OPTION, session_id)
+
+    def _panes(self, task_id: str) -> list[_Pane]:
+        """Live panes in `task_id`'s window, in tmux's own (index) order."""
+        s = self._session()
+        res = _run_tmux(
+            "list-panes", "-t", f"{s}:{task_id}", "-F", f"#{{pane_id}}\t#{{{_SESSION_OPTION}}}"
+        )
+        if res.returncode != 0:
+            return []
+        panes: list[_Pane] = []
+        for line in res.stdout.splitlines():
+            pane_id, _, sid = line.partition("\t")
+            if pane_id.strip():
+                panes.append(_Pane(pane_id=pane_id.strip(), session_id=sid.strip() or None))
+        return panes
+
+    def send(
+        self,
+        *,
+        task: Task,
+        text: str,
+        session_id: str | None = None,
+        enter: bool = True,
+    ) -> str:
+        _ensure_tmux()
+        s = self._session()
+        panes = self._panes(task.id)
+        if not panes:
+            raise GoblinError(
+                f"No live tmux pane for task {task.id!r} in session {s!r}.",
+                hint=f"Spawn an agent first (`gw run {task.id}`), "
+                f"or check `tmux list-windows -t {s}`.",
+            )
+        pane = self._resolve_pane(panes, session_id, task.id)
+        # Two calls, deliberately: `-l` sends the argument literally (so a
+        # message that looks like a key name — "Enter", "C-c" — is typed, not
+        # interpreted), while Enter has to be sent *as* a key name to submit.
+        # `--` keeps a message starting with `-` out of tmux's option parser.
+        res = _run_tmux("send-keys", "-t", pane.pane_id, "-l", "--", text)
+        if res.returncode != 0:
+            raise GoblinError(
+                f"tmux failed to send input to pane {pane.pane_id}: "
+                f"{res.stderr.strip() or 'unknown error'}",
+                hint=f"The pane may have just closed. Check `tmux list-panes -t {s}:{task.id}`.",
+            )
+        if enter:
+            res = _run_tmux("send-keys", "-t", pane.pane_id, "Enter")
+            if res.returncode != 0:
+                raise GoblinError(
+                    f"tmux delivered the text to pane {pane.pane_id} but failed to submit it: "
+                    f"{res.stderr.strip() or 'unknown error'}",
+                    hint="The text is sitting in the agent's input box; "
+                    "press Enter there, or re-send.",
+                )
+        return f"{s}:{task.id} pane {pane.pane_id}"
+
+    @staticmethod
+    def _resolve_pane(panes: list[_Pane], session_id: str | None, task_id: str) -> _Pane:
+        if session_id is not None:
+            # Last match wins: resuming a session opens a *second* pane carrying
+            # the same tag, and the newer one is the live conversation.
+            tagged = [p for p in panes if p.session_id == session_id]
+            if tagged:
+                return tagged[-1]
+            if len(panes) == 1:
+                # Panes spawned before gw started tagging (or whose record was
+                # re-keyed to the agent's real id afterwards) carry no usable
+                # tag — but with a single pane on the window there is still
+                # only one place the text could go.
+                return panes[0]
+            raise GoblinError(
+                f"No pane on task {task_id!r} is tagged with session {session_id!r}.",
+                hint=f"Live panes: {_describe(panes)}.",
+            )
+        if len(panes) == 1:
+            return panes[0]
+        raise GoblinError(
+            f"Task {task_id!r} has {len(panes)} live panes — say which one.",
+            hint=f"Pass --session <id>. Live panes: {_describe(panes)}.",
+        )
 
     def is_live(self, task: Task) -> bool:
         s = self._session()
