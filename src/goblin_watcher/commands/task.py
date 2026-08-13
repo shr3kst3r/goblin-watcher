@@ -196,6 +196,10 @@ def show(
         console.print(f"  branch        {task.branch}")
         console.print(f"  base_branch   {task.base_branch}")
         console.print(f"  worktree      {task.worktree_path}")
+    if task.parent_task is not None:
+        parent = state.find_parent_task(proj, task)
+        where = f"branch {parent.branch}" if parent is not None else "no longer tracked"
+        console.print(f"  stacked on    {task.parent_task} ({where})")
     console.print(f"  status        {task.status}")
     console.print(f"  pr_url        {task.pr_url or '(none)'}")
     console.print(f"  linear        {task.linear.identifier if task.linear else '(none)'}")
@@ -227,6 +231,24 @@ def _ensure_task_id_free(new_id: str) -> None:
                 f"Task {new_id!r} already exists in project {other.name!r}.",
                 hint="Pick a different id, or remove that task first (`gw task rm`).",
             )
+
+
+def _repoint_children(proj: Project, old_id: str, new_id: str) -> list[str]:
+    """Point every task stacked on `old_id` at `new_id`; returns the ids moved.
+
+    A rename touches only the record, but `Task.parent_task` stores an id — so
+    without this the children would render as "stacked on <no longer tracked>"
+    even though nothing was removed.
+    """
+    moved: list[str] = []
+    for child in state.list_tasks(proj):
+        if child.parent_task != old_id:
+            continue
+        state.update_task(
+            proj, child.id, lambda latest, n=new_id: latest.model_copy(update={"parent_task": n})
+        )
+        moved.append(child.id)
+    return moved
 
 
 @app.command("rename")
@@ -262,6 +284,13 @@ def rename(
     # recoverable duplicate rather than no record at all.
     state.save_task(proj, task.model_copy(update={"id": new_id}))
     state.delete_task_record(proj, task.id)
+    restacked = _repoint_children(proj, task.id, new_id)
+
+    if restacked:
+        console.print(
+            f"[muted]Repointed {len(restacked)} stacked task(s) at the new id: "
+            f"{', '.join(restacked)}.[/]"
+        )
 
     if TmuxWindower().rename_window(task.id, new_id):
         console.print(f"[muted]Renamed tmux window {task.id!r} → {new_id!r}.[/]")

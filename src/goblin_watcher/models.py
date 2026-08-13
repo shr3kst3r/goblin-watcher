@@ -105,6 +105,13 @@ class Task(_Frozen):
     branch: str
     worktree_path: Path
     base_branch: str
+    # The task this one is stacked on, when `base_branch` turned out to be
+    # another task's branch (`gw new --from`, or a `--pr` targeting a tracked
+    # branch). An id rather than a branch name: the branch disappears when the
+    # parent lands, but the id is what `gw status` and the PR body cite. Never a
+    # validated reference — the parent can be pruned, and readers treat a
+    # dangling id as "no longer tracked" rather than an error.
+    parent_task: str | None = None
     pr_url: str | None = None
     created_at: datetime
     status: TaskStatus = "open"

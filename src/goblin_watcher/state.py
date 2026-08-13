@@ -203,6 +203,34 @@ def delete_task_record(project: Project, task_id: str) -> None:
     f.unlink()
 
 
+def find_parent_task(project: Project, task: Task) -> Task | None:
+    """The task `task` is stacked on, or None when unset or the record is gone.
+
+    A missing parent record is not an error: it is the normal end state, since a
+    parent gets pruned once it lands. `Task.parent_task` is deliberately not a
+    validated reference for exactly that reason.
+    """
+    if task.parent_task is None:
+        return None
+    try:
+        return load_task(project, task.parent_task)
+    except TaskNotFoundError:
+        return None
+
+
+def find_task_by_branch(project: Project, branch: str) -> Task | None:
+    """The task whose *primary* branch is `branch`, or None if no task owns it.
+
+    Primary only, deliberately: this answers "which task does this base branch
+    belong to?" for stacking, and only a primary branch is something another
+    task can be cut from and tracked against (`Task.parent_task`).
+    """
+    for t in list_tasks(project):
+        if t.kind != "scratch" and t.branch == branch:
+            return t
+    return None
+
+
 def find_task_by_worktree(project: Project, worktree_path: Path) -> Task | None:
     target = worktree_path.resolve()
     for t in list_tasks(project):

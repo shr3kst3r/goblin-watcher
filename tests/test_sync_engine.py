@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from goblin_watcher import state
+from goblin_watcher import config, state
 from goblin_watcher.models import Project, SessionRecord, Task, TaskRepo
 from goblin_watcher.sync import engine, journal, store
 from goblin_watcher.sync.models import SyncState
@@ -136,6 +136,103 @@ def test_merged_pr_updates_status_and_notifies_once(demo, notifier) -> None:  # 
 
     assert notifier.sent == [], "merged PR notified twice"
     assert second.notifications == []
+
+
+def _stack_child_on(project: Project, parent: Task, child_id: str) -> Task:
+    """A second task in `project` whose base branch is `parent`'s branch."""
+    worktree = project.root / ".worktrees" / child_id
+    _git(project.root, "worktree", "add", "-q", "-b", child_id, str(worktree), parent.branch)
+    child = Task(
+        id=child_id,
+        project=project.name,
+        branch=child_id,
+        worktree_path=worktree,
+        base_branch=parent.branch,
+        parent_task=parent.id,
+        created_at=datetime.now(UTC),
+    )
+    state.save_task(project, child)
+    return child
+
+
+def test_merged_parent_tells_its_stacked_child_to_restack(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """The `pr-merged` edge on the parent is what tells the child it needs a
+    rebase (gh-20); the notification names the child, not the parent."""
+    project, task = demo
+    _stack_child_on(project, task, "demo-2")
+    state.update_task(
+        project, task.id, lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1"})
+    )
+
+    gh_patch, notify_patch = _run(notifier, pr_state="MERGED")
+    with (
+        gh_patch,
+        notify_patch,
+        patch("goblin_watcher.sync.engine.merge_detection", return_value=None),
+    ):
+        first = engine.run_pass()
+
+        assert "parent-merged: demo-2" in first.notifications
+        [child_note] = [b for t, b in notifier.sent if t.startswith("demo-2:")]
+        assert "demo-1" in child_note
+        assert "demo-2" in child_note
+
+        notifier.sent.clear()
+        second = engine.run_pass()
+
+    assert second.notifications == [], "restack nudge repeated on a second pass"
+
+
+def test_unstacked_tasks_get_no_restack_nudge(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """A sibling task on the same base is not a child; only `parent_task` counts."""
+    project, task = demo
+    worktree = project.root / ".worktrees" / "demo-2"
+    _git(project.root, "worktree", "add", "-q", "-b", "demo-2", str(worktree))
+    state.save_task(
+        project,
+        Task(
+            id="demo-2",
+            project=project.name,
+            branch="demo-2",
+            worktree_path=worktree,
+            base_branch="main",
+            created_at=datetime.now(UTC),
+        ),
+    )
+    state.update_task(
+        project, task.id, lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1"})
+    )
+
+    gh_patch, notify_patch = _run(notifier, pr_state="MERGED")
+    with (
+        gh_patch,
+        notify_patch,
+        patch("goblin_watcher.sync.engine.merge_detection", return_value=None),
+    ):
+        report = engine.run_pass()
+
+    assert not [n for n in report.notifications if n.startswith("parent-merged")]
+
+
+def test_parent_merged_respects_notify_events(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    project, task = demo
+    _stack_child_on(project, task, "demo-2")
+    state.update_task(
+        project, task.id, lambda t: t.model_copy(update={"pr_url": "https://gh/pr/1"})
+    )
+
+    gh_patch, notify_patch = _run(notifier, pr_state="MERGED")
+    cfg = config.Config()
+    cfg.sync.notify_events = ["pr-merged"]
+    with (
+        gh_patch,
+        notify_patch,
+        patch("goblin_watcher.sync.engine.config.load", return_value=cfg),
+        patch("goblin_watcher.sync.engine.merge_detection", return_value=None),
+    ):
+        report = engine.run_pass()
+
+    assert report.notifications == ["pr-merged: demo-1"]
 
 
 def test_checks_failing_then_passing_fires_both_edges(demo, notifier) -> None:  # type: ignore[no-untyped-def]

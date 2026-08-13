@@ -177,6 +177,22 @@ gw new --issue org/tracker#3 --project my-repo     # tracking issue in another r
 gw new --issue 42 --research                       # investigate and report back, don't implement
 ```
 
+#### `--from` — stacked branches
+
+`--from <branch>` bases the new task on something other than the default branch. When that branch belongs to a task gw already tracks, the link is recorded as `parent_task` on the new task, and the stack becomes visible instead of looking like unrelated work:
+
+- `gw status` nests the child under its parent, so a four-deep chain renders as one chain.
+- `gw task show` prints a `stacked on` line.
+- `gw pr open` adds a "Stacked on `<branch>`" section to the PR body, linking the parent's PR when it has one.
+- Once the parent's PR merges, `gw sync` fires a `parent-merged` notification naming the *child* — the branch that now needs rebasing.
+
+```bash
+gw new --branch-name feat/part-2 --from feat/part-1   # stacked on the feat/part-1 task
+gw new --pr 412                                       # a PR whose base is a tracked branch, too
+```
+
+Nothing rebases automatically. The default branch never counts as a parent, and an untracked base branch (a teammate's, say) records no link — there's no task to point at.
+
 #### `--research` — spawn an investigation instead of an implementation
 
 ```bash
@@ -385,6 +401,7 @@ changes, so a quiet day produces none:
 |---|---|
 | `agent-idle` | a session that was producing output goes quiet |
 | `pr-merged` | the PR's state becomes `MERGED` |
+| `parent-merged` | a task you're stacked on landed, so your branch needs a rebase |
 | `checks-failed` / `checks-passed` | CI flips |
 | `prunable` | a merged branch can't be auto-pruned because the worktree is dirty |
 
@@ -439,7 +456,7 @@ prune = true                      # auto-prune merged AND clean tasks; never for
 scratch_prune_days = 0            # prune scratch spaces idle > N days (0 = off)
 notify = "auto"                   # "auto" (macOS notifications on darwin) | "macos" | "command" | "off"
 notify_command = []               # argv for notify = "command"; title and body are appended
-notify_events = ["agent-idle", "pr-merged", "checks-failed", "checks-passed", "prunable"]
+notify_events = ["agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
 ```
 
 ## Tmux windowing

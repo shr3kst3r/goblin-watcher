@@ -55,17 +55,35 @@ def _closes_line(task: Task, repo_root: Path, project_repo_url: str | None) -> s
     return f"Closes {target} — {issue.title}"
 
 
+def _stacked_section(task: Task, repo: TaskRepo, parent: Task) -> str | None:
+    """The "stacked on" note for a PR cut from another task's branch, else None.
+
+    Primary repo only: `Task.parent_task` describes what the task's own branch
+    sits on, and a secondary repo's base is its own project's default branch.
+    """
+    if repo.project != task.project:
+        return None
+    link = f" — {parent.pr_url}" if parent.pr_url else ""
+    return (
+        f"## Stacked on `{parent.branch}`\n\n"
+        f"This PR targets `{repo.base_branch}`, the branch of task `{parent.id}`{link}. "
+        "Land that one first — the diff here shrinks to just this task's commits once it does."
+    )
+
+
 def _pr_body(
     task: Task,
     repo: TaskRepo,
     repo_root: Path,
     siblings: list[TaskRepo],
     project_repo_url: str | None = None,
+    parent: Task | None = None,
 ) -> str:
     """Assemble a structured PR body for one repo: issue context + commits + diffstat.
 
     `siblings` are the task's other repos; when non-empty a "multi-repo change"
     note cross-references them so reviewers know the PR is one half of a set.
+    `parent` is the task this one is stacked on, when its record still exists.
     """
     sections: list[str] = []
 
@@ -77,6 +95,11 @@ def _pr_body(
     closes = _closes_line(task, repo_root, project_repo_url)
     if closes is not None:
         sections.append(closes)
+
+    if parent is not None:
+        stacked = _stacked_section(task, repo, parent)
+        if stacked is not None:
+            sections.append(stacked)
 
     if siblings:
         sibling_lines = "\n".join(f"- `{s.project}` — branch `{s.branch}`" for s in siblings)
@@ -205,6 +228,10 @@ def open_(
                 hint="Run `gw task show` to see the task's repos.",
             )
 
+    # Resolved once: every repo's body cites the same parent, and the record is
+    # unaffected by the pushes below.
+    parent = state.find_parent_task(proj, task)
+
     opened: list[tuple[str, str]] = []
     for r in repos:
         repo_root = _repo_root(proj, r)
@@ -226,7 +253,14 @@ def open_(
             )
         else:
             title = task.ticket_title or r.branch
-            body = _pr_body(task, r, repo_root, siblings, project_repo_url=_repo_url(proj, r))
+            body = _pr_body(
+                task,
+                r,
+                repo_root,
+                siblings,
+                project_repo_url=_repo_url(proj, r),
+                parent=parent,
+            )
             url = gh.create_pr(
                 cwd=r.worktree_path,
                 title=title,
