@@ -326,16 +326,68 @@ def pr_state(url: str) -> str | None:
         return None
 
 
-def pr_checks(url: str) -> str | None:
-    """Roll up a PR's CI checks to `passing`, `failing`, or `pending`.
+_FAILING_STATES = frozenset(
+    {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+)
+_PENDING_STATES = frozenset(
+    {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"}
+)
 
-    Returns None when `gh` is missing, the lookup fails, or the PR has no checks
-    configured at all — "no signal" is distinct from "passing", and callers must
-    not report a green tick for a repo without CI.
 
-    The rollup is deliberately coarse: any failure/timeout/cancellation is
-    `failing`, any still-running or queued check is `pending`, and everything
-    else having concluded successfully (or neutral/skipped) is `passing`.
+@dataclass(frozen=True)
+class CheckRun:
+    """One entry from a PR's status-check rollup.
+
+    `state` is gw's coarse bucket (`passing`/`failing`/`pending`) — the same
+    vocabulary `pr_checks` rolls up — and `detail` is GitHub's own word for it
+    (`SUCCESS`, `TIMED_OUT`, `IN_PROGRESS`, ...), which keeps the distinctions
+    the bucket flattens away. `url` is the check's details page, or None when
+    GitHub reports none.
+    """
+
+    name: str
+    state: str
+    detail: str
+    url: str | None = None
+    workflow: str | None = None
+
+    @property
+    def label(self) -> str:
+        """`workflow / job` for a workflow's check run, else just the name.
+
+        GitHub Actions names the *job* in `name` and the workflow around it in
+        `workflowName`; two workflows can each have a `test` job, so the name
+        alone isn't enough to tell which one broke.
+        """
+        if self.workflow and self.workflow != self.name:
+            return f"{self.workflow} / {self.name}"
+        return self.name
+
+
+def _check_state(status: str, conclusion: str, legacy_state: str) -> str:
+    """Bucket one rollup entry as `passing`, `failing`, or `pending`.
+
+    Deliberately coarse: any failure/timeout/cancellation is `failing`, anything
+    still running or queued is `pending`, and everything else that concluded
+    (success, neutral, skipped) is `passing`. An entry we can't read at all
+    counts as `pending` rather than `passing` — the safe direction.
+    """
+    if conclusion in _FAILING_STATES or legacy_state in _FAILING_STATES:
+        return "failing"
+    still_running = bool(status) and status != "COMPLETED"
+    unknown = not status and not conclusion and not legacy_state
+    if legacy_state in _PENDING_STATES or still_running or unknown:
+        return "pending"
+    return "passing"
+
+
+def pr_check_runs(url: str) -> list[CheckRun] | None:
+    """A PR's CI checks, one `CheckRun` per rollup entry, in rollup order.
+
+    The single source of check data: `pr_checks` folds this down to one word.
+    Returns None when there was no signal at all — `gh` is missing, the lookup
+    failed, or the PR has no checks configured. "No signal" is distinct from
+    "passing", and no caller may render a green tick for a repo without CI.
     """
     if shutil.which("gh") is None:
         return None
@@ -348,26 +400,53 @@ def pr_checks(url: str) -> str | None:
         rollup = json.loads(res.stdout).get("statusCheckRollup")
     except json.JSONDecodeError, AttributeError:
         return None
-    if not rollup:
+    if not isinstance(rollup, list) or not rollup:
         return None
 
-    failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
-    pending = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"}
-    saw_pending = False
+    runs: list[CheckRun] = []
     for check in rollup:
         if not isinstance(check, dict):
             continue
-        # CheckRun reports `status` + `conclusion`; StatusContext reports `state`.
+        # CheckRun reports `status` + `conclusion` and names itself; StatusContext
+        # (the legacy commit-status API, still how e.g. Azure Pipelines reports)
+        # has a single `state` and calls its name a `context`.
         status = str(check.get("status") or "").upper()
         conclusion = str(check.get("conclusion") or "").upper()
         legacy_state = str(check.get("state") or "").upper()
-        if conclusion in failing or legacy_state in failing:
-            return "failing"
-        still_running = status and status != "COMPLETED"
-        unknown = not status and not conclusion and not legacy_state
-        if legacy_state in pending or still_running or unknown:
-            saw_pending = True
-    return "pending" if saw_pending else "passing"
+        name = str(check.get("name") or check.get("context") or "").strip()
+        workflow = str(check.get("workflowName") or "").strip()
+        target = str(check.get("detailsUrl") or check.get("targetUrl") or "").strip()
+        runs.append(
+            CheckRun(
+                name=name or "(unnamed check)",
+                state=_check_state(status, conclusion, legacy_state),
+                # GitHub's own word: the outcome once there is one, else whatever
+                # the check is currently doing.
+                detail=conclusion or legacy_state or status,
+                url=target or None,
+                workflow=workflow or None,
+            )
+        )
+    return runs
+
+
+def pr_checks(url: str) -> str | None:
+    """Roll up a PR's CI checks to `passing`, `failing`, or `pending`.
+
+    Returns None when there was no signal at all (see `pr_check_runs`). Failing
+    wins over pending, which wins over passing — one broken check makes the whole
+    PR read as broken. Reach for `pr_check_runs` when you need to know *which*
+    check that was.
+    """
+    runs = pr_check_runs(url)
+    if runs is None:
+        return None
+    states = {r.state for r in runs}
+    if "failing" in states:
+        return "failing"
+    if "pending" in states:
+        return "pending"
+    return "passing"
 
 
 def parse_pr_url(url: str) -> tuple[str, int] | None:

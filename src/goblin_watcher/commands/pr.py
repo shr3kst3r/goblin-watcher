@@ -261,6 +261,67 @@ def open_(
             console.print(f"[muted]Skipped Linear notification: {e.message}[/]")
 
 
+_CHECK_GLYPHS = {"passing": "[green]✓[/]", "failing": "[red]✗[/]", "pending": "[hint]●[/]"}
+_CHECK_STYLES = {"passing": "green", "failing": "red", "pending": "hint"}
+# Broken first, then still-running, then the ones that already passed: the check
+# you opened this command to find should be the first row you read.
+_CHECK_ORDER = {"failing": 0, "pending": 1, "passing": 2}
+
+
+def _print_check_runs(runs: list[gh.CheckRun], indent: str) -> None:
+    """Print one aligned row per check: glyph, name, state, details URL."""
+    ordered = sorted(runs, key=lambda r: _CHECK_ORDER.get(r.state, 3))
+    name_width = max(len(r.label) for r in ordered)
+    detail_width = max(len(r.detail) for r in ordered)
+    for run in ordered:
+        glyph = _CHECK_GLYPHS.get(run.state, "[muted]?[/]")
+        style = _CHECK_STYLES.get(run.state, "muted")
+        detail = (run.detail or run.state).ljust(detail_width)
+        row = f"{indent}{glyph} {run.label.ljust(name_width)}  [{style}]{detail}[/]"
+        if run.url:
+            row += f"  [muted]{run.url}[/]"
+        console.print(row)
+
+
+@app.command("checks")
+def checks(
+    task_id: str | None = typer.Argument(
+        None, help="Task id; defaults to the cwd's task.", autocompletion=complete_tasks
+    ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
+) -> None:
+    """Show each CI check on a task's PR: name, state, and details URL."""
+    _, task = _resolve_task(task_id, project)
+    _reject_scratch_task(task)
+
+    console.print(f"[bold]{task.id}[/]")
+    any_found = False
+    for r in task.all_repos():
+        indent = "    " if task.is_multi_repo else "  "
+        if task.is_multi_repo:
+            console.print(f"  [bold]{r.project}[/]")
+        try:
+            data = gh.pr_status(cwd=r.worktree_path)
+        except GoblinError as e:
+            console.print(f"{indent}[muted]{e.message}[/]")
+            continue
+        any_found = True
+        runs = gh.pr_check_runs(data["url"])
+        console.print(f"{indent}PR #{data['number']} · {data['state']} · {data['url']}")
+        if not runs:
+            console.print(f"{indent}  [muted]No checks reported for this PR.[/]")
+            continue
+        _print_check_runs(runs, indent + "  ")
+
+    if not any_found:
+        raise typer.Exit(code=1)
+
+
 @app.command("status")
 def status(
     task_id: str | None = typer.Argument(

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import click
 import typer
 
-from goblin_watcher import config, paths, state
+from goblin_watcher import config, paths, state, worktree_setup
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
 from goblin_watcher.console import agent_badge, console, print_settings, print_success
@@ -91,6 +91,11 @@ def scratch(
     no_launch: bool = typer.Option(
         False, "--no-launch", help="Create the scratch space but do not launch."
     ),
+    no_setup: bool = typer.Option(
+        False,
+        "--no-setup",
+        help="Skip the configured setup (the [setup] copy/link/run steps).",
+    ),
     windowing: str | None = typer.Option(
         None,
         "--windowing",
@@ -150,6 +155,13 @@ def scratch(
             ("no_launch", str(no_launch).lower()),
         ]
     )
+
+    if not no_setup:
+        # Sources resolve against the scratch container's root (`~/goblin/scratch`),
+        # so a `.env` dropped there is copied into every new space.
+        result = worktree_setup.run_setup(proj, directory, task_id=final)
+        if not result.ok:
+            raise worktree_setup.setup_failure(final, result)
 
     if no_launch:
         return

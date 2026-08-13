@@ -1,11 +1,12 @@
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import click
 import typer
 
-from goblin_watcher import config, gh, git, paths, secrets, state, workspace
+from goblin_watcher import config, gh, git, paths, secrets, state, workspace, worktree_setup
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
 from goblin_watcher.commands.task import destroy_task, dirty_worktrees
@@ -21,6 +22,20 @@ from goblin_watcher.windowing import WINDOWING_MODES, get_windower
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class Created:
+    """A task plus whether this run actually materialized its worktree.
+
+    Setup runs at materialization, so the sources that adopt a checkout already
+    on disk (`--dir`, and the re-adopt path in `--branch`/`--pr`) report
+    `materialized=False` and are left alone — re-copying `.env` over a directory
+    the user has been working in is not this feature's job.
+    """
+
+    task: Task
+    materialized: bool
 
 
 def _find_project_containing(path: Path) -> Project:
@@ -247,6 +262,11 @@ def new(
         click_type=click.Choice(list(AGENT_NAMES)),
     ),
     no_launch: bool = typer.Option(False, "--no-launch", help="Create the task but do not launch."),
+    no_setup: bool = typer.Option(
+        False,
+        "--no-setup",
+        help="Skip the configured worktree setup (the [setup] copy/link/run steps).",
+    ),
     rm: bool = typer.Option(
         False,
         "--rm",
@@ -363,30 +383,40 @@ def new(
     # --rm-force implies --rm; `force` lets removal proceed past a dirty worktree.
     remove = rm or rm_force
     if linear is not None:
-        task = _from_linear(linear, project, repo, title, from_, remove, rm_force)
+        created = _from_linear(linear, project, repo, title, from_, remove, rm_force)
     elif issue is not None:
-        task = _from_issue(issue, project, repo, title, from_, remove, rm_force)
+        created = _from_issue(issue, project, repo, title, from_, remove, rm_force)
     elif pr is not None:
-        task = _from_pr(pr, project, repo, title, remove, rm_force)
+        created = _from_pr(pr, project, repo, title, remove, rm_force)
     elif dir is not None:
-        task = _from_existing_dir(dir, title, remove, rm_force)
+        created = _from_existing_dir(dir, title, remove, rm_force)
     elif branch is not None:
         proj = resolve_project(project)
         _reject_scratch_project(proj)
-        task = _from_existing_branch(proj, branch, title, remove, rm_force)
+        created = _from_existing_branch(proj, branch, title, remove, rm_force)
     else:
         proj = resolve_project(project)
         _reject_scratch_project(proj)
         generated = random_branch_name(proj.name) if branch_auto else None
         chosen = branch_name if branch_name is not None else generated
         assert chosen is not None
-        task = _from_new_branch(proj, chosen, from_, title, remove, rm_force)
+        created = _from_new_branch(proj, chosen, from_, title, remove, rm_force)
 
+    task = created.task
     proj = state.get_project(task.project)
     state.save_task(proj, task)
 
+    # Secondary repos are attached before setup runs: `promote_to_workspace`
+    # relocates the primary worktree, and setup should populate where the agent
+    # will actually be launched, not the path it was moved out of.
     if with_project:
         task = _attach_secondaries(proj, task, with_project, from_)
+
+    # Every secondary was just created by `attach_repo`; the primary counts only
+    # when this run is what put it on disk.
+    setup_targets = [
+        r for r in task.all_repos() if r.project != task.project or created.materialized
+    ]
 
     cfg = config.load()
     agent_name = agent or (cfg.defaults.agent) or "claude"
@@ -423,6 +453,14 @@ def new(
         ("research", str(research).lower()),
     ]
     print_settings(settings)
+
+    if not no_setup and setup_targets:
+        setup_result = worktree_setup.setup_task_repos(task, setup_targets)
+        if not setup_result.ok:
+            # The task record and worktree survive: the user fixes the cause and
+            # re-runs `gw task setup`. Launching an agent into a half-built
+            # worktree is exactly the failure this hook exists to prevent.
+            raise worktree_setup.setup_failure(task.id, setup_result)
 
     if no_launch:
         return
@@ -483,7 +521,7 @@ def _attach_secondaries(proj: Project, task: Task, names: list[str], from_: str 
 
 def _from_new_branch(
     proj: Project, branch_name: str, from_: str | None, title: str | None, rm: bool, force: bool
-) -> Task:
+) -> Created:
     del title  # only relevant to seed prompt (Phase 5)
     base = from_ or proj.default_branch
     _refresh_base(proj.root, base)
@@ -510,19 +548,22 @@ def _from_new_branch(
         _raise_task_exists(proj, task_id)
     worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
     git.worktree_add(proj.root, worktree_dir, final_branch, base=base)
-    return Task(
-        id=task_id,
-        project=proj.name,
-        branch=final_branch,
-        worktree_path=worktree_dir,
-        base_branch=base,
-        created_at=_now(),
+    return Created(
+        Task(
+            id=task_id,
+            project=proj.name,
+            branch=final_branch,
+            worktree_path=worktree_dir,
+            base_branch=base,
+            created_at=_now(),
+        ),
+        materialized=True,
     )
 
 
 def _from_existing_branch(
     proj: Project, branch: str, title: str | None, rm: bool, force: bool
-) -> Task:
+) -> Created:
     del title  # not used for branch naming; only relevant to prompt seed (Phase 5)
     repo = proj.root
     task_id = _task_id_from_branch(branch)
@@ -538,16 +579,20 @@ def _from_existing_branch(
         )
 
     worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
-    if not worktree_dir.exists():
+    materialized = not worktree_dir.exists()
+    if materialized:
         git.worktree_add(repo, worktree_dir, branch)
 
-    return Task(
-        id=task_id,
-        project=proj.name,
-        branch=branch,
-        worktree_path=worktree_dir,
-        base_branch=proj.default_branch,
-        created_at=_now(),
+    return Created(
+        Task(
+            id=task_id,
+            project=proj.name,
+            branch=branch,
+            worktree_path=worktree_dir,
+            base_branch=proj.default_branch,
+            created_at=_now(),
+        ),
+        materialized=materialized,
     )
 
 
@@ -612,7 +657,7 @@ def _from_pr(
     title: str | None,
     rm: bool,
     force: bool,
-) -> Task:
+) -> Created:
     del repo_url, title  # PR title/branch supersede; auto-clone is out of scope.
     proj = _resolve_pr_project(pr, project_override)
     _reject_scratch_project(proj)
@@ -640,18 +685,22 @@ def _from_pr(
         )
 
     worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
-    if not worktree_dir.exists():
+    materialized = not worktree_dir.exists()
+    if materialized:
         git.worktree_add(proj.root, worktree_dir, info.head_ref)
 
-    return Task(
-        id=task_id,
-        project=proj.name,
-        branch=info.head_ref,
-        worktree_path=worktree_dir,
-        base_branch=info.base_ref,
-        pr_url=info.url,
-        status="pr-open",
-        created_at=_now(),
+    return Created(
+        Task(
+            id=task_id,
+            project=proj.name,
+            branch=info.head_ref,
+            worktree_path=worktree_dir,
+            base_branch=info.base_ref,
+            pr_url=info.url,
+            status="pr-open",
+            created_at=_now(),
+        ),
+        materialized=materialized,
     )
 
 
@@ -709,7 +758,7 @@ def _from_linear(
     from_: str | None,
     rm: bool,
     force: bool,
-) -> Task:
+) -> Created:
     del title  # Linear's title supersedes
     parse_identifier(linear_id)  # validates the form; we use the fetched issue's team
     api_key = secrets.get_linear_api_key()
@@ -728,16 +777,20 @@ def _from_linear(
         proj.root, branch_slug(issue.identifier, issue.title, prefix=proj.branch_prefix)
     )
     worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
-    if not worktree_dir.exists():
+    materialized = not worktree_dir.exists()
+    if materialized:
         git.worktree_add(proj.root, worktree_dir, branch, base=base)
-    return Task(
-        id=task_id,
-        project=proj.name,
-        linear=_clone_linear_issue(issue),
-        branch=branch,
-        worktree_path=worktree_dir,
-        base_branch=base,
-        created_at=_now(),
+    return Created(
+        Task(
+            id=task_id,
+            project=proj.name,
+            linear=_clone_linear_issue(issue),
+            branch=branch,
+            worktree_path=worktree_dir,
+            base_branch=base,
+            created_at=_now(),
+        ),
+        materialized=materialized,
     )
 
 
@@ -861,7 +914,7 @@ def _from_issue(
     from_: str | None,
     rm: bool,
     force: bool,
-) -> Task:
+) -> Created:
     del title  # the issue's title supersedes
     ref = gh.parse_issue_ref(issue_ref)
     proj = _resolve_issue_project(ref, project_override, repo_url)
@@ -881,26 +934,30 @@ def _from_issue(
         proj.root, branch_slug(task_id, info.title, prefix=proj.branch_prefix)
     )
     worktree_dir = paths.worktree_root(proj.root, proj.worktree_root) / task_id
-    if not worktree_dir.exists():
+    materialized = not worktree_dir.exists()
+    if materialized:
         git.worktree_add(proj.root, worktree_dir, branch, base=base)
-    return Task(
-        id=task_id,
-        project=proj.name,
-        github_issue=GhIssue(
-            number=info.number,
-            repo=info.repo,
-            title=info.title,
-            body=info.body or None,
-            state=info.state,
-            url=info.url,
-            labels=list(info.labels),
-            assignees=list(info.assignees),
+    return Created(
+        Task(
+            id=task_id,
+            project=proj.name,
+            github_issue=GhIssue(
+                number=info.number,
+                repo=info.repo,
+                title=info.title,
+                body=info.body or None,
+                state=info.state,
+                url=info.url,
+                labels=list(info.labels),
+                assignees=list(info.assignees),
+            ),
+            github_issue_state_updated_at=_now(),
+            branch=branch,
+            worktree_path=worktree_dir,
+            base_branch=base,
+            created_at=_now(),
         ),
-        github_issue_state_updated_at=_now(),
-        branch=branch,
-        worktree_path=worktree_dir,
-        base_branch=base,
-        created_at=_now(),
+        materialized=materialized,
     )
 
 
@@ -910,7 +967,7 @@ def _clone_linear_issue(issue: LinearIssue) -> LinearIssue:
     return LinearIssue.model_validate(issue.model_dump())
 
 
-def _from_existing_dir(directory: Path, title: str | None, rm: bool, force: bool) -> Task:
+def _from_existing_dir(directory: Path, title: str | None, rm: bool, force: bool) -> Created:
     del title  # only relevant to seed prompt (Phase 5)
     directory = directory.resolve()
     if not directory.exists():
@@ -927,11 +984,15 @@ def _from_existing_dir(directory: Path, title: str | None, rm: bool, force: bool
     # The directory is adopted in place — --rm resets only the record, leaving
     # the user's checkout and branch untouched.
     _handle_existing(proj, task_id, rm=rm, force=force, delete_branch=False, delete_worktree=False)
-    return Task(
-        id=task_id,
-        project=proj.name,
-        branch=branch_here,
-        worktree_path=directory,
-        base_branch=proj.default_branch,
-        created_at=_now(),
+    return Created(
+        Task(
+            id=task_id,
+            project=proj.name,
+            branch=branch_here,
+            worktree_path=directory,
+            base_branch=proj.default_branch,
+            created_at=_now(),
+        ),
+        # Adopted in place: the checkout is the user's own, already bootstrapped.
+        materialized=False,
     )

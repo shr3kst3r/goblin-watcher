@@ -78,6 +78,11 @@ def sync_launchd_log_file() -> Path:
     return logs_dir() / "sync.launchd.log"
 
 
+def setup_journal_file() -> Path:
+    """Append-only JSONL record of every worktree-setup run and step outcome."""
+    return logs_dir() / "setup.jsonl"
+
+
 def project_meta_dir(project_root: Path) -> Path:
     """Per-project state lives at <project_root>/.goblin/."""
     return project_root / ".goblin"
@@ -109,6 +114,15 @@ def task_lock_file(project_root: Path, task_id: str) -> Path:
 def project_prompt_file(project_root: Path) -> Path:
     """Per-project prompt addition; presence overrides the global addition."""
     return project_meta_dir(project_root) / "prompt.md"
+
+
+def project_setup_file(project_root: Path) -> Path:
+    """Per-project worktree-setup config; presence replaces the global `[setup]`.
+
+    Same posture as `project_prompt_file`: the project's file wins whole, rather
+    than merging with the user-wide table.
+    """
+    return project_meta_dir(project_root) / "setup.toml"
 
 
 def worktree_root(project_root: Path, override: Path | None = None) -> Path:
