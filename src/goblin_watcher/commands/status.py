@@ -18,6 +18,7 @@ from goblin_watcher import (
     state,
     usage,
 )
+from goblin_watcher.commands import diff as diff_cmd
 from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
@@ -288,6 +289,7 @@ def _build_tree(
     cost: bool,
     active_only: bool,
     live: bool,
+    diffstat: bool = False,
 ) -> tuple[Tree, usage.Rollup, int]:
     """Render the project → task → session tree. Returns (tree, cost total, tasks shown).
 
@@ -374,6 +376,7 @@ def _build_tree(
                 + ("  [bold cyan]⚡ headless[/]" if headless_live else "")
                 + sync_suffix
                 + _stack_suffix(refreshed, by_id)
+                + (diff_cmd.status_suffix(proj, refreshed) if diffstat else "")
                 + (usage.badge(task_total) if cost else "")
             )
             # Archived: worktree dropped, record and branch kept (gh-23). Dimmed
@@ -437,6 +440,12 @@ def status(
         "--cost",
         help="Annotate every session, task, and project with token usage and estimated cost.",
     ),
+    diffstat: bool = typer.Option(
+        False,
+        "--diffstat",
+        help="Annotate every task with what its branch changed (+N -N · N files). "
+        "One `git diff --stat` per repo; see `gw diff <task-id>` for the patch.",
+    ),
     active: bool = typer.Option(
         False,
         "--active",
@@ -489,6 +498,7 @@ def status(
             cost=cost,
             active_only=active,
             interval=interval,
+            diffstat=diffstat,
         )
         return
 
@@ -503,6 +513,7 @@ def status(
             cost=cost,
             active_only=active,
             live=False,
+            diffstat=diffstat,
         )
     finally:
         linear.close()
@@ -560,6 +571,7 @@ def _watch(
     cost: bool,
     active_only: bool,
     interval: float,
+    diffstat: bool = False,
 ) -> None:
     """Redraw the tree in place until interrupted.
 
@@ -567,6 +579,9 @@ def _watch(
     status` shows, with `live=True` holding it to local work — the sync cache,
     task JSON, transcript mtimes, and headless pid files. That's the whole point
     of the indicator cache: a dashboard you can leave open costs no network.
+
+    `--diffstat` is the one exception: it shells out to git once per repo per
+    tick, uncached. Opt-in, so a plain watch is unaffected.
     """
 
     def frame() -> RenderableType:
@@ -579,6 +594,7 @@ def _watch(
             cost=cost,
             active_only=active_only,
             live=True,
+            diffstat=diffstat,
         )
         return _watch_frame(root, total, shown, cfg=cfg, cost=cost, active_only=active_only)
 

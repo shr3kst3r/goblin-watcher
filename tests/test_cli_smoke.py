@@ -36,6 +36,7 @@ def test_subcommand_groups_appear_in_help() -> None:
         "new",
         "run",
         "status",
+        "diff",
         "doctor",
         "version",
     ):

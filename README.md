@@ -317,6 +317,22 @@ gwfinder eng-123                                    # open the worktree in Finde
 
 `gw cd` itself just prints the resolved worktree path on stdout (a subprocess can't `cd` its parent shell). The `gwcd` / `gwcode` / `gwobsidian` / `gwfinder` wrappers that act on that path are shell functions published by [`spg`](https://github.com/shr3kst3r/spg) from this project's `spg.toml` (install once with `spg install`, then start a new zsh). `gwobsidian` opens the path via the `obsidian://open?path=…` URI — Obsidian prompts to trust the folder the first time you open it as a vault. `gwfinder` opens the path with macOS `open`, which reveals the worktree in Finder.
 
+### `gw diff` — see what an agent changed without cd-ing in
+
+```bash
+gw diff eng-123                                     # commits + diffstat + patch, vs the base branch
+gw diff                                             # no arg → the cwd's task, else the picker
+gw diff eng-123 --stat                              # summary only, no patch
+gw diff eng-123 --no-uncommitted                    # just the branch, skip the worktree overlay
+gw diff eng-123 --base origin/main                  # compare against something else
+gw diff eng-123 --repo other-repo                   # one repo of a multi-repo task
+gw status --diffstat                                # one +N -N · N files summary per task
+```
+
+Four agents in four worktrees used to mean four `cd`s. This renders the same thing from wherever you are: the branch's commits, its diffstat, and the patch — plus a separate **Uncommitted** section for work the agent hasn't committed yet, which for a live agent is usually all of it. Untracked files are listed by name, since `git diff` can't see them.
+
+The comparison is `base...branch` — the merge-base one a PR shows, so commits the base branch has gained since the task started don't show up as reversions. Everything is read from the project's main checkout rather than the worktree, which means an archived task (see [Cleanup](#cleanup)) still diffs fine; only the uncommitted overlay needs the worktree back. Output is paged when stdout is a terminal (`--no-pager` to suppress) and is a human view, not a clean patch.
+
 ### `gw pr open` — push and open a PR
 
 ```bash
@@ -760,8 +776,10 @@ gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
 gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
            [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
-gw status [--project NAME] [--no-linear] [--no-cache] [--cost]
+gw status [--project NAME] [--no-linear] [--no-cache] [--cost] [--diffstat]
           [--active] [--watch|-w] [--interval SECONDS]      # tree view of projects → tasks → sessions
+gw diff [PATH|TASK-ID] [--project NAME] [--repo NAME] [--base REF] [--stat]
+        [--uncommitted|--no-uncommitted] [--pager|--no-pager]   # commits + diffstat + patch vs the base branch
 gw sync                                     # run one background-sync pass now, verbosely
 gw doctor [--repair]                        # binary + key resolution + state-drift checks
 gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation (`gw history prune` trims it)

@@ -439,12 +439,46 @@ def commits_between(repo: Path, base: str, head: str) -> list[tuple[str, str, st
     return commits
 
 
-def diffstat(repo: Path, base: str, head: str) -> str:
-    """Return `git diff --stat <base>..<head>` output, or '' if it errors."""
+def diff_range(repo: Path, range_spec: str, *, stat: bool = False) -> str:
+    """Run `git diff [--stat] <range_spec>` in `repo`; '' if it errors.
+
+    `range_spec` is passed through verbatim, so callers pick their own
+    comparison: `main..feature` for a straight two-tree compare, `main...feature`
+    for the merge-base one a PR shows, or `HEAD` for the working tree's
+    uncommitted changes. Tolerant of unresolvable refs (a deleted base branch,
+    an unborn HEAD) so callers can render "nothing to show" instead of failing.
+
+    Only trailing whitespace is trimmed: every line of `--stat` output carries a
+    leading space its filename column is aligned on, and dropping that from the
+    first line alone would skew the block.
+    """
+    args = ["-C", str(repo), "diff"]
+    if stat:
+        args.append("--stat")
+    args.append(range_spec)
     try:
-        return _run(["-C", str(repo), "diff", "--stat", f"{base}..{head}"]).strip()
+        return _run(args).rstrip()
     except GitCommandError:
         return ""
+
+
+def diffstat(repo: Path, base: str, head: str) -> str:
+    """Return `git diff --stat <base>..<head>` output, or '' if it errors."""
+    return diff_range(repo, f"{base}..{head}", stat=True).strip()
+
+
+def untracked_files(path: Path) -> list[str]:
+    """Paths in `path`'s working tree that git isn't tracking yet. [] if it errors.
+
+    `git diff` can't see these, so a caller rendering uncommitted work has to
+    name them separately or an agent's brand-new file looks like no change
+    at all.
+    """
+    try:
+        out = _run(["-C", str(path), "status", "--porcelain", "--untracked-files=all"])
+    except GitCommandError:
+        return []
+    return [line[3:].strip() for line in out.splitlines() if line.startswith("?? ")]
 
 
 def is_branch_merged(
