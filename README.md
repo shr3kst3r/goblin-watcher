@@ -456,10 +456,12 @@ Inline mode (default) just blocks on the agent process and returns when it exits
 
 | Agent | Spawn | Resume | Session discovery |
 |---|---|---|---|
-| **claude** (Claude Code) | `claude "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
-| **codex** | `codex "<prompt>"` | `codex resume <id>` | Partial — synthesizes a UUID; transcript parsing stubbed |
-| **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | Partial — cwd-scoped checkpoints, no stable id |
+| **claude** (Claude Code) | `claude --session-id <uuid> "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
+| **codex** | `codex "<prompt>"` | `codex resume` (codex's own picker) | Full — walks `~/.codex/sessions/**/rollout-*.jsonl`, matches tasks on `session_meta.cwd`, parses ids, summaries, turn counts |
+| **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | None — cwd-scoped checkpoints, no stable id; `list_sessions` / `read_transcript` are stubs, so sessions carry no summary |
 | **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Partial — conversation id recovered from `~/.gemini/antigravity-cli/cache/last_conversations.json`; transcripts live in SQLite and aren't parsed |
+
+Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
 `gw doctor` checks which binaries are on PATH and resolves the Linear key.
 
