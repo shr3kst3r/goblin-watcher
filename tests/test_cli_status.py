@@ -57,6 +57,25 @@ def test_status_renders_linear_state_when_present(isolated_xdg: Path, tmp_path: 
     assert "Do the thing" in res.output
 
 
+def test_status_renders_the_task_status(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Rich reads `[open]` as a markup tag and swallows it, so the status has to
+    be rendered in parens or it never reaches the user at all."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    # A hyphenated status is the harder case: Rich parses `[pr-open]` too.
+    state.save_task(proj, task.model_copy(update={"status": "pr-open"}))
+
+    res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    assert "(pr-open)" in res.output
+
+
 def test_status_omits_linear_state_when_no_linear(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = tmp_path / "alpha"
     _init_repo(repo)

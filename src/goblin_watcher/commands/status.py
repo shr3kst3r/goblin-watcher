@@ -280,7 +280,9 @@ def status(
                 task_label = (
                     f"[bold]{task.id}[/]"
                     + _ticket_suffix(task)
-                    + f"  [muted][{task.status}][/]"
+                    # Parens, not brackets: Rich reads `[open]` as a markup tag
+                    # and swallows it, so bracketed statuses never rendered.
+                    + f"  [muted]({task.status})[/]"
                     + sync_suffix
                     + _stack_suffix(task, by_id)
                 )
