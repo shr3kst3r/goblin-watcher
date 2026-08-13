@@ -45,6 +45,7 @@ DriftKind = Literal[
     "missing-branch",
     "missing-exclude",
     "stale-indicator",
+    "unreadable-record",
 ]
 
 # The only kinds whose repair cannot lose work. Enforced in `Finding`, so a new
@@ -97,9 +98,12 @@ def detect(projects: Sequence[Project] | None = None) -> list[Finding]:
     the registry to tell "task deleted" from "project simply not examined".
     """
     projects = list(projects) if projects is not None else _registry_projects()
-    tasks = {p.name: state.list_tasks(p) for p in projects}
+    scans = {p.name: state.scan_tasks(p) for p in projects}
+    tasks = {name: scan.tasks for name, scan in scans.items()}
 
     findings: list[Finding] = []
+    for proj in projects:
+        findings.extend(_unreadable_findings(proj, scans[proj.name]))
     known = _known_worktrees(tasks.values())
     for proj in projects:
         if proj.kind != "git":
@@ -189,6 +193,37 @@ def _known_worktrees(task_lists: Iterable[list[Task]]) -> set[Path]:
             if task.workspace_path is not None:
                 known.add(task.workspace_path.resolve())
     return known
+
+
+def _unreadable_findings(proj: Project, scan: state.TaskScan) -> list[Finding]:
+    """Task records this build could not parse — one finding each.
+
+    Never repairable: the file is the only copy of the record, and the most
+    likely reason gw can't read it is that a *newer* gw wrote it. Deleting or
+    rewriting it here would turn a version skew into data loss. Reporting is the
+    whole job (gh-51).
+    """
+    findings: list[Finding] = []
+    for bad in scan.unreadable:
+        if bad.newer_schema:
+            detail = (
+                f"written by a newer gw — unknown field(s): {', '.join(bad.unknown_fields)}. "
+                "Upgrade this gw, or restart any long-running `gw status --watch`; "
+                "the record itself is fine."
+            )
+        else:
+            detail = f"could not be parsed: {bad.error}"
+        findings.append(
+            Finding(
+                kind="unreadable-record",
+                where=f"{proj.name}/{bad.task_id}",
+                detail=detail,
+                project=proj.name,
+                task_id=bad.task_id,
+                root=proj.root,
+            )
+        )
+    return findings
 
 
 def _exclude_findings(proj: Project) -> list[Finding]:

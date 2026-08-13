@@ -218,9 +218,22 @@ We do this to keep `.goblin/` and `.worktrees/` invisible to the host repo's too
 
 ## Task discovery
 
-`state.list_tasks(project)` globs `<root>/.goblin/tasks/*.json` and returns successfully-parsed records. Files that fail validation are skipped (so a stray file in `tasks/` doesn't crash `gw status`). There's no index file; task listings are O(n) over the task files on disk, which is fine for any human-scale project.
+`state.scan_tasks(project)` globs `<root>/.goblin/tasks/*.json` and returns a `TaskScan`: the records that parsed, plus an `UnreadableTask` for each that didn't. `state.list_tasks(project)` is the thin wrapper returning only the healthy ones, for the many callers that act on tasks and have no way to report a broken record anyway. There's no index file; task listings are O(n) over the task files on disk, which is fine for any human-scale project.
 
 `state.find_task_by_worktree(project, path)` walks `list_tasks` looking for a worktree match — used by `gw run` to resolve `cwd → task`.
+
+### Unreadable records are reported, never silently skipped
+
+Skipping a record that fails validation keeps a stray file in `tasks/` from crashing `gw status`, but on its own it makes "this project has no tasks" and "gw cannot read this project's tasks" render identically. That is how gh-51 presented: a `gw status --active --watch` left running showed a full dashboard, then nothing at all, with a footer confidently blaming idleness.
+
+The cause is version skew, and it is structural rather than accidental. `Task` is `extra="forbid"`, gw installs editable, and a watch loop holds the models it imported at startup. So the moment an agent lands a commit adding a field to `Task`, every writer on the new build stamps that field into the task records — and the resident watch process, whose model has never heard of it, fails validation on all of them. `gw sync` rewrites every record each pass, so one or two intervals is enough to empty the dashboard completely.
+
+`UnreadableTask.unknown_fields` is what separates the two cases, and the remedies have nothing to do with each other:
+
+- **non-empty** (`newer_schema`) — the record was written by a *newer* gw. The record is fine; the reader is stale. `gw status` says so and tells you to restart the command.
+- **empty** — a genuinely broken file. `gw status` points at `gw doctor`.
+
+Anything rendering task records to a human should call `scan_tasks` and surface the failures. `gw status` prints the banner above the tree (a tall tree overflows the terminal and Rich crops the bottom, so a footer warning is one nobody reads), and `_nothing_in_flight` stops asserting idleness it never observed.
 
 ## State drift and repair
 
@@ -234,6 +247,7 @@ Nothing gw runs causes the drift that actually bites: a worktree removed with `r
 | `orphan-record` | *every* repo on the task has lost both its worktree and its branch (or a scratch task's directory is gone) | yes — `state.delete_task_record` |
 | `missing-exclude` | `.git/info/exclude` lacks `.goblin/` or `.worktrees/` | yes — `git.add_to_local_exclude` |
 | `stale-indicator` | `sync/indicators.json` rows keyed to tasks that no longer exist | yes — dropped from the cache |
+| `unreadable-record` | a task JSON this build can't parse — usually one written by a newer gw | no |
 
 The repairable set is exactly "fixes that cannot destroy work". `drift.REPAIRABLE_KINDS` is the whitelist, and `Finding.__post_init__` raises if a finding of any other kind claims to be repairable — the invariant is enforced in code, not by review. It matches sync's prune step, which refuses to force-delete a branch it can't prove is merged (`sync/engine._prune_blocker`).
 
@@ -242,6 +256,7 @@ Three details that are easy to get wrong:
 - **The worktree-to-record match is global, not per-project.** A multi-repo task's secondary worktree lives in *that* repo's `.worktrees/` while the record lives with the primary project, so `drift._known_worktrees` collects claimed paths across every project before anything is called an orphan.
 - **Orphan detection is scoped to the project's worktree root.** That directory is gw's own; a worktree the user created elsewhere in the repo is deliberately not gw's business.
 - **An unregistered project means "can't tell", not "gone".** A repo whose project isn't in the registry can't be probed for a branch, and that ambiguity must never be the reason a record gets dropped.
+- **`unreadable-record` is never repairable.** The file is the only copy of the record, and the likeliest reason gw can't read it is that a newer gw wrote it. "Repairing" that would turn a version skew into data loss.
 
 Detection never raises: a project whose root, repo, or exclude file can't be read is skipped so the rest of the report survives. Any finding makes `gw doctor` exit non-zero, which is what makes it usable as a scripted health gate.
 

@@ -4,9 +4,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import typer
 from rich.table import Table
@@ -16,9 +14,6 @@ from goblin_watcher.agents import AGENT_NAMES, get_agent
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError
 from goblin_watcher.windowing import WINDOWING_MODES
-
-if TYPE_CHECKING:
-    from goblin_watcher.sync.models import PassReport
 
 
 @dataclass
@@ -194,49 +189,20 @@ def _sync_check() -> Check:
     interval = launchd.installed_interval()
     last = store.load_state().last_pass
     when = "never run" if last is None else f"last pass {last.status}"
-    stale = _sync_staleness(plist, last_finished=_last_pass_at(last), interval=interval)
+    # `launchd.staleness` is shared with `gw sync status` so the two surfaces
+    # can't disagree about when a job counts as no longer firing.
+    stale = launchd.staleness(last_finished=launchd.last_pass_at(last), interval=interval)
     if stale is not None:
         return Check(name=name, ok=False, detail=f"scheduled ({when}) but {stale}")
-    return Check(name=name, ok=True, detail=f"loaded · {when}")
-
-
-def _last_pass_at(last: PassReport | None) -> datetime | None:
-    """When the most recent pass reported in, tolerating naive stored timestamps."""
-    if last is None:
-        return None
-    when = last.finished_at or last.started_at
-    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
-
-
-def _sync_staleness(
-    plist: Path, *, last_finished: datetime | None, interval: int | None
-) -> str | None:
-    """Why sync looks like it isn't firing, or None when it's on schedule.
-
-    The plist's mtime stands in for "installed at" when no pass has ever run,
-    which is what distinguishes "installed 20 seconds ago" (fine — `RunAtLoad`
-    is off, so the first pass waits a full interval) from "installed last week
-    and never ran" (broken).
-    """
-    if interval is None:
-        return "the plist's StartInterval is unreadable, so gw can't tell when the next pass is due"
-    try:
-        installed_at = datetime.fromtimestamp(plist.stat().st_mtime, UTC)
-    except OSError:  # pragma: no cover - the caller just stat'd it via exists()
-        return None
-    since = last_finished or installed_at
-    age = int((datetime.now(UTC) - since).total_seconds())
-    # Three intervals of slack: a single missed firing is normal (laptop asleep,
-    # a pass that overran), three in a row is not.
-    if age <= max(interval * 3, 60):
-        return None
-    what = "no pass has run" if last_finished is None else "the last pass finished"
-    return f"{what} {age}s ago with a {interval}s interval — check `gw sync status` and the log"
+    checkout = launchd.editable_checkout()
+    suffix = f" · editable install from {checkout}" if checkout else ""
+    return Check(name=name, ok=True, detail=f"loaded · {when}{suffix}")
 
 
 # Human-facing labels for each drift kind, in the order the drift table sorts
 # them: the ones that can lose work if ignored come first.
 _DRIFT_LABELS: dict[drift.DriftKind, str] = {
+    "unreadable-record": "unreadable task record",
     "orphan-worktree": "untracked worktree",
     "missing-worktree": "worktree gone",
     "missing-branch": "branch gone",

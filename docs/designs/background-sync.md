@@ -349,6 +349,29 @@ intervals ago (the plist's mtime standing in for "installed at" when no pass has
 run yet, since `RunAtLoad` is off). A job that quietly stopped firing is
 otherwise indistinguishable from one with nothing to report.
 
+### Staleness is time-based, and both surfaces share one definition
+
+`launchd.staleness` is that check, and `gw sync status`'s `last run` row calls
+the same function — one threshold, one message, no way for the two to disagree
+about when to worry. `gw sync status` is what the install line tells you to
+check, so it had to stop reporting a dead job as healthy.
+
+It has to be *time*-based rather than status-based. A pass that dies before it
+can journal — an import-time failure — writes nothing at all, so `last_pass`
+stays frozen at the last good run with `status: ok` forever while launchd goes
+on firing. Age against the schedule is the only signal that survives that.
+
+That failure mode is not hypothetical: sync runs whatever `gw` resolves to, and
+when that gw is an **editable install** it runs whatever is in the checkout at
+the moment the timer fires. A half-applied edit, a rebase in progress, or a venv
+whose interpreter drifted below what the source's syntax needs (this repo uses
+PEP 758 `except A, B:`, which is a `SyntaxError` before 3.14) takes background
+sync down for every registered project at once. `launchd.editable_checkout`
+reads the install's PEP 610 `direct_url.json` to detect that setup, and
+`gw sync install`, `gw sync status`, and `gw doctor` all name it. It stays a
+warning, not a refusal — developing gw on the machine that runs it is a normal
+and supported thing to do.
+
 The plist bakes in the installing shell's `PATH`. launchd hands a job only
 `/usr/bin:/bin:/usr/sbin:/sbin`, so without it a scheduled pass loses `gh` (PR
 state, CI checks) and `op` (1Password secrets) while still reporting `ok`.

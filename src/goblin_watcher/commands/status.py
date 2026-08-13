@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 
 import typer
@@ -279,6 +281,31 @@ def _in_flight(
     return False
 
 
+@dataclass
+class Render:
+    """One pass over the registry: the tree, the cost rollup, and what went wrong."""
+
+    tree: Tree
+    total: usage.Rollup
+    shown: int
+    unreadable: list[state.UnreadableTask] = dataclass_field(default_factory=list)
+
+
+def _refresh_sessions(proj: Project, task: Task, *, live: bool) -> Task:
+    """Lazy-refresh the task's session summaries (and the token counts read off
+    the same transcript pass).
+
+    In watch mode only write when the refresh moved something; otherwise every
+    tick would take the task lock and rewrite identical JSON.
+    """
+    if not task.sessions:
+        return task
+    candidate = sessions.refresh_task_summaries(task)
+    if not live or candidate.sessions != task.sessions:
+        return sessions.persist_refresh(proj, candidate)
+    return candidate
+
+
 def _build_tree(
     names: list[str],
     *,
@@ -290,8 +317,8 @@ def _build_tree(
     active_only: bool,
     live: bool,
     diffstat: bool = False,
-) -> tuple[Tree, usage.Rollup, int]:
-    """Render the project → task → session tree. Returns (tree, cost total, tasks shown).
+) -> Render:
+    """Render the project → task → session tree.
 
     `live` is the watch-mode budget: no network (Linear and GitHub issue state
     are read from their caches), no LLM description spawns, no session
@@ -303,6 +330,7 @@ def _build_tree(
     root = Tree("gw")
     grand_total = usage.EMPTY
     shown = 0
+    unreadable: list[state.UnreadableTask] = []
     grace = float(cfg.defaults.activity_grace_seconds)
 
     for name in names:
@@ -317,7 +345,12 @@ def _build_tree(
         project_total = usage.EMPTY
         project_shown = 0
 
-        tasks = state.list_tasks(proj)
+        # `scan_tasks`, not `list_tasks`: a record this build can't parse has to
+        # reach the banner below. Dropping it silently is what made a stale
+        # watch process render an empty tree with no explanation (gh-51).
+        scan = state.scan_tasks(proj)
+        unreadable.extend(scan.unreadable)
+        tasks = scan.tasks
         if not tasks:
             if not active_only:
                 proj_node.add("[muted](no tasks)[/]")
@@ -340,6 +373,15 @@ def _build_tree(
                 if not plan.is_empty:
                     task = sessions.persist_refresh(proj, task, plan)
             headless_live = _headless_live(task)
+            # `--active` classifies from the transcript, so a session whose
+            # `transcript_path` was never recorded reads as `unknown` and gets
+            # filtered out. The summary refresh below is what records it — which
+            # the filter would short-circuit, leaving a freshly spawned agent
+            # invisible to `gw status --active` for as long as it runs (gh-51).
+            # Refresh first for that case only, so the common path still skips
+            # the work.
+            if active_only and any(s.transcript_path is None for s in task.sessions):
+                task = _refresh_sessions(proj, task, live=live)
             # Filter before the network refresh, not after: skipping a quiet
             # task's Linear round-trip is most of what makes `--active` fast.
             if active_only and not _in_flight(
@@ -349,21 +391,13 @@ def _build_tree(
             if not no_linear and linear is not None:
                 task = linear.refresh(proj, task)
                 task = github_state.refresh(proj, task)
-            # Lazy refresh stale summaries (and the token counts read off
-            # the same transcript pass) before anything is rendered — the
-            # task's cost line is a sum over its refreshed sessions.
-            refreshed = task
-            if task.sessions:
-                candidate = sessions.refresh_task_summaries(task)
-                # In watch mode only write when the refresh moved something;
-                # otherwise every tick would take the task lock and rewrite
-                # identical JSON.
-                if not live or candidate.sessions != task.sessions:
-                    refreshed = sessions.persist_refresh(proj, candidate)
-                else:
-                    refreshed = candidate
-                if not live:
-                    sessions.schedule_descriptions(proj, refreshed)
+            # Lazy refresh stale summaries before anything is rendered — the
+            # task's cost line is a sum over its refreshed sessions. A no-op
+            # when the heal above already ran: `refresh_if_stale` has just
+            # stamped `summary_updated_at`.
+            refreshed = _refresh_sessions(proj, task, live=live)
+            if refreshed.sessions and not live:
+                sessions.schedule_descriptions(proj, refreshed)
             task_total = usage.for_task(refreshed, cfg) if cost else usage.EMPTY
             project_total = project_total + task_total
             sync_suffix = _sync_indicators(proj, refreshed, use_cache=not no_cache)
@@ -413,7 +447,7 @@ def _build_tree(
         root.children.append(proj_node)
         shown += project_shown
 
-    return root, grand_total, shown
+    return Render(tree=root, total=grand_total, shown=shown, unreadable=unreadable)
 
 
 def status(
@@ -504,7 +538,7 @@ def status(
 
     linear = LinearStateFetcher()
     try:
-        root, grand_total, shown = _build_tree(
+        render = _build_tree(
             names,
             cfg=cfg,
             linear=linear,
@@ -517,19 +551,63 @@ def status(
         )
     finally:
         linear.close()
-    if active and shown == 0:
-        console.print(_nothing_in_flight(cfg))
+    for line in _unreadable_lines(render.unreadable):
+        console.print(line)
+    if active and render.shown == 0:
+        console.print(_nothing_in_flight(cfg, render.unreadable))
         return
-    console.print(root)
+    console.print(render.tree)
     if cost:
-        _print_cost_total(grand_total)
+        _print_cost_total(render.total)
 
 
 # Below this a tick costs more in stat() calls than it returns in freshness.
 _MIN_WATCH_INTERVAL = 0.5
 
 
-def _nothing_in_flight(cfg: config.Config) -> str:
+def _unreadable_lines(unreadable: list[state.UnreadableTask]) -> list[str]:
+    """Banner for task records this process could not parse. [] when all loaded.
+
+    Split by cause, because the remedies have nothing to do with each other. A
+    record carrying fields this build has never heard of was written by a *newer*
+    gw: the records are fine and the *reader* is stale, which is what happens to
+    a `--watch` left running across an upgrade (gw installs editable, so the
+    files move under a resident process while its imported models do not). The
+    fix is to restart the command. Anything else is a genuinely broken file and
+    belongs to `gw doctor`.
+    """
+    if not unreadable:
+        return []
+    lines: list[str] = []
+    skewed = [u for u in unreadable if u.newer_schema]
+    if skewed:
+        fields = sorted({f for u in skewed for f in u.unknown_fields})
+        lines.append(
+            f"[error]{len(skewed)} task record(s) were written by a newer gw than this "
+            f"process is running[/] [muted](unknown field(s): {', '.join(fields)})[/]"
+        )
+        lines.append(
+            "[hint]They are hidden from this view. Restart this command to pick up the "
+            "current build — a long-running `--watch` keeps the models it imported at "
+            "startup.[/]"
+        )
+    broken = [u for u in unreadable if not u.newer_schema]
+    if broken:
+        shown = ", ".join(u.task_id for u in broken[:3]) + (" …" if len(broken) > 3 else "")
+        lines.append(
+            f"[error]{len(broken)} task record(s) could not be read[/] [muted]({shown})[/]"
+        )
+        lines.append(f"[hint]Run `gw doctor` for the details. First error: {broken[0].error}[/]")
+    return lines
+
+
+def _nothing_in_flight(cfg: config.Config, unreadable: list[state.UnreadableTask]) -> str:
+    """Why `--active` is empty. Never claims idleness it didn't actually observe."""
+    if unreadable:
+        return (
+            "[muted]Nothing in flight among the task records this build could read — "
+            "see above. Drop `--active` for the full tree.[/]"
+        )
     minutes = max(1, int(cfg.defaults.activity_grace_seconds // 60))
     return (
         f"[muted]Nothing in flight — no session is mid tool call, none has written a "
@@ -539,26 +617,30 @@ def _nothing_in_flight(cfg: config.Config) -> str:
 
 
 def _watch_frame(
-    root: Tree,
-    total: usage.Rollup,
-    shown: int,
+    render: Render,
     *,
     cfg: config.Config,
     cost: bool,
     active_only: bool,
 ) -> RenderableType:
-    """One frame of the live dashboard: the tree, plus a footer that proves it's ticking."""
-    parts: list[RenderableType] = []
-    if active_only and shown == 0:
-        parts.append(_nothing_in_flight(cfg))
+    """One frame of the live dashboard: the tree, plus a footer that proves it's ticking.
+
+    The unreadable-record banner goes at the *top*. A tall tree overflows the
+    terminal and Rich crops the bottom, so a warning in the footer is a warning
+    nobody sees — and the case it warns about is precisely the one where the
+    tree has collapsed to nothing.
+    """
+    parts: list[RenderableType] = list(_unreadable_lines(render.unreadable))
+    if active_only and render.shown == 0:
+        parts.append(_nothing_in_flight(cfg, render.unreadable))
     else:
-        parts.append(root)
+        parts.append(render.tree)
         if cost:
-            parts.extend(_cost_total_lines(total))
+            parts.extend(_cost_total_lines(render.total))
     scope = "in flight" if active_only else "tracked"
     stamp = datetime.now().strftime("%H:%M:%S")
     parts.append(
-        f"[muted]watching · {shown} task(s) {scope} · {stamp} · Ctrl-C to stop[/]",
+        f"[muted]watching · {render.shown} task(s) {scope} · {stamp} · Ctrl-C to stop[/]",
     )
     return Group(*parts)
 
@@ -585,7 +667,7 @@ def _watch(
     """
 
     def frame() -> RenderableType:
-        root, total, shown = _build_tree(
+        render = _build_tree(
             names,
             cfg=cfg,
             linear=None,
@@ -596,7 +678,7 @@ def _watch(
             live=True,
             diffstat=diffstat,
         )
-        return _watch_frame(root, total, shown, cfg=cfg, cost=cost, active_only=active_only)
+        return _watch_frame(render, cfg=cfg, cost=cost, active_only=active_only)
 
     try:
         with Live(frame(), console=console, refresh_per_second=4, transient=False) as live:
