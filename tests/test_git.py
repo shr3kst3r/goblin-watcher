@@ -388,3 +388,74 @@ def test_pull_base_from_remote_updates_non_checked_out_branch(tmp_path: Path) ->
     ).stdout.strip()
     assert final_sha == upstream_head
     assert final_sha != starting_sha
+
+
+def test_is_branch_merged_false_while_branch_sits_on_its_base(tmp_path: Path) -> None:
+    """The pre-existing guard: nothing has moved, so nothing was merged."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "feat/x"], check=True)
+    assert not git.is_branch_merged(repo, "feat/x", "main")
+
+
+def test_is_branch_merged_misreads_a_zero_commit_branch_once_the_base_moves(
+    tmp_path: Path,
+) -> None:
+    """Documents the trap #46 fell into: the graph alone cannot tell the two apart.
+
+    A branch with no commits is an ancestor of its base and holds nothing
+    unique — the shape of a merged branch. The `branch_sha != target_sha` guard
+    only hides that while the base stands still.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "feat/x"], check=True)
+    _commit_file(repo, "other.txt", "someone else landed\n", "other work")
+
+    assert git.is_branch_merged(repo, "feat/x", "main")
+
+
+def test_is_branch_merged_false_when_the_branch_is_still_on_its_fork_point(
+    tmp_path: Path,
+) -> None:
+    """The fix: a recorded fork point outranks the graph."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    fork = git.head_sha(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "feat/x"], check=True)
+    _commit_file(repo, "other.txt", "someone else landed\n", "other work")
+
+    assert not git.is_branch_merged(repo, "feat/x", "main", fork_sha=fork)
+
+
+def test_is_branch_merged_true_for_a_merge_committed_branch_with_a_fork_sha(
+    tmp_path: Path,
+) -> None:
+    """A fork point must not suppress a real detection — only a stationary branch."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    fork = git.head_sha(repo)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feat/x"], check=True)
+    _commit_file(repo, "x.txt", "work\n", "the work")
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "merge", "-q", "--no-ff", "-m", "merge", "feat/x"], check=True
+    )
+
+    assert git.is_branch_merged(repo, "feat/x", "main", fork_sha=fork)
+
+
+def test_is_branch_merged_false_for_a_diverged_branch_with_a_fork_sha(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    fork = git.head_sha(repo)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feat/x"], check=True)
+    _commit_file(repo, "x.txt", "work\n", "the work")
+
+    assert not git.is_branch_merged(repo, "feat/x", "main", fork_sha=fork)
+
+
+def test_is_branch_merged_false_for_an_unknown_branch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    assert not git.is_branch_merged(repo, "feat/nope", "main", fork_sha="deadbeef")

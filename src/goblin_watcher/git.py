@@ -447,7 +447,14 @@ def diffstat(repo: Path, base: str, head: str) -> str:
         return ""
 
 
-def is_branch_merged(repo: Path, branch: str, base: str, remote: str = "origin") -> bool:
+def is_branch_merged(
+    repo: Path,
+    branch: str,
+    base: str,
+    remote: str = "origin",
+    *,
+    fork_sha: str | None = None,
+) -> bool:
     """True if `branch` is an ancestor of `<remote>/<base>` (or local `<base>` as fallback)
     AND has diverged from it at some point.
 
@@ -455,10 +462,23 @@ def is_branch_merged(repo: Path, branch: str, base: str, remote: str = "origin")
     never diverged, so we don't flag it. Misses squash- and rebase-merged branches;
     callers should pair this with a PR-state check for full coverage. Run `fetch()`
     first for fresh results.
+
+    Pass `fork_sha` — the base commit the branch was cut from — when the caller
+    knows it. The `branch_sha != target_sha` guard below only recognizes a
+    never-diverged branch while the base is standing still: once anyone lands a
+    commit, the base tip moves away from the fork point and a branch with zero
+    commits of its own becomes shaped exactly like a merged one (#46). A
+    recorded fork point is the only thing that tells those two apart, so when
+    the branch tip is still on it, the answer is False regardless of the graph.
     """
     try:
         branch_sha = _run(["-C", str(repo), "rev-parse", branch]).strip()
     except GitCommandError:
+        return False
+
+    # Never moved off its fork point: no commits were ever made on this branch,
+    # so there is nothing that could have been merged.
+    if fork_sha is not None and branch_sha == fork_sha:
         return False
 
     for target in (f"{remote}/{base}", base):

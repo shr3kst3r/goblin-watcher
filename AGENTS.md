@@ -103,6 +103,7 @@ There is no CI in this repo — no GitHub Actions workflow, no external checks o
 - Never `git push --force` on `main` / default branches. For feature branches, only `--force-with-lease` — and only at user request.
 - Never delete a worktree with uncommitted changes unless `--force` is passed (`gw task rm` and `gw task archive` both enforce this).
 - Never write outside: `<project>/.goblin/`, `<project>/.worktrees/`, the user's XDG dirs, or the project's working tree itself.
+- **Never call a branch merged from the commit graph alone.** A branch with no commits yet is an ancestor of its base and has nothing unique on it — indistinguishable from a merged one — so ancestry-based prune deleted brand-new tasks the moment anyone else landed on the base branch (#46). `merge_detection` takes the ancestry path only when `Task.fork_sha` is recorded *and* the branch tip has moved off it; a missing `fork_sha` means "unknown", never "no commits yet". Prefer PR state, which is the only detection that works on a squash-merge repo at all.
 - **Linear API is read-only by default.** Posting a comment requires the explicit `--notify-linear` flag on `gw pr open`.
 - 1Password `op` references resolve lazily; only fetched when actually needed.
 
