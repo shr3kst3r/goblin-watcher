@@ -9,9 +9,11 @@ from pathlib import Path
 
 from goblin_watcher import state
 from goblin_watcher.completion_enumerators import (
+    complete_modes,
     complete_projects,
     complete_sessions,
     complete_tasks,
+    enumerate_modes,
     enumerate_projects,
     enumerate_sessions,
     enumerate_tasks,
@@ -149,3 +151,28 @@ def test_complete_sessions_prefix_filter(isolated_xdg: Path, tmp_path: Path) -> 
         ),
     )
     assert complete_sessions("ab") == ["abc-1"]
+
+
+def test_enumerate_modes_includes_user_defined_ones(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher import config
+    from goblin_watcher.modes import ModeSpec
+
+    assert enumerate_modes() == ["adversarial-review", "research"]
+
+    cfg = config.load()
+    cfg.modes["spike"] = ModeSpec(template="spike_prompt.md")
+    config.save(cfg)
+    assert enumerate_modes() == ["adversarial-review", "research", "spike"]
+    assert complete_modes("s") == ["spike"]
+
+
+def test_enumerate_modes_falls_back_to_builtins_on_a_broken_config(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """Completion runs on every tab press and must never error, so an
+    unparseable config degrades to the built-in names."""
+    from goblin_watcher import paths
+
+    paths.config_dir().mkdir(parents=True, exist_ok=True)
+    paths.config_file().write_text("this is not = valid toml [[[")
+    assert enumerate_modes() == ["adversarial-review", "research"]

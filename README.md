@@ -175,6 +175,7 @@ gw new --linear ENG-123 --from feat/other-pr       # stack on a teammate's PR br
 gw new --issue 42                                  # GitHub issue #42 in this repo
 gw new --issue org/tracker#3 --project my-repo     # tracking issue in another repo
 gw new --issue 42 --research                       # investigate and report back, don't implement
+gw new --issue 42 --mode research                  # same thing, via the mode registry
 ```
 
 #### `--from` — stacked branches
@@ -192,6 +193,33 @@ gw new --pr 412                                       # a PR whose base is a tra
 ```
 
 Nothing rebases automatically. The default branch never counts as a parent, and an untracked base branch (a teammate's, say) records no link — there's no task to point at.
+
+#### `--mode` — named work modes
+
+A **work mode** changes the agent's standing brief without changing the task. gw ships two, and you can add your own:
+
+```bash
+gw new --linear ENG-123 --mode research
+gw new --branch-name spike/foo --mode adversarial-review
+```
+
+| Mode | What it seeds |
+| --- | --- |
+| `research` | The read-only research brief below. Needs `--linear` or `--issue`. |
+| `adversarial-review` | `/codex:adversarial-review --wait` as the entire first message. Forces `--agent claude`. |
+
+`--research` and `--adversarial-review` still work as aliases for the matching `--mode` value. `--mode` takes a single value, so asking for two different modes is the one conflict there is.
+
+Add your own in `config.toml` (`gw config edit`) — a mode is a prompt, so no code needed:
+
+```toml
+[modes.spike]
+template = "spike_prompt.md"   # relative paths resolve next to config.toml; ~ works too
+```
+
+Your template gets the same slots as gw's own briefs: `{ticket_id}`, `{title}`, `{repos_block}`, `{description}`, `{addition_block}`, and `{focus}` (where `--prompt` lands). Anything else is refused with a list of what's available. A mode may also set `agent` (pins the agent), `requires_ticket = true` (refuse sources with no ticket), `focus_lead` (the sentence introducing `{focus}`), and `summary`. Use `seed = "..."` instead of `template` for a literal first message — that's how `adversarial-review` works, and such a mode refuses `--prompt` since there's nowhere to put it. Naming a mode after a built-in replaces it whole. See [ADR 0009](docs/adrs/0009-work-modes-are-a-named-registry.md).
+
+`gw run` still takes `--research` / `--adversarial-review` / `--address-review` as flags; `--mode` is `gw new` for now.
 
 #### `--research` — spawn an investigation instead of an implementation
 
@@ -677,7 +705,8 @@ gw <LINEAR-ID> [...any `gw new` flag]       # sugar for `gw new --linear <ID>`
 gw gh-<N>      [...any `gw new` flag]       # sugar for `gw new --issue <N>`
 gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--title ...] [--from ...] [--project NAME] [--with-project NAME]
-       [--repo URL] [--agent ...] [--prompt ...] [--research] [--adversarial-review]
+       [--repo URL] [--agent ...] [--prompt ...]
+       [--mode NAME] [--research] [--adversarial-review]
        [--rm|--rm-force] [--no-launch] [--no-setup]
        [--windowing inline|tmux|headless] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]

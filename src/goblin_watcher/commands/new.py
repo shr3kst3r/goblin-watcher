@@ -6,15 +6,16 @@ from pathlib import Path
 import click
 import typer
 
-from goblin_watcher import config, gh, git, paths, secrets, state, workspace, worktree_setup
+from goblin_watcher import config, gh, git, modes, paths, secrets, state, workspace, worktree_setup
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
 from goblin_watcher.commands.task import destroy_task, dirty_worktrees
-from goblin_watcher.completion_enumerators import complete_projects
+from goblin_watcher.completion_enumerators import complete_modes, complete_projects
 from goblin_watcher.console import agent_badge, console, print_settings, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.linear import LinearClient, parse_identifier
 from goblin_watcher.models import GhIssue, LinearIssue, Project, Task
+from goblin_watcher.modes import ModeSpec
 from goblin_watcher.slug import branch_slug, random_branch_name, slugify
 from goblin_watcher.task_resolver import resolve_project
 from goblin_watcher.windowing import WINDOWING_MODES, get_windower
@@ -197,6 +198,38 @@ def _handle_existing(
     )
 
 
+def _resolve_mode(
+    mode: str | None, research: bool, adversarial_review: bool, cfg: config.Config
+) -> tuple[str, ModeSpec | None]:
+    """Collapse `--mode` and the legacy boolean aliases into one mode, or none.
+
+    Returns the flag text to name in any error about the mode (the alias the
+    caller actually typed, so the hint points at their command line) alongside
+    the resolved spec. Two *different* modes is the single conflict check that
+    replaced one hand-written pair per combination (ADR 0009); naming the same
+    mode twice (`--mode research --research`) is harmless and allowed.
+    """
+    requested: list[tuple[str, str]] = []
+    if mode is not None:
+        requested.append((f"--mode {mode}", mode.strip().lower()))
+    for flag, name in modes.ALIAS_FLAGS.items():
+        if (flag == "--research" and research) or (
+            flag == "--adversarial-review" and adversarial_review
+        ):
+            requested.append((flag, name))
+    if not requested:
+        return "", None
+    distinct = {name for _, name in requested}
+    if len(distinct) > 1:
+        labels = [label for label, _ in requested]
+        raise GoblinError(
+            f"{' and '.join(labels)} are mutually exclusive.",
+            hint="--mode takes a single value; pass one mode.",
+        )
+    label, name = requested[0]
+    return label, modes.resolve(name, cfg.modes)
+
+
 def _source_label(
     linear: str | None,
     issue: str | None,
@@ -318,17 +351,24 @@ def new(
         help="Initial prompt to seed the fresh session with. The agent begins "
         "work on this immediately instead of waiting for the next message.",
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="Named work mode to seed the session with (see `[modes.*]` in config).",
+        autocompletion=complete_modes,
+    ),
     adversarial_review: bool = typer.Option(
         False,
         "--adversarial-review",
-        help="Seed the session with `/codex:adversarial-review`. Forces --agent claude.",
+        help="Alias for `--mode adversarial-review`. Seeds the session with "
+        "`/codex:adversarial-review`; forces --agent claude.",
     ),
     research: bool = typer.Option(
         False,
         "--research",
-        help="Seed a read-only research session on the ticket: investigate and "
-        "report findings in the session, don't implement, don't touch "
-        "GitHub/Linear/Slack. Requires --linear or --issue.",
+        help="Alias for `--mode research`. Seeds a read-only research session on "
+        "the ticket: investigate and report findings in the session, don't "
+        "implement, don't touch GitHub/Linear/Slack. Requires --linear or --issue.",
     ),
 ) -> None:
     """Create a task from a source (Linear, GitHub issue or PR, branch, new branch, or dir)."""
@@ -337,38 +377,32 @@ def new(
             "--prompt has no effect with --no-launch (no session is started).",
             hint="Drop --no-launch, or drop --prompt.",
         )
-    # Hoisted above both mode blocks: when the caller asked for two modes at
-    # once, that conflict is the operative error. Reporting --adversarial-review's
-    # own checks first (--prompt, --agent) would send the user off changing a
-    # flag that --research accepts perfectly well.
-    if research and adversarial_review:
-        raise GoblinError(
-            "--research and --adversarial-review are mutually exclusive.",
-            hint="Pass one or the other.",
-        )
-    if adversarial_review:
+    cfg = config.load()
+    # `--mode` is a single value, which is the whole point of the registry
+    # (ADR 0009): one conflict check, whatever modes exist. It is hoisted above
+    # the mode's own checks because when the caller asked for two modes at once
+    # that conflict is the operative error — reporting a seed mode's --prompt or
+    # --agent constraint first would send the user off changing a flag the other
+    # mode accepts perfectly well.
+    mode_label, mode_spec = _resolve_mode(mode, research, adversarial_review, cfg)
+    if mode_spec is not None:
         if no_launch:
             raise GoblinError(
-                "--adversarial-review has no effect with --no-launch (no session is started).",
-                hint="Drop --no-launch, or drop --adversarial-review.",
+                f"{mode_label} has no effect with --no-launch (no session is started).",
+                hint=f"Drop --no-launch, or drop {mode_label}.",
             )
-        if prompt is not None:
+        if prompt is not None and not mode_spec.allows_prompt:
             raise GoblinError(
-                "--adversarial-review and --prompt are mutually exclusive.",
+                f"{mode_label} and --prompt are mutually exclusive.",
                 hint="Pass one or the other.",
             )
-        if agent is not None and agent != "claude":
-            raise GoblinError(
-                "--adversarial-review requires --agent claude "
-                "(the skill is a Claude Code slash command).",
-                hint=f"Drop --agent {agent}, or drop --adversarial-review.",
-            )
-        agent = "claude"
-    if research and no_launch:
-        raise GoblinError(
-            "--research has no effect with --no-launch (no session is started).",
-            hint="Drop --no-launch, or drop --research.",
-        )
+        if mode_spec.agent is not None:
+            if agent is not None and agent != mode_spec.agent:
+                raise GoblinError(
+                    f"{mode_label} requires --agent {mode_spec.agent}.",
+                    hint=f"Drop --agent {agent}, or drop {mode_label}.",
+                )
+            agent = mode_spec.agent
     sources: list[object] = [
         s for s in (linear, issue, branch, branch_name, dir, pr) if s is not None
     ]
@@ -381,11 +415,11 @@ def new(
             hint="e.g. `gw new --branch-auto` or `gw new --issue 42`.",
         )
 
-    # A research brief about nothing is a silent no-op, so refuse the sources
-    # that attach no tracking item (ADR 0006).
-    if research and linear is None and issue is None:
+    # A brief about nothing is a silent no-op, so a mode that declares it needs
+    # a tracking item refuses the sources that attach none (ADR 0006).
+    if mode_spec is not None and mode_spec.requires_ticket and linear is None and issue is None:
         raise GoblinError(
-            "--research requires a tracking item to research.",
+            f"{mode_label} requires a tracking item.",
             hint="Pass --linear <ID> or --issue <ref>.",
         )
 
@@ -436,7 +470,6 @@ def new(
         r for r in task.all_repos() if r.project != task.project or created.materialized
     ]
 
-    cfg = config.load()
     agent_name = agent or (cfg.defaults.agent) or "claude"
     windowing_mode = windowing or cfg.defaults.windowing
     unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
@@ -470,7 +503,7 @@ def new(
         ("windowing", windowing_mode),
         ("unsafe", str(unsafe_mode).lower()),
         ("no_launch", str(no_launch).lower()),
-        ("research", str(research).lower()),
+        ("mode", mode_spec.name if mode_spec is not None else "(default)"),
     ]
     print_settings(settings)
 
@@ -489,14 +522,13 @@ def new(
     agent_obj = get_agent(agent_name)
     windower = get_windower(windowing_mode)
 
-    # `/codex:adversarial-review` must be the entire user message — Claude
-    # Code's slash-command parser ignores it if buried in the seed template.
-    # `--wait` runs the review in the foreground (skips the skill's wait-vs-
-    # background prompt).
+    # A seed mode's message is used verbatim: `/codex:adversarial-review` only
+    # fires if it is the entire user message, so it can't go through the seed
+    # template at all. Template modes render like the default brief.
     seed_prompt = (
-        "/codex:adversarial-review --wait"
-        if adversarial_review
-        else build_seed_prompt(task, user_prompt=prompt, research=research)
+        mode_spec.seed
+        if mode_spec is not None and mode_spec.seed is not None
+        else build_seed_prompt(task, user_prompt=prompt, mode=mode_spec)
     )
     choice = Fresh(prompt=seed_prompt)
     console.print(f"Launching {agent_badge(agent_name)} (fresh) in [muted]{windowing_mode}[/]…")

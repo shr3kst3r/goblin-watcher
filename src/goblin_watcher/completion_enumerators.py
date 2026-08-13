@@ -20,6 +20,21 @@ def enumerate_projects() -> list[str]:
     return []
 
 
+def enumerate_modes() -> list[str]:
+    """Built-in work modes plus any the user defined under `[modes.*]`, sorted."""
+    with contextlib.suppress(Exception):
+        from goblin_watcher import config, modes
+
+        return modes.mode_names(config.load().modes)
+    return sorted(_builtin_mode_names())
+
+
+def _builtin_mode_names() -> list[str]:
+    from goblin_watcher.modes import BUILTIN_MODES
+
+    return sorted(BUILTIN_MODES)
+
+
 def enumerate_tasks(project: str | None = None) -> list[str]:
     """Task ids, optionally limited to one project. Deduped + sorted."""
     names = [project] if project else enumerate_projects()
@@ -66,3 +81,7 @@ def complete_tasks(incomplete: str) -> list[str]:
 
 def complete_sessions(incomplete: str) -> list[str]:
     return [s for s in enumerate_sessions() if s.startswith(incomplete)]
+
+
+def complete_modes(incomplete: str) -> list[str]:
+    return [m for m in enumerate_modes() if m.startswith(incomplete)]

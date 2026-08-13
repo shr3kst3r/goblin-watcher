@@ -13,6 +13,7 @@ import tomli_w
 from pydantic import BaseModel, ConfigDict, Field
 
 from goblin_watcher import paths
+from goblin_watcher.modes import ModeSpec
 
 Windowing = str  # "inline" | "tmux" | "headless" — validated where used, not here.
 
@@ -183,6 +184,14 @@ class Config(BaseModel):
     sync: SyncConfig = Field(default_factory=SyncConfig)
     setup: SetupConfig = Field(default_factory=SetupConfig)
     cost: CostConfig = Field(default_factory=CostConfig)
+    # User-defined work modes for `gw new --mode <name>`, merged *over* the
+    # built-ins in `modes.BUILTIN_MODES` (an entry with a built-in's name
+    # replaces it whole). Dict-valued, so `gw config set` can't reach it — use
+    # `gw config edit`:
+    #
+    #     [modes.spike]
+    #     template = "~/.config/goblin-watcher/spike_prompt.md"
+    modes: dict[str, ModeSpec] = Field(default_factory=dict)
 
 
 def load() -> Config:

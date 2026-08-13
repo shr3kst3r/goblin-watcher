@@ -10,11 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from goblin_watcher import gh, prompt_addition, sessions, state
+from goblin_watcher import gh, modes, prompt_addition, sessions, state
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, TaskNotFoundError
 from goblin_watcher.models import AgentName, GhIssue, Project, SessionRecord, Task
+from goblin_watcher.modes import ModeSpec
 from goblin_watcher.review_feed import RepoReview, ReviewFeed, clip_body, clip_hunk
 from goblin_watcher.windowing.base import Windower
 
@@ -219,25 +220,29 @@ def build_seed_prompt(
     *,
     research: bool = False,
     review: ReviewFeed | None = None,
+    mode: ModeSpec | None = None,
 ) -> str:
     """Construct the prompt seeded into a fresh agent session.
 
-    Three work modes, all rendered from a template carrying the same task-context
-    slots (ADR 0006):
+    Every brief is rendered from a template carrying the same task-context slots
+    (ADR 0006):
 
     - Default: `spawn_prompt.md`. When `user_prompt` is provided, the trailing
       "wait for my next message" line is replaced with the user's prompt and the
       intro is rephrased so the agent treats it as the task to begin working on.
-    - `research=True`: `research_prompt.md`. The standing instruction to open a
-      PR is replaced with a read-only boundary and a request to report findings
-      in the session. `user_prompt` narrows the investigation's focus instead of
-      becoming the trailer.
+    - `mode=<spec>`: the named work mode's own template (ADR 0009), rendered
+      with the same slots plus a `{focus}` paragraph that `user_prompt` narrows
+      the session with instead of becoming the trailer. A *seed* mode never
+      reaches here — its literal message bypasses the seed prompt entirely.
+    - `research=True`: shorthand for the built-in `research` mode, kept for
+      callers that predate `--mode`.
     - `review=<feed>`: `address_review_prompt.md`. The PR's unresolved review
       threads and failing-check output are embedded in the brief (ADR 0008), and
-      `user_prompt` narrows the focus as it does for research.
+      `user_prompt` narrows the focus as it does for a mode.
 
-    `research` and `review` are mutually exclusive; the command layer rejects the
-    combination before it reaches here, and `review` wins if one ever slips past.
+    `review` and the mode arguments are mutually exclusive; the command layer
+    rejects the combination before it reaches here, and `review` wins if one
+    ever slips past.
     """
     templates_dir = Path(__file__).parent.parent / "templates"
     addition = prompt_addition.resolve_for_task_project(task.project).strip()
@@ -257,27 +262,15 @@ def build_seed_prompt(
                 focus=_format_focus("Focus on the following in particular", prompt),
             )
         )
-    if research:
-        # Returns before the intro/trailer machinery below: the mode fixes both,
-        # and `user_prompt` becomes a focus paragraph instead. There is no
-        # scratch variant either — the command layer is the guard, rejecting
-        # --research for any task with no tracking item (scratch tasks included).
-        return (
-            (templates_dir / "research_prompt.md")
-            .read_text()
-            .format(
-                ticket_id=task.ticket_id,
-                title=task.ticket_title or task.id,
-                repos_block=_format_repos_block(task),
-                description=_format_ticket_context(task),
-                addition_block=addition_block,
-                focus=_format_focus(
-                    "Focus this research on the following, and say so if it turns out to "
-                    "be the wrong thing to look at",
-                    prompt,
-                ),
-            )
-        )
+    if mode is None and research:
+        mode = modes.BUILTIN_MODES["research"]
+    if mode is not None and mode.template is not None:
+        # Returns before the intro/trailer machinery below: the mode's template
+        # fixes both, and `user_prompt` becomes a focus paragraph instead. There
+        # is no scratch variant either — the command layer is the guard,
+        # rejecting a `requires_ticket` mode for any task with no tracking item
+        # (scratch tasks included).
+        return render_mode_prompt(mode, task, user_prompt=prompt, addition_block=addition_block)
     intro = _PROMPTED_INTRO if prompt else _DEFAULT_INTRO
     trailer = prompt if prompt else _DEFAULT_TRAILER
     if task.kind == "scratch":
@@ -304,6 +297,34 @@ def build_seed_prompt(
         addition_block=addition_block,
         trailer=trailer,
     )
+
+
+def render_mode_prompt(
+    mode: ModeSpec, task: Task, *, user_prompt: str = "", addition_block: str = ""
+) -> str:
+    """Render a template mode's brief with the shared task-context slots.
+
+    A user-authored template is as likely to be wrong as any other config, so an
+    unknown `{slot}` becomes a `GoblinError` naming what it may reference rather
+    than a `KeyError` traceback out of `str.format`.
+    """
+    path = modes.template_path(mode)
+    slots = {
+        "ticket_id": task.ticket_id,
+        "title": task.ticket_title or task.id,
+        "repos_block": _format_repos_block(task),
+        "description": _format_ticket_context(task),
+        "addition_block": addition_block,
+        "focus": _format_focus(mode.focus_lead, user_prompt.strip()),
+    }
+    try:
+        return path.read_text().format(**slots)
+    except (KeyError, IndexError) as exc:
+        raise GoblinError(
+            f"Mode {mode.name!r} template {path} references a slot gw doesn't fill: {exc}",
+            hint=f"Templates may use {{{'}}, {{'.join(modes.TEMPLATE_SLOTS)}}}. "
+            "Double any literal brace you meant to keep ({{ and }}).",
+        ) from exc
 
 
 def _fenced(text: str, lang: str = "") -> str:

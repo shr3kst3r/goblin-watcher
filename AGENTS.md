@@ -45,6 +45,7 @@ src/goblin_watcher/
 ├── gh.py                  # Thin wrapper around the `gh` CLI for PR + issue ops
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
+├── modes.py               # `gw new --mode` registry: built-in + user-defined work modes (ADR 0009)
 ├── review_feed.py         # PR review threads + failing-check logs for `gw run --address-review`
 ├── usage.py               # token rollups + list-price cost estimates (docs/designs/token-usage-and-cost.md)
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
@@ -118,6 +119,20 @@ Two invariants when touching this:
 `gw task archive <task-id>` drops a task's worktree and keeps everything else — record, branch, session history — because the checkout is the expensive part when many tasks run in parallel. `Task.archived` / `Task.archived_at` carry the flag; it is orthogonal to `Task.status`, which goes on tracking the PR.
 
 `gw run` on an archived task calls `commands/task.rematerialize_task` first: `git worktree prune`, `git worktree add <path> <branch>` per repo, then the project's setup steps. Two consumers read the flag — `gw status` dims the row, and `gw sync` skips the per-repo git facts (PR state still refreshes, since the branch outlives the worktree). Scratch tasks are refused: the directory is the only copy of the work. See `docs/designs/storage-and-state.md`.
+
+## Adding a work mode
+
+A **work mode** changes the agent's standing brief without changing the task (ADR 0006). `gw new --mode <name>` selects one from the registry in `modes.py`; `--research` and `--adversarial-review` are aliases kept for compatibility. See ADR 0009 and `docs/designs/task-sources.md`.
+
+To add one:
+1. Add a `ModeSpec` entry to `modes.BUILTIN_MODES` — exactly one of `template` (rendered through `build_seed_prompt` with the shared slots) or `seed` (a literal first message, for slash commands that must be the whole user message). Optional: `agent`, `requires_ticket`, `focus_lead`, `summary`.
+2. Drop the template in `templates/` if it's a template mode. Slots: `{ticket_id}`, `{title}`, `{repos_block}`, `{description}`, `{addition_block}`, `{focus}`.
+3. Tests in `tests/test_modes.py` (the spec) and `tests/test_cli_new_sources.py` (the CLI).
+
+Two invariants when touching this:
+
+- **No consumer branches on a mode's name.** Every check reads a field. `allows_prompt` is *derived* from the shape (a seed mode has no `{focus}` slot), not configured, so user modes inherit the refusal. If a new mode needs behaviour no field expresses, add the field — don't special-case the name.
+- **A mode contributes prompt text and policy flags, never code.** `[modes.<name>]` in the user's `config.toml` is a supported extension point; letting it name a command to run would make it the plugin system this file forbids. A mode that needs a data-gathering step (like `--address-review`'s review feed) belongs in gw, not in the registry.
 
 ## Adding an agent
 
