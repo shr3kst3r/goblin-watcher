@@ -60,7 +60,7 @@ src/goblin_watcher/
 
 ## Conventions
 
-- **Type hints everywhere.** `ty` runs in CI.
+- **Type hints everywhere.**
 - **Pydantic** models at all serialization boundaries. JSON dumps via `model_dump(mode="json", exclude_none=True)`.
 - **Rich Console**, never `print`. User-facing errors go through `GoblinError`.
 - **Shell-out args are always `list[str]`.** Never f-string a command for `subprocess`.
@@ -94,7 +94,7 @@ Or, one shot: `just verify`.
 
 `just` is the canonical task runner. `Makefile` is not provided.
 
-The same command set runs in CI (`.github/workflows/verify.yml`).
+There is no CI in this repo — no GitHub Actions workflow, no external checks on a PR. `just verify` is the only gate, so run it locally and get it green before you push.
 
 ## Safety boundaries
 
@@ -152,7 +152,3 @@ Patch `subprocess.Popen` in tests (`tests/test_windowing_headless.py`) — never
 - Don't merge `state.py`, `sessions.py`, and `models.py` into one module. The separation tracks the persistence/business boundary.
 - Don't replace the questionary picker with custom prompt_toolkit code unless the UX requires it.
 - Don't introduce async at the CLI layer; `httpx.Client` (sync) is enough.
-
-## CI parity
-
-`.github/workflows/verify.yml` runs `uv sync --extra dev` then `uv run ruff check .`, `uv run ruff format --check .`, `uv run ty check src`, `uv run pytest -q`. The justfile's `verify` target matches.
