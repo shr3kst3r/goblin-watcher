@@ -699,6 +699,47 @@ def _fire_pr_transition(
         emit=emit,
         report=report,
     )
+    _fire_parent_merged(proj, task, notifier, cfg, emit, report)
+
+
+def _fire_parent_merged(
+    proj: Project,
+    parent: Task,
+    notifier: Notifier,
+    cfg: config.Config,
+    emit: Callable[..., None],
+    report: PassReport,
+) -> None:
+    """Tell every task stacked on `parent` that the branch under it has landed.
+
+    Rides the parent's own `pr-merged` edge, which gives once-per-transition for
+    free and — because step 5 runs before step 7 — reaches the children while the
+    parent record they point at still exists. The notification names the *child*:
+    it is the branch that now needs rebasing (gh-20).
+
+    Checking `notify_events` up front rather than leaving it to `_fire` keeps a
+    merge from costing a full task-directory scan when nobody asked for the
+    event.
+    """
+    if "parent-merged" not in cfg.sync.notify_events:
+        return
+    for child in state.list_tasks(proj):
+        if child.kind == "scratch" or child.parent_task != parent.id:
+            continue
+        _fire(
+            event="parent-merged",
+            title=f"{child.id}: base branch merged",
+            body=(
+                f"{parent.branch} (task {parent.id}) landed. Rebase {child.branch} "
+                f"onto {parent.base_branch} and retarget its PR."
+            ),
+            cfg=cfg,
+            notifier=notifier,
+            proj=proj,
+            task=child,
+            emit=emit,
+            report=report,
+        )
 
 
 def _fire_checks_transition(

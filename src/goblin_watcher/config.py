@@ -72,6 +72,7 @@ NotifyTransport = Literal["auto", "macos", "command", "off"]
 SyncEvent = Literal[
     "agent-idle",
     "pr-merged",
+    "parent-merged",
     "checks-failed",
     "checks-passed",
     "prunable",
@@ -80,6 +81,7 @@ SyncEvent = Literal[
 _DEFAULT_SYNC_EVENTS: tuple[SyncEvent, ...] = (
     "agent-idle",
     "pr-merged",
+    "parent-merged",
     "checks-failed",
     "checks-passed",
     "prunable",

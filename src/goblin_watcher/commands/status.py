@@ -123,6 +123,56 @@ def _ticket_suffix(task: Task) -> str:
     return ""
 
 
+def _stack_order(tasks: list[Task]) -> list[Task]:
+    """`tasks` reordered so every parent comes before its children.
+
+    Rendering nests a child under its parent's tree node, which only exists once
+    the parent has been visited. A task whose `parent_task` isn't in this
+    project — pruned, or hand-edited into a cycle — comes out as a root, so
+    nothing is ever dropped from the tree.
+    """
+    ids = {t.id for t in tasks}
+    pending = list(tasks)
+    ordered: list[Task] = []
+    placed: set[str] = set()
+    while pending:
+        deferred: list[Task] = []
+        for t in pending:
+            parent = t.parent_task
+            if parent is None or parent not in ids or parent in placed:
+                ordered.append(t)
+                placed.add(t.id)
+            else:
+                deferred.append(t)
+        if len(deferred) == len(pending):
+            # Nothing moved, so the remainder is a parent cycle. Emit it flat
+            # rather than looping forever.
+            ordered.extend(deferred)
+            break
+        pending = deferred
+    return ordered
+
+
+def _stack_suffix(task: Task, by_id: dict[str, Task]) -> str:
+    """Markup for this task's place in a stack. '' for an unstacked task.
+
+    A child sitting under a live parent needs no words — the indentation says
+    it. What it does need is a nudge once the parent lands, because the base
+    branch it was cut from is now history and the diff won't shrink until it's
+    rebased. A parent that's no longer tracked (pruned after merging) renders
+    flat, so it cites the id instead of silently losing the link.
+    """
+    parent_id = task.parent_task
+    if parent_id is None:
+        return ""
+    parent = by_id.get(parent_id)
+    if parent is None:
+        return f"  [muted](stacked on {parent_id}, no longer tracked)[/]"
+    if parent.status in {"merged", "closed"}:
+        return f"  [hint]⤴ restack: {parent_id} {parent.status}[/]"
+    return ""
+
+
 def _fmt_relative(ts: datetime) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=UTC)
@@ -217,7 +267,14 @@ def status(
                 proj_node.add("[muted](no tasks)[/]")
                 continue
 
-            for task in tasks:
+            # Stacked tasks nest under their parent so a four-deep chain reads
+            # as one chain instead of four unrelated tasks (gh-20). Statuses come
+            # from this snapshot: the refreshes below touch ticket state, not
+            # `Task.status`, so a parent's is the same before and after its turn.
+            by_id = {t.id: t for t in tasks}
+            nodes: dict[str, Tree] = {}
+
+            for task in _stack_order(tasks):
                 if not no_linear:
                     task = linear.refresh(proj, task)
                     task = github_state.refresh(proj, task)
@@ -242,11 +299,16 @@ def status(
                 task_label = (
                     f"[bold]{refreshed.id}[/]"
                     + _ticket_suffix(refreshed)
-                    + f"  [muted][{refreshed.status}][/]"
+                    # Parens, not brackets: Rich reads `[open]` as a markup tag
+                    # and swallows it, so bracketed statuses never rendered.
+                    + f"  [muted]({refreshed.status})[/]"
                     + sync_suffix
+                    + _stack_suffix(refreshed, by_id)
                     + (usage.badge(task_total) if cost else "")
                 )
-                task_node = proj_node.add(task_label)
+                # Task ids are non-empty slugs, so "" can never match one.
+                task_node = nodes.get(refreshed.parent_task or "", proj_node).add(task_label)
+                nodes[refreshed.id] = task_node
                 if not refreshed.sessions:
                     task_node.add("[muted](no sessions yet)[/]")
                     continue
