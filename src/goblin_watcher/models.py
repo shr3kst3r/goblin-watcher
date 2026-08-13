@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -62,6 +62,28 @@ class AgentRef(_Frozen):
     name: AgentName
 
 
+class UsageBucket(_Frozen):
+    """Token counts for one (model, local calendar day) pair of a session.
+
+    Derived from the agent's own transcript — gw never calls a model to get
+    these. Bucketing by day is what lets `gw history --cost` answer "what did
+    today cost" without re-walking every transcript; bucketing by model is what
+    makes the cost estimate priceable, since rates are per model.
+
+    Cache writes are split by TTL because they are billed differently (1.25x
+    input for the 5-minute cache, 2x for the 1-hour one). Agents that don't
+    distinguish them report everything as `cache_write_tokens`.
+    """
+
+    model: str | None = None
+    day: date | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_write_1h_tokens: int = 0
+
+
 class SessionRecord(_Frozen):
     agent: AgentName
     session_id: str
@@ -76,6 +98,10 @@ class SessionRecord(_Frozen):
     # background; falls back to `summary` when missing.
     description: str | None = None
     description_updated_at: datetime | None = None
+    # Token usage parsed out of the agent's transcript, refreshed on the same
+    # pass (and the same TTL) as `summary`. Empty for agents whose transcripts
+    # gw can't read.
+    usage: list[UsageBucket] = Field(default_factory=list)
 
 
 class TaskRepo(_Frozen):

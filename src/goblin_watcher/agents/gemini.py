@@ -25,6 +25,14 @@ class GeminiAgent:
         del cwd, session_id
         return [*self._prefix(unsafe), "-p", prompt]
 
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        # `gemini -p` *is* the non-interactive mode, and it's what the spawn
+        # path already uses — so headless and interactive coincide here. The
+        # difference is only in where the windower puts the process.
+        return self.spawn_command(prompt=prompt, cwd=cwd, unsafe=unsafe, session_id=session_id)
+
     def new_session_id(self) -> str | None:
         # Gemini has no stable session ids at all; the launcher synthesizes.
         return None

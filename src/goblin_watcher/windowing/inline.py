@@ -10,6 +10,10 @@ from goblin_watcher.models import Task
 
 class InlineWindower:
     name = "inline"
+    # Blocks on the agent process, so the launcher can reconcile ids and
+    # summaries afterwards, and the agent draws its own TUI on this terminal.
+    detaches = False
+    headless = False
 
     def run(
         self,

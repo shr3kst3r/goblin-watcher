@@ -48,6 +48,15 @@ class AntigravityAgent:
         del cwd, session_id
         return [*self._prefix(unsafe), "--prompt-interactive", prompt]
 
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        # `-p` / `--print` is the headless counterpart to the
+        # `--prompt-interactive` used for interactive spawns: it prints and
+        # exits instead of handing over a TUI.
+        del cwd, session_id
+        return [*self._prefix(unsafe), "-p", prompt]
+
     def new_session_id(self) -> str | None:
         # `agy` has no flag to preassign a conversation id; the backend mints
         # one. The launcher synthesizes a placeholder and we reconcile it via

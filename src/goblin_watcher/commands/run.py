@@ -22,7 +22,7 @@ from goblin_watcher.picker import (
     choose_session,
 )
 from goblin_watcher.task_resolver import resolve_task
-from goblin_watcher.windowing import get_windower
+from goblin_watcher.windowing import WINDOWING_MODES, get_windower
 
 
 def run(
@@ -45,8 +45,9 @@ def run(
     windowing: str | None = typer.Option(
         None,
         "--windowing",
-        help="Overrides config.",
-        click_type=click.Choice(["inline", "tmux"]),
+        help="Where the agent runs. Overrides config. 'headless' detaches an "
+        "unattended print-mode run and logs it to <project>/.goblin/logs/.",
+        click_type=click.Choice(list(WINDOWING_MODES)),
     ),
     unsafe: bool | None = typer.Option(
         None,

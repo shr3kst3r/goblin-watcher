@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from goblin_watcher.models import UsageBucket
+
 
 @dataclass
 class RawSession:
@@ -27,6 +29,9 @@ class TranscriptSummary:
     start of the session plus a handful of the most recent exchanges,
     chronological (oldest first). Agents that can't easily parse their
     transcripts leave these empty.
+
+    `usage` carries per-(model, day) token counts read off the same pass, so
+    cost accounting costs nothing beyond the walk the summary already does.
     """
 
     turn_count: int = 0
@@ -37,6 +42,7 @@ class TranscriptSummary:
     recent_user_snippets: list[str] = field(default_factory=list)
     recent_assistant_snippets: list[str] = field(default_factory=list)
     extras: dict[str, str] = field(default_factory=dict)
+    usage: list[UsageBucket] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -54,6 +60,21 @@ class Agent(Protocol):
         When `unsafe` is true, prepend the agent's bypass-permission flag.
         `session_id` (from `new_session_id`) preassigns the session's id;
         agents whose CLI can't accept one ignore it.
+        """
+        ...
+
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        """Argv to run `prompt` to completion non-interactively, then exit.
+
+        Every registered CLI has such a mode — `claude -p`, `codex exec`,
+        `agy -p`, `gemini -p`. It draws no TUI, reads no input, writes plain
+        text to stdout and exits when the work is done, which is what
+        `HeadlessWindower` needs to detach a run from any terminal.
+
+        Same `unsafe` / `session_id` contract as `spawn_command`. Agents with
+        no headless mode of their own raise `GoblinError`.
         """
         ...
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from goblin_watcher import paths
 
-Windowing = str  # "inline" | "tmux" — validated where used, not here.
+Windowing = str  # "inline" | "tmux" | "headless" — validated where used, not here.
 
 # Orientation of additional panes opened by `tmux split-window` for second+
 # sessions on the same task. "vertical" stacks panes top-over-bottom (tmux
@@ -142,12 +142,42 @@ class SetupConfig(BaseModel):
         return not (self.copy_paths or self.link_paths or self.run)
 
 
+class ModelPricing(BaseModel):
+    """List price in USD per million tokens for one model."""
+
+    input: float
+    output: float
+
+
+class CostConfig(BaseModel):
+    """Rates behind the cost estimates on `gw session show` / `--cost`.
+
+    `pricing` is merged *over* the built-in table (see `usage.DEFAULT_PRICING`),
+    keyed by the model id the agent writes into its transcript. Models with no
+    entry still have their tokens counted; they just don't contribute a dollar
+    figure. Dict-valued keys can't be reached by `gw config set` — use
+    `gw config edit`:
+
+        [cost.pricing."gpt-5-codex"]
+        input = 1.25
+        output = 10.0
+
+    The cache multipliers are relative to the model's input rate.
+    """
+
+    pricing: dict[str, ModelPricing] = Field(default_factory=dict)
+    cache_read_multiplier: float = 0.1
+    cache_write_multiplier: float = 1.25  # 5-minute TTL
+    cache_write_1h_multiplier: float = 2.0
+
+
 class Config(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     linear: LinearConfig = Field(default_factory=LinearConfig)
     tmux: TmuxConfig = Field(default_factory=TmuxConfig)
     sync: SyncConfig = Field(default_factory=SyncConfig)
     setup: SetupConfig = Field(default_factory=SetupConfig)
+    cost: CostConfig = Field(default_factory=CostConfig)
 
 
 def load() -> Config:

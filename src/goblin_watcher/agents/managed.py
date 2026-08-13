@@ -150,6 +150,15 @@ class ManagedAgent:
         del prompt, cwd, unsafe, session_id
         raise _LAUNCHER_NOT_WIRED
 
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        # A managed run has no local process to detach in the first place; the
+        # sandbox already runs remotely and needs the attach loop the launcher
+        # doesn't have yet.
+        del prompt, cwd, unsafe, session_id
+        raise _LAUNCHER_NOT_WIRED
+
     def new_session_id(self) -> str | None:
         return None
 

@@ -12,6 +12,7 @@ from rich.table import Table
 from goblin_watcher import config, secrets
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError
+from goblin_watcher.windowing import WINDOWING_MODES
 
 
 @dataclass
@@ -43,6 +44,14 @@ def _linear_key_check() -> Check:
 
 def _windowing_check(cfg: config.Config) -> Check:
     mode = cfg.defaults.windowing
+    if mode not in WINDOWING_MODES:
+        # Config isn't validated on load, so a typo here would otherwise only
+        # surface as a failed spawn.
+        return Check(
+            name="windowing",
+            ok=False,
+            detail=f"unknown mode {mode!r} (use: {', '.join(WINDOWING_MODES)})",
+        )
     if mode == "tmux":
         return _binary_check("tmux", required=True)
     return Check(name="windowing", ok=True, detail=f"mode={mode}")
@@ -63,10 +72,11 @@ def _omz_update_prompt_check(cfg: config.Config) -> Check:
     # Oh-my-zsh's interactive update prompt reads a single char at shell init.
     # In tmux mode we `send-keys` the agent command into a fresh pane, and that
     # first byte (e.g. the 'c' of `claude`) can be eaten by the prompt. Inline
-    # mode bypasses the interactive shell entirely.
+    # and headless modes bypass the interactive shell entirely.
     name = "omz update prompt"
-    if cfg.defaults.windowing != "tmux":
-        return Check(name=name, ok=True, detail="n/a (inline windowing)")
+    mode = cfg.defaults.windowing
+    if mode != "tmux":
+        return Check(name=name, ok=True, detail=f"n/a ({mode} windowing)")
 
     using_omz = bool(os.environ.get("ZSH")) or (Path.home() / ".oh-my-zsh").is_dir()
     if not using_omz:

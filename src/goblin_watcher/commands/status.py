@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import typer
 from rich.tree import Tree
 
-from goblin_watcher import config, description, git, github_state, sessions, state
+from goblin_watcher import config, description, git, github_state, sessions, state, usage
 from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
@@ -225,6 +225,11 @@ def status(
         "--no-cache",
         help="Recompute git indicators live instead of reading the `gw sync` cache.",
     ),
+    cost: bool = typer.Option(
+        False,
+        "--cost",
+        help="Annotate every session, task, and project with token usage and estimated cost.",
+    ),
 ) -> None:
     """Tree view: projects → tasks → sessions, with agent badges."""
     global_state = state.load_global()
@@ -244,6 +249,8 @@ def status(
 
     root = Tree("gw")
     linear = LinearStateFetcher()
+    cfg = config.load()
+    grand_total = usage.EMPTY
 
     try:
         for name in names:
@@ -253,6 +260,7 @@ def status(
                 root.add(f"[red]{name}[/] [muted](project metadata missing)[/]")
                 continue
             proj_node = root.add(f"[bold]{proj.name}[/]")
+            project_total = usage.EMPTY
 
             tasks = state.list_tasks(proj)
             if not tasks:
@@ -276,35 +284,68 @@ def status(
                 plan = sessions.plan_reconciliation(task)
                 if not plan.is_empty:
                     task = sessions.persist_refresh(proj, task, plan)
-                sync_suffix = _sync_indicators(proj, task, use_cache=not no_cache)
+                # Lazy refresh stale summaries (and the token counts read off
+                # the same transcript pass) before anything is rendered — the
+                # task's cost line is a sum over its refreshed sessions.
+                refreshed = task
+                if task.sessions:
+                    refreshed = sessions.persist_refresh(
+                        proj, sessions.refresh_task_summaries(task)
+                    )
+                    sessions.schedule_descriptions(proj, refreshed)
+                task_total = usage.for_task(refreshed, cfg) if cost else usage.EMPTY
+                project_total = project_total + task_total
+                sync_suffix = _sync_indicators(proj, refreshed, use_cache=not no_cache)
                 task_label = (
-                    f"[bold]{task.id}[/]"
-                    + _ticket_suffix(task)
+                    f"[bold]{refreshed.id}[/]"
+                    + _ticket_suffix(refreshed)
                     # Parens, not brackets: Rich reads `[open]` as a markup tag
                     # and swallows it, so bracketed statuses never rendered.
-                    + f"  [muted]({task.status})[/]"
+                    + f"  [muted]({refreshed.status})[/]"
                     + sync_suffix
-                    + _stack_suffix(task, by_id)
+                    + _stack_suffix(refreshed, by_id)
+                    + (usage.badge(task_total) if cost else "")
                 )
                 # Task ids are non-empty slugs, so "" can never match one.
-                task_node = nodes.get(task.parent_task or "", proj_node).add(task_label)
-                nodes[task.id] = task_node
-                if not task.sessions:
+                task_node = nodes.get(refreshed.parent_task or "", proj_node).add(task_label)
+                nodes[refreshed.id] = task_node
+                if not refreshed.sessions:
                     task_node.add("[muted](no sessions yet)[/]")
                     continue
-                # Lazy refresh stale summaries on the way through.
-                refreshed = sessions.persist_refresh(proj, sessions.refresh_task_summaries(task))
-                sessions.schedule_descriptions(proj, refreshed)
                 for s in refreshed.sessions:
                     summary = description.wrap_for_tree(
                         description.display_text(s), indent_cols=8, width=72
                     )
                     turns = f"{s.turn_count} turns" if s.turn_count else "0 turns"
+                    cost_suffix = usage.compact_badge(usage.for_session(s, cfg)) if cost else ""
                     task_node.add(
                         f"[agent.{s.agent}]{s.agent}[/]  {summary}  "
                         f"[muted]{turns} · {_fmt_relative(s.last_used_at)}"
-                        f"{_activity_badge(s)}[/]"
+                        f"{_activity_badge(s)}"
+                        + (f" · {cost_suffix}" if cost_suffix else "")
+                        + "[/]"
                     )
+            if cost:
+                proj_node.label = f"[bold]{proj.name}[/]{usage.badge(project_total)}"
+                grand_total = grand_total + project_total
     finally:
         linear.close()
     console.print(root)
+    if cost:
+        _print_cost_total(grand_total)
+
+
+def _print_cost_total(total: usage.Rollup) -> None:
+    if total.is_empty:
+        console.print(
+            "[muted]No token usage recorded yet. Only claude and codex report it; "
+            "run `gw session refresh` if sessions look stale.[/]"
+        )
+        return
+    console.print(
+        f"[bold]total[/]  {usage.fmt_cost(total)}  [muted]{usage.fmt_tokens_line(total)}[/]"
+    )
+    note = usage.unpriced_note(total)
+    if note:
+        console.print(f"[muted]{note}[/]")
+    console.print("[muted]Estimated at public list prices; subscription plans differ.[/]")
