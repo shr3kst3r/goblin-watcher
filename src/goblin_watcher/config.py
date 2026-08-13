@@ -70,7 +70,7 @@ class DefaultsConfig(BaseModel):
     # Fallback activity window for agents whose transcripts gw can't parse
     # (gemini, antigravity, managed): modified within this many seconds shows
     # as `● working` in `gw status`, older shows as `idle <age>`. Agents with a
-    # readable transcript are classified from its shape instead (ADR 0011) and
+    # readable transcript are classified from its shape instead (ADR 0010) and
     # ignore this.
     activity_active_seconds: int = 120
     # How long a session keeps counting as "in flight" for `gw status --active`,
@@ -90,7 +90,7 @@ NotifyTransport = Literal["auto", "macos", "command", "off"]
 # Events a sync pass can notify on. Edge-triggered: each fires once, when the
 # underlying state actually changes (ADR 0005).
 #
-# The three agent-* events are the transcript-derived states (ADR 0011).
+# The three agent-* events are the transcript-derived states (ADR 0010).
 # `agent-idle` predates them and used to mean "the transcript stopped moving",
 # which conflated a finished run with a blocked one; it now fires only for
 # agents gw can't classify. A config that lists `agent-idle` alone is read as
@@ -117,6 +117,10 @@ _DEFAULT_SYNC_EVENTS: tuple[SyncEvent, ...] = (
     "prunable",
 )
 
+# What a pass may *do* about an edge, not just report (ADR 0012). A closed set:
+# `[sync.on]` names an action, it never supplies one. See `sync/actions.py`.
+SyncAction = Literal["spawn-fix-session", "prune", "archive"]
+
 
 class SyncConfig(BaseModel):
     """Background-sync settings (ADR 0005). Sync only runs if scheduled."""
@@ -135,6 +139,24 @@ class SyncConfig(BaseModel):
     # final two arguments. Never shell-interpolated.
     notify_command: list[str] = Field(default_factory=list)
     notify_events: list[SyncEvent] = Field(default_factory=lambda: list(_DEFAULT_SYNC_EVENTS))
+    # Event -> actions to take when it fires (ADR 0012). Empty by default: sync
+    # stays a reporter until this is filled in. Independent of `notify_events`
+    # — acting on an edge and being told about it are separate switches.
+    # Dict-valued, so `gw config set` can't reach it; use `gw config edit`:
+    #
+    #     [sync.on]
+    #     checks-failed = ["spawn-fix-session"]
+    #     pr-merged     = ["prune"]
+    on: dict[SyncEvent, list[SyncAction]] = Field(default_factory=dict)
+    # Cooldown per task+event+action. An action that ran inside this window is
+    # skipped. Backstop behind the edge trigger, which already bounds normal
+    # firing: this is what catches a signal that genuinely flaps (CI retried,
+    # a PR reopened) before it becomes a spawn loop. 0 disables the cooldown.
+    action_rate_limit_seconds: int = 3600
+    # Hard cap on how many actions one pass may run, across every task. Twenty
+    # branches going red at once is one CI outage, not twenty agents' worth of
+    # work. Overflow is journaled, never silently dropped. 0 means no cap.
+    max_actions_per_pass: int = 4
 
 
 # One `setup.run` step: either a shell command line, executed via `sh -c` so

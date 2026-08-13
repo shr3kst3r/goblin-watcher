@@ -73,6 +73,10 @@ def _run_pass(*, verbose: bool, project: str | None) -> None:
             console.print(f"[muted]Notifications: {len(report.notifications)}[/]")
             for n in report.notifications:
                 console.print(f"  [bold yellow]{escape(n)}[/]")
+        if report.actions:
+            console.print(f"[muted]Actions: {len(report.actions)}[/]")
+            for a in report.actions:
+                console.print(f"  [cyan]{escape(a)}[/]")
         if report.pruned:
             console.print(f"[muted]Pruned: {escape(', '.join(report.pruned))}[/]")
     for err in report.errors:
@@ -229,6 +233,27 @@ def status() -> None:
                 f"{notifier.name} · events: {', '.join(cfg.sync.notify_events) or 'none'}",
             )
         )
+
+    # Opt-in and empty by default, so say plainly which of the two modes sync is
+    # in — reporter, or supervisor (ADR 0012).
+    wired = {event: names for event, names in cfg.sync.on.items() if names}
+    if not wired:
+        rows.append(("actions", True, "none configured — sync reports, it doesn't act"))
+    else:
+        rules = " · ".join(
+            f"{event} → {', '.join(names)}" for event, names in sorted(wired.items())
+        )
+        limits = (
+            f"cooldown {cfg.sync.action_rate_limit_seconds}s"
+            if cfg.sync.action_rate_limit_seconds > 0
+            else "no cooldown"
+        )
+        cap = (
+            f"max {cfg.sync.max_actions_per_pass}/pass"
+            if cfg.sync.max_actions_per_pass > 0
+            else "uncapped"
+        )
+        rows.append(("actions", True, f"{rules} · {limits} · {cap}"))
 
     rows.append(
         (

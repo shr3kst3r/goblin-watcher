@@ -18,6 +18,7 @@ StepName = Literal[
     "indicators",
     "prune",
     "notify",
+    "actions",
 ]
 
 PassStatus = Literal["ok", "partial", "skipped", "error"]
@@ -88,6 +89,8 @@ class PassReport(BaseModel):
     errors: list[str] = Field(default_factory=list)
     notifications: list[str] = Field(default_factory=list)
     pruned: list[str] = Field(default_factory=list)
+    # "<action>: <task_id> (<event>)" per action this pass actually ran.
+    actions: list[str] = Field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float | None:
@@ -105,3 +108,7 @@ class SyncState(BaseModel):
     last_seen: dict[str, str] = Field(default_factory=dict)
     # session_id -> backoff record.
     description_backoff: dict[str, DescriptionBackoff] = Field(default_factory=dict)
+    # Rate-limit memory for `[sync.on]` actions: key -> when it last ran. Key
+    # shape is "<project>/<task_id>:<event>:<action>", which shares `last_seen`'s
+    # prefix so the dead-state sweep drops both the same way.
+    action_runs: dict[str, datetime] = Field(default_factory=dict)

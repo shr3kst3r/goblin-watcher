@@ -558,6 +558,32 @@ changes, so a quiet day produces none:
 | `checks-failed` / `checks-passed` | CI flips |
 | `prunable` | a merged branch can't be auto-pruned because the worktree is dirty |
 
+**Sync can also act on those edges, not just report them.** `[sync.on]` maps an
+event to actions a pass may take about it. Opt-in and empty by default — leave it
+alone and sync stays a reporter:
+
+```toml
+[sync.on]
+checks-failed = ["spawn-fix-session"]   # start a headless agent to fix the build
+pr-merged     = ["prune"]               # clean up as soon as it lands
+```
+
+| Action | What it does |
+|---|---|
+| `spawn-fix-session` | Starts a fresh **headless** agent session on the task, briefed on the event that woke it |
+| `prune` | The edge-triggered form of the automatic prune — same safety checks, so it can't be weaker |
+| `archive` | Drops the worktree, keeping the record, branch, and session history |
+
+It's a closed set: `[sync.on]` names an action, it never supplies one, so a
+scheduled job can't be talked into running arbitrary commands. A typo in either
+the event or the action is a config error, not a rule that silently never fires.
+Actions are bounded four ways — the edge trigger (once per transition), a per
+task+event+action cooldown (`sync.action_rate_limit_seconds`, default an hour), a
+whole-pass cap (`sync.max_actions_per_pass`, default 4), and per-action guards: a
+spawn declines while an agent on that task is still working, and neither `prune`
+nor `archive` will touch a dirty worktree. `sync.on` is dict-valued, so set it
+with `gw config edit` rather than `gw config set`.
+
 **Pruning never forces.** A task is removed only when it is merged *and* clean;
 anything dirty or ambiguous is reported and left alone. Scratch spaces have no
 merge signal, so they're pruned by idle age and only when you opt in:
@@ -646,6 +672,12 @@ scratch_prune_days = 0            # prune scratch spaces idle > N days (0 = off)
 notify = "auto"                   # "auto" (macOS notifications on darwin) | "macos" | "command" | "off"
 notify_command = []               # argv for notify = "command"; title and body are appended
 notify_events = ["agent-needs-you", "agent-done", "agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
+action_rate_limit_seconds = 3600  # per task+event+action cooldown for [sync.on] (0 = off)
+max_actions_per_pass = 4          # cap on one pass's total action fan-out (0 = uncapped)
+
+[sync.on]                         # act on edges, not just report them; empty = reporter only
+# checks-failed = ["spawn-fix-session"]
+# pr-merged     = ["prune"]
 
 [setup]                           # applied to every freshly materialized worktree (above)
 copy = [".env"]                   # gitignored files to copy in from the project root

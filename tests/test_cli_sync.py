@@ -110,6 +110,29 @@ def test_sync_status_flags_misconfigured_command_transport(isolated_xdg: Path) -
     assert "notify_command is empty" in res.output
 
 
+def test_sync_status_reports_which_mode_sync_is_in(isolated_xdg: Path) -> None:
+    """`[sync.on]` is opt-in, so the table has to say plainly whether this
+    install reports or acts (ADR 0012)."""
+    from goblin_watcher import config
+
+    def _status(cfg: config.Config) -> str:
+        with (
+            patch("goblin_watcher.commands.sync.config.load", return_value=cfg),
+            patch("goblin_watcher.sync.launchd.is_supported", return_value=True),
+            patch("goblin_watcher.sync.launchd.plist_path", return_value=Path("/nope.plist")),
+        ):
+            res = runner.invoke(app, ["sync", "status"])
+        assert res.exit_code == 0
+        return res.output
+
+    assert "doesn't act" in _status(config.Config())
+
+    wired = config.Config.model_validate({"sync": {"on": {"checks-failed": ["spawn-fix-session"]}}})
+    output = _status(wired)
+    assert "checks-failed" in output
+    assert "spawn-fix-session" in output
+
+
 def test_sync_install_on_non_darwin_prints_cron_and_writes_nothing(
     isolated_xdg: Path,
 ) -> None:
