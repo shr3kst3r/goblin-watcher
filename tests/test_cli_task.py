@@ -1,9 +1,10 @@
+import os
 import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
 
-from goblin_watcher import git, state
+from goblin_watcher import config, git, state
 from goblin_watcher.cli import app
 from goblin_watcher.models import Project
 
@@ -150,6 +151,143 @@ def _stamp_fork_point(proj: Project, task_id: str, repo: Path) -> None:
     state.update_task(
         proj, task_id, lambda t: t.model_copy(update={"fork_sha": git.head_sha(repo)})
     )
+
+
+def _write_live_pid(proj: Project, task_id: str, session_id: str = "sess-1") -> Path:
+    """A pid sidecar naming a process that is definitionally alive: this one.
+
+    Same layout the headless windower writes (`<task>-<session>.pid` next to the
+    log), so the liveness guard reads it exactly as it would in a real run — no
+    real process is spawned.
+    """
+    from goblin_watcher import paths
+
+    logs = paths.project_logs_dir(proj.root)
+    logs.mkdir(parents=True, exist_ok=True)
+    pid_file = logs / f"{task_id}-{session_id}.pid"
+    pid_file.write_text(f"{os.getpid()}\n")
+    return pid_file
+
+
+def _merge_the_branch(repo: Path, task_id: str, worktree: Path) -> None:
+    """Commit on the task branch and merge it, so prune genuinely detects it."""
+    _commit_on_branch(worktree)
+    subprocess.run(
+        ["git", "-C", str(repo), "merge", "--no-ff", task_id, "-m", "merge"],
+        check=True,
+    )
+
+
+def test_task_prune_skips_a_merged_task_whose_agent_is_still_running(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The #56 race: an agent that merges its own PR is clean *and* still alive."""
+    repo = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    _stamp_fork_point(proj, task.id, repo)
+    _merge_the_branch(repo, task.branch, task.worktree_path)
+    _write_live_pid(proj, task.id)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "prune", "--no-fetch"], input="y\n")
+
+    assert res.exit_code == 0, res.output
+    assert len(state.list_tasks(proj)) == 1
+    assert task.worktree_path.exists()
+    assert "Skipped" in res.output
+    assert "headless run is still alive" in res.output
+
+
+def test_task_prune_force_still_removes_a_task_with_a_live_agent(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The new guard is bypassable, exactly like the uncommitted-changes one."""
+    repo = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    _stamp_fork_point(proj, task.id, repo)
+    _merge_the_branch(repo, task.branch, task.worktree_path)
+    _write_live_pid(proj, task.id)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "prune", "--no-fetch", "--force"])
+
+    assert res.exit_code == 0, res.output
+    assert state.list_tasks(proj) == []
+    assert not task.worktree_path.exists()
+
+
+def test_task_rm_refuses_while_an_agent_is_still_running(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    from goblin_watcher.errors import GoblinError
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    _write_live_pid(proj, task.id)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "rm", task.id], input="y\n")
+
+    assert res.exit_code != 0
+    assert isinstance(res.exception, GoblinError)
+    assert "busy" in res.exception.message
+    assert task.worktree_path.exists()
+    assert len(state.list_tasks(proj)) == 1
+
+
+def test_busy_reasons_covers_a_session_with_no_pid_on_record(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """tmux panes and inline runs record no pid, so the transcript answers.
+
+    An agent that just merged its PR wrote to its transcript seconds ago whatever
+    windower is hosting it — that recency is the signal, and it expires on its
+    own once the session goes quiet, so it can never wedge prune permanently.
+    """
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from goblin_watcher.commands.task import busy_reasons
+    from goblin_watcher.models import SessionRecord
+
+    _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+
+    transcript = tmp_path / "s9.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Merged the PR."}],
+                },
+            }
+        )
+        + "\n"
+    )
+    now = datetime.now(UTC)
+    session = SessionRecord(
+        agent="claude",
+        session_id="s9",
+        created_at=now,
+        last_used_at=now,
+        transcript_path=transcript,
+    )
+    task = task.model_copy(update={"sessions": [session]})
+
+    [reason] = busy_reasons(task, now=now)
+    assert "s9" in reason
+
+    # Past the grace window the same session stops blocking: the guard expires
+    # rather than making the task unprunable for good.
+    cfg = config.load()
+    later = now + timedelta(seconds=cfg.defaults.activity_grace_seconds + 60)
+    assert busy_reasons(task, now=later) == []
 
 
 def test_task_prune_removes_merged_branch(isolated_xdg: Path, tmp_path: Path) -> None:

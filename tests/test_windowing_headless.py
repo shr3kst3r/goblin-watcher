@@ -190,6 +190,29 @@ def test_is_live_follows_the_recorded_pid(isolated_xdg: Path, tmp_path: Path) ->
     assert windower.is_live(task) is False
 
 
+def test_a_dead_sidecar_is_reaped_and_a_live_one_is_not(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A pid file that outlives its process would make prune refuse forever (#56)."""
+    from goblin_watcher.windowing.headless import live_run_pids
+
+    _, task = _register(tmp_path)
+    logs = log_file(task, "sess-1").parent
+    logs.mkdir(parents=True)
+    dead = logs / "gh-15-dead.pid"
+    garbage = logs / "gh-15-garbage.pid"
+    live = logs / "gh-15-live.pid"
+    dead.write_text("2147483647\n")
+    garbage.write_text("not-a-pid\n")
+    live.write_text(f"{os.getpid()}\n")
+
+    assert live_run_pids(task) == [os.getpid()]
+    assert not dead.exists()
+    assert not garbage.exists()
+    # The live one is left alone — it is the handle a user has on the run.
+    assert live.exists()
+    # The log beside a reaped sidecar still holds the run's output.
+    assert live_run_pids(task) == [os.getpid()]
+
+
 def test_is_live_does_not_match_a_task_whose_id_is_a_prefix(
     isolated_xdg: Path, tmp_path: Path
 ) -> None:

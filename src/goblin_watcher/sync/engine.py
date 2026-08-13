@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 
 from goblin_watcher import activity, config, description, gh, git, github_state, sessions, state
 from goblin_watcher.commands.task import (
+    busy_reasons,
     destroy_task,
     dirty_worktrees,
     merge_detection,
@@ -1119,10 +1120,10 @@ def _maybe_prune(
 ) -> None:
     """Prune a task only when it is unambiguously safe (ADR 0005).
 
-    Merged **and** clean. Never forces: a dirty worktree — or, on a multi-repo
-    task, a secondary repo still holding unmerged commits — is reported via a
-    `prunable` notification and left alone, because deleting in-flight work is
-    not a cleanup this command is allowed to do.
+    Merged, clean, **and** nobody home. Never forces: a live agent, a dirty
+    worktree, or — on a multi-repo task — a secondary repo still holding unmerged
+    commits is reported via a `prunable` notification and left alone, because
+    deleting in-flight work is not a cleanup this command is allowed to do.
     """
     if task.kind == "scratch":
         days = cfg.sync.scratch_prune_days
@@ -1140,13 +1141,14 @@ def _maybe_prune(
         if detected is None:
             return
         reason = detected
-        blocker = prune_blocker(proj, task)
+        blocker = prune_blocker(proj, task, cfg=cfg)
         if blocker is not None:
             kind, detail = blocker
+            headline = "merged but still busy" if kind == "busy" else "merged but not clean"
             if _edge(st, proj, task, _SIG_PRUNABLE, f"{kind}:{detail}"):
                 _fire(
                     event="prunable",
-                    title=f"{task.id}: merged but not clean",
+                    title=f"{task.id}: {headline}",
                     body=f"Branch is merged but {detail}; not pruned automatically.",
                     cfg=cfg,
                     notifier=notifier,
@@ -1165,19 +1167,34 @@ def _maybe_prune(
     emit("action", "task-pruned", project=proj.name, task=task.id, detail=reason)
 
 
-def prune_blocker(proj: Project, task: Task) -> tuple[str, str] | None:
+def prune_blocker(
+    proj: Project, task: Task, *, cfg: config.Config | None = None
+) -> tuple[str, str] | None:
     """Why this merged task must not be auto-pruned, or None when it is safe.
 
-    `merge_detection` only inspects the primary repo, but `destroy_task`
-    force-deletes *every* repo's branch (`git branch -D`). An unattended prune
-    therefore has to check the secondaries itself: a branch carrying commits its
-    base does not have is unmerged work, and losing it is not recoverable from
-    the worktree deletion alone.
+    Three refusals:
+
+    * an agent still running in the worktree (`busy_reasons`). A headless agent
+      that opens and merges its own PR keeps going for a while afterwards, and by
+      then it has committed everything — so this is the moment the dirty check is
+      least able to help, and a pass that woke on the merge deleted the directory
+      out from under a live agent (#56). Checked here rather than at the call
+      sites so the periodic prune and the `[sync.on]` one cannot diverge.
+    * uncommitted changes anywhere on the task.
+    * `merge_detection` only inspects the primary repo, but `destroy_task`
+      force-deletes *every* repo's branch (`git branch -D`). An unattended prune
+      therefore has to check the secondaries itself: a branch carrying commits
+      its base does not have is unmerged work, and losing it is not recoverable
+      from the worktree deletion alone.
 
     Public because `sync.actions.prune` calls it too: the `[sync.on]` prune must
     not be able to be weaker than the periodic one, and sharing this is what
-    guarantees that rather than hoping two copies stay in step.
+    guarantees that rather than hoping two copies stay in step. `cfg` only
+    supplies the activity thresholds; omitting it costs a config read per task.
     """
+    busy = busy_reasons(task, cfg=cfg)
+    if busy:
+        return ("busy", busy[0])
     dirty = dirty_worktrees(task)
     if dirty:
         return ("dirty", f"the worktree has uncommitted changes ({dirty[0]})")

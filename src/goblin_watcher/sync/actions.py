@@ -233,7 +233,9 @@ def prune(ctx: ActionContext) -> ActionResult:
 
     Reuses `merge_detection` and `engine.prune_blocker`, so this cannot be
     weaker than the periodic prune no matter which event it is wired to. A user
-    who writes `checks-passed = ["prune"]` gets a decline, not a deleted branch.
+    who writes `checks-passed = ["prune"]` gets a decline, not a deleted branch —
+    and `pr-merged = ["prune"]`, which fires the instant an agent merges its own
+    PR, declines while that agent is still running (#56).
     """
     task = ctx.task
     if task.kind == "scratch":
@@ -245,7 +247,7 @@ def prune(ctx: ActionContext) -> ActionResult:
     # queue actions, so a top-level import back into it would be a cycle.
     from goblin_watcher.sync import engine
 
-    blocker = engine.prune_blocker(ctx.proj, task)
+    blocker = engine.prune_blocker(ctx.proj, task, cfg=ctx.cfg)
     if blocker is not None:
         return _declined(blocker[1])
     destroy_task(ctx.proj, task, force=False)

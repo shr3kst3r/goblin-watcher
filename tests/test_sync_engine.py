@@ -431,6 +431,61 @@ def test_prune_never_forces_on_a_dirty_worktree(demo, notifier) -> None:  # type
     assert any("not clean" in title for title, _b in notifier.sent)
 
 
+def test_prune_leaves_a_merged_task_whose_agent_is_still_running(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """The #56 race, on the path that reported it.
+
+    An agent that opens and merges its own PR keeps running afterwards, and it
+    committed everything on the way — so the dirty check is at its weakest at the
+    moment the merge fires. The pid sidecar is what still says "occupied".
+    """
+    import os
+
+    from goblin_watcher import paths
+
+    project, task = demo
+    logs = paths.project_logs_dir(project.root)
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"{task.id}-sess-1.pid").write_text(f"{os.getpid()}\n")
+
+    gh_patch, notify_patch = _run(notifier)
+    with (
+        gh_patch,
+        notify_patch,
+        patch("goblin_watcher.sync.engine.merge_detection", return_value="PR"),
+    ):
+        report = engine.run_pass()
+
+    assert report.pruned == []
+    assert [t.id for t in state.list_tasks(project)] == ["demo-1"]
+    assert task.worktree_path.exists()
+    assert any("still busy" in title for title, _b in notifier.sent)
+    assert any("headless run is still alive" in body for _t, body in notifier.sent)
+
+
+def test_prune_proceeds_once_the_agents_pid_is_gone(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """The guard self-heals: a sidecar whose process died is reaped, not honoured
+    forever — otherwise one crashed run makes a task unprunable for good."""
+    from goblin_watcher import paths
+
+    project, task = demo
+    logs = paths.project_logs_dir(project.root)
+    logs.mkdir(parents=True, exist_ok=True)
+    stale = logs / f"{task.id}-sess-1.pid"
+    stale.write_text("2147483647\n")
+
+    gh_patch, notify_patch = _run(notifier)
+    with (
+        gh_patch,
+        notify_patch,
+        patch("goblin_watcher.sync.engine.merge_detection", return_value="PR"),
+    ):
+        report = engine.run_pass()
+
+    assert report.pruned == ["demo/demo-1"]
+    assert state.list_tasks(project) == []
+    assert not stale.exists()
+
+
 def test_prune_disabled_by_config(demo, notifier) -> None:  # type: ignore[no-untyped-def]
     from goblin_watcher import config
 
