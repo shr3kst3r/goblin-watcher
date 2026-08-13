@@ -15,6 +15,7 @@ from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoun
 from goblin_watcher.models import Project, Task, TaskStatus
 from goblin_watcher.slug import slugify
 from goblin_watcher.task_resolver import resolve_project
+from goblin_watcher.windowing.headless import remove_run_files
 from goblin_watcher.windowing.tmux import TmuxWindower
 
 app = typer.Typer()
@@ -342,6 +343,9 @@ def destroy_task(
     in when `force=True`. Without that guard, a non-force run could silently
     nuke untracked work after `git worktree remove` (sans `--force`) refused.
     """
+    # Headless-run logs are named after the task record; once that's gone
+    # nothing would reference or clean them again.
+    remove_run_files(task)
     if task.kind == "scratch":
         # No git worktree or branch to clean up — the directory is the task.
         if delete_worktrees and task.worktree_path.exists():

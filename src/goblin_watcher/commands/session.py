@@ -18,7 +18,7 @@ from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
 from goblin_watcher.models import Project, SessionRecord, Task
 from goblin_watcher.task_resolver import resolve_task
-from goblin_watcher.windowing import get_windower
+from goblin_watcher.windowing import WINDOWING_MODES, get_windower
 
 app = typer.Typer()
 
@@ -134,7 +134,7 @@ def send(
         None,
         "--windowing",
         help="Overrides config.",
-        click_type=click.Choice(["inline", "tmux"]),
+        click_type=click.Choice(list(WINDOWING_MODES)),
     ),
     enter: bool = typer.Option(
         True,

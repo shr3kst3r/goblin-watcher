@@ -205,3 +205,18 @@ def test_turn_count_ignores_tool_results_and_meta(tmp_path: Path) -> None:
         summary = a.read_transcript("s1", cwd)
     assert summary.turn_count == 2
     assert summary.last_user_snippet == "thanks, next step"
+
+
+def test_headless_command_uses_print_mode() -> None:
+    a = ClaudeAgent()
+    assert a.headless_command(prompt="do it", cwd=Path("/tmp")) == ["claude", "-p", "do it"]
+    assert a.headless_command(
+        prompt="do it", cwd=Path("/tmp"), unsafe=True, session_id="some-uuid"
+    ) == [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--session-id",
+        "some-uuid",
+        "-p",
+        "do it",
+    ]

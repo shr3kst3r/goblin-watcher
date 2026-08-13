@@ -141,3 +141,15 @@ def test_read_only_protocol_methods_are_stubs() -> None:
     assert a.read_transcript("sid", cwd).turn_count == 0
     assert a.render_transcript("sid", cwd) is None
     assert a.env() == {}
+
+
+def test_headless_command_uses_print_mode() -> None:
+    """`-p` is agy's headless mode — the counterpart to --prompt-interactive."""
+    a = AntigravityAgent()
+    assert a.headless_command(prompt="do it", cwd=Path("/tmp")) == ["agy", "-p", "do it"]
+    assert a.headless_command(prompt="do it", cwd=Path("/tmp"), unsafe=True) == [
+        "agy",
+        "--dangerously-skip-permissions",
+        "-p",
+        "do it",
+    ]

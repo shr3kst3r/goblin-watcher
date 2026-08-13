@@ -16,7 +16,7 @@ from goblin_watcher.linear import LinearClient, parse_identifier
 from goblin_watcher.models import GhIssue, LinearIssue, Project, Task
 from goblin_watcher.slug import branch_slug, random_branch_name, slugify
 from goblin_watcher.task_resolver import resolve_project
-from goblin_watcher.windowing import get_windower
+from goblin_watcher.windowing import WINDOWING_MODES, get_windower
 
 
 def _now() -> datetime:
@@ -264,8 +264,9 @@ def new(
     windowing: str | None = typer.Option(
         None,
         "--windowing",
-        help="Overrides config.",
-        click_type=click.Choice(["inline", "tmux"]),
+        help="Where the agent runs. Overrides config. 'headless' detaches an "
+        "unattended print-mode run and logs it to <project>/.goblin/logs/.",
+        click_type=click.Choice(list(WINDOWING_MODES)),
     ),
     unsafe: bool | None = typer.Option(
         None,

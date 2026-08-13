@@ -213,3 +213,20 @@ def test_render_transcript_returns_none_when_no_messages(tmp_path: Path) -> None
     )
     with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
         assert a.render_transcript("uuid-1", cwd) is None
+
+
+def test_headless_command_uses_exec_subcommand() -> None:
+    a = CodexAgent()
+    assert a.headless_command(prompt="do it", cwd=Path("/tmp")) == ["codex", "exec", "do it"]
+
+
+def test_headless_bypass_flag_follows_the_subcommand() -> None:
+    """`exec` declares its own copy of the flag; putting it before the
+    subcommand would rely on the root parser accepting it."""
+    a = CodexAgent()
+    assert a.headless_command(prompt="do it", cwd=Path("/tmp"), unsafe=True) == [
+        "codex",
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "do it",
+    ]

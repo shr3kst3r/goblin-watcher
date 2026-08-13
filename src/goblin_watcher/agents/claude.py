@@ -40,6 +40,19 @@ class ClaudeAgent:
             cmd += ["--session-id", session_id]
         return [*cmd, prompt]
 
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        # `-p` (print mode) runs the turn to completion and exits, writing the
+        # final result to stdout. The transcript still lands in the usual
+        # per-cwd JSONL, so session discovery and `gw sync`'s agent-idle edge
+        # work exactly as they do for an interactive run.
+        del cwd
+        cmd = self._prefix(unsafe)
+        if session_id:
+            cmd += ["--session-id", session_id]
+        return [*cmd, "-p", prompt]
+
     def new_session_id(self) -> str | None:
         # `claude --session-id` requires a UUID and names the transcript file
         # after it, so the id we record up-front is the id on disk.

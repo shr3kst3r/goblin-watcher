@@ -84,6 +84,10 @@ def _describe(panes: list[_Pane]) -> str:
 
 class TmuxWindower:
     name = "tmux"
+    # Hands the agent off to a pane and returns while it is still starting up.
+    # The pane is a real terminal, so agents run in their interactive mode.
+    detaches = True
+    headless = False
 
     def _session(self) -> str:
         return config.load().tmux.session_name

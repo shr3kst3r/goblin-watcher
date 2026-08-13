@@ -87,6 +87,16 @@ def project_tasks_dir(project_root: Path) -> Path:
     return project_meta_dir(project_root) / "tasks"
 
 
+def project_logs_dir(project_root: Path) -> Path:
+    """Per-project agent output logs, written by the headless windower.
+
+    Project-scoped rather than global: an unattended run's output belongs next
+    to the task record it came from, and `.goblin/` is already excluded from
+    the user's repo via `.git/info/exclude`.
+    """
+    return project_meta_dir(project_root) / "logs"
+
+
 def task_lock_file(project_root: Path, task_id: str) -> Path:
     """Advisory-lock sidecar for one task record.
 
