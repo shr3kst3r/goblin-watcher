@@ -45,6 +45,7 @@ src/goblin_watcher/
 ├── gh.py                  # Thin wrapper around the `gh` CLI for PR + issue ops
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
+├── review_feed.py         # PR review threads + failing-check logs for `gw run --address-review`
 ├── usage.py               # token rollups + list-price cost estimates (docs/designs/token-usage-and-cost.md)
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── worktree_setup.py      # [setup] copy/link/run bootstrap applied to new worktrees (ADR 0007)

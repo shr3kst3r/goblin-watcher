@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import uuid
 from dataclasses import dataclass
@@ -9,11 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from goblin_watcher import prompt_addition, sessions, state
+from goblin_watcher import gh, prompt_addition, sessions, state
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, TaskNotFoundError
 from goblin_watcher.models import AgentName, GhIssue, Project, SessionRecord, Task
+from goblin_watcher.review_feed import RepoReview, ReviewFeed, clip_body, clip_hunk
 from goblin_watcher.windowing.base import Windower
 
 
@@ -211,10 +213,16 @@ _PROMPTED_INTRO = (
 )
 
 
-def build_seed_prompt(task: Task, user_prompt: str | None = None, *, research: bool = False) -> str:
+def build_seed_prompt(
+    task: Task,
+    user_prompt: str | None = None,
+    *,
+    research: bool = False,
+    review: ReviewFeed | None = None,
+) -> str:
     """Construct the prompt seeded into a fresh agent session.
 
-    Two work modes, both rendered from a template carrying the same task-context
+    Three work modes, all rendered from a template carrying the same task-context
     slots (ADR 0006):
 
     - Default: `spawn_prompt.md`. When `user_prompt` is provided, the trailing
@@ -224,11 +232,31 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None, *, research: b
       PR is replaced with a read-only boundary and a request to report findings
       in the session. `user_prompt` narrows the investigation's focus instead of
       becoming the trailer.
+    - `review=<feed>`: `address_review_prompt.md`. The PR's unresolved review
+      threads and failing-check output are embedded in the brief (ADR 0008), and
+      `user_prompt` narrows the focus as it does for research.
+
+    `research` and `review` are mutually exclusive; the command layer rejects the
+    combination before it reaches here, and `review` wins if one ever slips past.
     """
     templates_dir = Path(__file__).parent.parent / "templates"
     addition = prompt_addition.resolve_for_task_project(task.project).strip()
     addition_block = f"{addition}\n\n" if addition else ""
     prompt = (user_prompt or "").strip()
+    if review is not None:
+        return (
+            (templates_dir / "address_review_prompt.md")
+            .read_text()
+            .format(
+                ticket_id=task.ticket_id,
+                title=task.ticket_title or task.id,
+                repos_block=_format_repos_block(task),
+                description=_format_ticket_context(task),
+                addition_block=addition_block,
+                review_block=format_review_block(review),
+                focus=_format_focus("Focus on the following in particular", prompt),
+            )
+        )
     if research:
         # Returns before the intro/trailer machinery below: the mode fixes both,
         # and `user_prompt` becomes a focus paragraph instead. There is no
@@ -243,7 +271,11 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None, *, research: b
                 repos_block=_format_repos_block(task),
                 description=_format_ticket_context(task),
                 addition_block=addition_block,
-                focus=_format_research_focus(prompt),
+                focus=_format_focus(
+                    "Focus this research on the following, and say so if it turns out to "
+                    "be the wrong thing to look at",
+                    prompt,
+                ),
             )
         )
     intro = _PROMPTED_INTRO if prompt else _DEFAULT_INTRO
@@ -274,18 +306,98 @@ def build_seed_prompt(task: Task, user_prompt: str | None = None, *, research: b
     )
 
 
-def _format_research_focus(prompt: str) -> str:
-    """Render the optional focus paragraph of the research brief.
+def _fenced(text: str, lang: str = "") -> str:
+    """Wrap `text` in a code fence long enough to survive backticks inside it.
 
-    `--prompt` narrows a research session rather than replacing its trailer, so
-    an absent (or whitespace-only) prompt renders nothing at all.
+    A diff of a markdown file — or a CI log echoing one — routinely contains a
+    ``` run of its own. A fixed three-backtick fence would close there and the
+    remainder of the hunk would read as instructions rather than as evidence.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{lang}\n{text}\n{fence}"
+
+
+def _format_thread(index: int, thread: gh.ReviewThread) -> str:
+    """One unresolved review thread: where it points, the hunk, then the replies."""
+    where = thread.path or "(file no longer in the diff)"
+    if thread.line is not None:
+        where = f"{where}:{thread.line}"
+    header = f"[{index}] {where}"
+    if thread.is_outdated:
+        header += "  (outdated — the diff has moved since this was written)"
+    parts = [header]
+    if thread.diff_hunk.strip():
+        parts.append(_fenced(clip_hunk(thread.diff_hunk), "diff"))
+    for comment in thread.comments:
+        if not comment.body:
+            continue
+        stamp = f" · {comment.created_at}" if comment.created_at else ""
+        parts.append(f"{comment.author}{stamp}:\n{clip_body(comment.body)}")
+    return "\n\n".join(parts)
+
+
+def _format_check(check: gh.FailingCheck) -> str:
+    """One failing check: its name and URL, plus the log tail when gw has one.
+
+    `CheckRun.label` qualifies the job with its workflow — two workflows can each
+    have a `test` job, and the bare name wouldn't say which one broke.
+    """
+    header = f"{check.run.label} — {check.run.detail.lower()}"
+    if check.run.url:
+        header += f"\n{check.run.url}"
+    if not check.log:
+        return f"{header}\n(no log available — open the URL above to read it)"
+    return f"{header}\n{_fenced(check.log)}"
+
+
+def _format_repo_review(entry: RepoReview, *, multi_repo: bool) -> str:
+    """One PR's outstanding feedback: identity, threads, review bodies, checks."""
+    review = entry.review
+    prefix = f"[{entry.project}] " if multi_repo else ""
+    parts = [f"{prefix}PR #{review.number} ({review.state}): {review.url}\n{review.title}"]
+
+    if review.threads:
+        threads = "\n\n".join(_format_thread(i, t) for i, t in enumerate(review.threads, start=1))
+        parts.append(f"Unresolved review threads ({len(review.threads)}):\n\n{threads}")
+
+    if review.summaries:
+        rendered = "\n\n".join(
+            f"{s.author} · {s.state}{f' · {s.submitted_at}' if s.submitted_at else ''}:\n"
+            f"{clip_body(s.body)}"
+            for s in review.summaries
+        )
+        parts.append(f"Review summaries:\n\n{rendered}")
+
+    if review.failing:
+        checks = "\n\n".join(_format_check(c) for c in review.failing)
+        parts.append(f"Failing checks ({len(review.failing)}):\n\n{checks}")
+
+    if review.is_empty:
+        parts.append("(Nothing outstanding on this PR.)")
+    return "\n\n".join(parts)
+
+
+def format_review_block(feed: ReviewFeed) -> str:
+    """Render the whole review feed as the `{review_block}` slot of the brief.
+
+    A multi-repo task labels each PR with its project, since the same review
+    comment text can otherwise look like it belongs to the wrong checkout.
+    """
+    multi_repo = len(feed.repos) > 1
+    return "\n\n".join(_format_repo_review(entry, multi_repo=multi_repo) for entry in feed.repos)
+
+
+def _format_focus(lead: str, prompt: str) -> str:
+    """Render the optional focus paragraph shared by the non-default briefs.
+
+    In research and address-review mode `--prompt` *narrows* the session rather
+    than replacing its trailer, so an absent (or whitespace-only) prompt renders
+    nothing at all. `lead` is the sentence introducing it, minus the colon.
     """
     if not prompt:
         return ""
-    return (
-        "\nFocus this research on the following, and say so if it turns out to "
-        f"be the wrong thing to look at:\n\n{prompt}"
-    )
+    return f"\n{lead}:\n\n{prompt}"
 
 
 def _format_repos_block(task: Task) -> str:

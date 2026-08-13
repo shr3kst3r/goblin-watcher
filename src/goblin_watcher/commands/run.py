@@ -3,7 +3,7 @@ from __future__ import annotations
 import click
 import typer
 
-from goblin_watcher import config, sessions, state
+from goblin_watcher import config, review_feed, sessions, state
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, Resume, build_seed_prompt
 from goblin_watcher.agents.launcher import launch as launch_agent
@@ -81,6 +81,13 @@ def run(
         "implement, don't touch GitHub/Linear/Slack. Needs a Linear ticket or "
         "GitHub issue on the task.",
     ),
+    address_review: bool = typer.Option(
+        False,
+        "--address-review",
+        help="Start a fresh session seeded with the task's PR feedback: its "
+        "unresolved review threads and the output of any failing checks, with a "
+        "brief to work through them. Needs an open PR on the task.",
+    ),
 ) -> None:
     """Pick a session for an existing task and spawn the agent."""
     if new and session is not None:
@@ -95,14 +102,23 @@ def run(
         )
     if prompt is not None:
         new = True
-    # Hoisted above both mode blocks: when the caller asked for two modes at
+    # Hoisted above every mode block: when the caller asked for two modes at
     # once, that conflict is the operative error. Reporting --adversarial-review's
     # own checks first (--prompt, --agent) would send the user off changing a
     # flag that --research accepts perfectly well.
-    if research and adversarial_review:
+    modes = [
+        name
+        for name, enabled in (
+            ("--research", research),
+            ("--adversarial-review", adversarial_review),
+            ("--address-review", address_review),
+        )
+        if enabled
+    ]
+    if len(modes) > 1:
         raise GoblinError(
-            "--research and --adversarial-review are mutually exclusive.",
-            hint="Pass one or the other.",
+            f"{' and '.join(modes)} are mutually exclusive.",
+            hint="Pass one or the other." if len(modes) == 2 else "Pass exactly one.",
         )
     if adversarial_review:
         if session is not None:
@@ -124,13 +140,13 @@ def run(
             )
         agent = "claude"
         new = True
-    if research:
+    if research or address_review:
         # Covers `--session <id>` and the bare-`--session` picker sentinel alike,
-        # so research can never reach a picker branch below.
+        # so neither mode can reach a picker branch below.
+        flag = "--research" if research else "--address-review"
         if session is not None:
             raise GoblinError(
-                "--research and --session are mutually exclusive "
-                "(it always starts a fresh session).",
+                f"{flag} and --session are mutually exclusive (it always starts a fresh session).",
                 hint="Drop --session.",
             )
         new = True
@@ -199,6 +215,14 @@ def run(
         # `--wait` runs the review in the foreground.
         if adversarial_review:
             choice = Fresh(prompt="/codex:adversarial-review --wait")
+        elif address_review:
+            # Deliberately the last thing before dispatch: this is the only seed
+            # path that hits the network, and every cheap validation above should
+            # have had its chance to fail first.
+            console.print("[muted]Reading the PR's review feedback…[/]")
+            choice = Fresh(
+                prompt=build_seed_prompt(task, user_prompt=prompt, review=review_feed.collect(task))
+            )
         else:
             choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt, research=research))
     else:

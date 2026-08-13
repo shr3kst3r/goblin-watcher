@@ -223,9 +223,32 @@ gw run --new                                        # force fresh
 gw run --agent codex                                # pick a non-default agent
 gw run --project my-repo                       # scope task lookup + picker to one project
 gw run eng-123 --research                           # fresh read-only research session on the ticket
+gw run eng-123 --address-review                     # fresh session seeded with the PR's review feedback
 ```
 
 `--research` always starts a fresh session (so it can't be combined with `--session`) and needs the task to carry a Linear ticket or GitHub issue. Same caveats as `gw new --research` above: the read-only boundary is what the agent is told, not what it's prevented from doing.
+
+#### `--address-review` — hand the PR's feedback back to an agent
+
+```bash
+gw run eng-123 --address-review
+gw run eng-123 --address-review --prompt "just the concurrency thread"   # narrows the focus
+```
+
+The loop this replaces is reading the review comments, reading the failing check's log, and pasting both into a session by hand. gw already knows the PR, so it fetches instead:
+
+- every **unresolved review thread**, with its diff hunk and the whole reply chain (bot findings included — Bugbot and Codex post as review threads)
+- the body of every **`CHANGES_REQUESTED` / `COMMENTED` review** (an `APPROVED` body is congratulation; a `DISMISSED` one was overruled)
+- for each **failing check**, the tail of its failing steps' log, pulled with `gh run view --log-failed`
+
+…all embedded in the seed prompt, with a brief to adjudicate each item against the code before changing anything, fix what's real, and say what it's leaving alone and why.
+
+Worth knowing:
+
+- **It needs a PR with something outstanding.** No PR, an unreadable one, or one with every thread resolved and every check green all get a refusal rather than a session seeded with nothing. Checks still *running* don't count as failing.
+- **It doesn't write to GitHub.** The agent is told to report in-session and push its fixes with `gw pr open` (idempotent — it pushes the branch and skips creating a second PR). Replying to threads and resolving them stays yours.
+- **Plain PR comments are out of scope** — only review threads carry a resolved/unresolved state, which is what "unresolved" is derived from.
+- Like `--research`, it always starts a fresh session and is a property of that session, not the task. Multi-repo tasks get one block per repo. See [ADR 0008](docs/adrs/0008-address-review-seed-prompt.md).
 
 The picker chain auto-skips a level when there's only one option: one project → goes straight to its tasks; one task → goes straight to its sessions.
 
@@ -631,7 +654,7 @@ gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--rm|--rm-force] [--no-launch] [--no-setup]
        [--windowing inline|tmux|headless] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
-       [--research] [--adversarial-review]
+       [--research] [--adversarial-review] [--address-review]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
 gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
            [--windowing ...] [--unsafe|--no-unsafe]

@@ -399,3 +399,185 @@ def test_run_windowing_headless_refuses_to_resume(isolated_xdg: Path, tmp_path: 
         )
     assert res.exit_code != 0
     assert popen.call_count == 0
+
+
+def _feed() -> object:
+    """A minimal one-thread review feed, standing in for the gh round-trip."""
+    from goblin_watcher import gh
+    from goblin_watcher.review_feed import RepoReview, ReviewFeed
+
+    review = gh.PrReview(
+        number=34,
+        title="Add --address-review",
+        state="OPEN",
+        url="https://github.com/org/repo/pull/34",
+        threads=(
+            gh.ReviewThread(
+                path="src/gh.py",
+                line=10,
+                is_outdated=False,
+                diff_hunk="@@ -1 +1 @@",
+                comments=(
+                    gh.ReviewComment(author="alice", body="Swallows the error.", created_at=""),
+                ),
+            ),
+        ),
+        summaries=(),
+        failing=(),
+    )
+    return ReviewFeed(repos=(RepoReview(project="alpha", review=review),))
+
+
+def test_run_address_review_seeds_the_feedback(isolated_xdg: Path, tmp_path: Path) -> None:
+    task = _issue_backed_alpha_task(tmp_path)
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.run.launch_agent", return_value=(0, task)) as launch,
+        patch("goblin_watcher.review_feed.collect", return_value=_feed()) as collect,
+    ):
+        res = runner.invoke(app, ["run", task.id, "--project", "alpha", "--address-review"])
+    assert res.exit_code == 0, res.output
+    collect.assert_called_once()
+    choice = launch.call_args.kwargs["choice"]
+    # Fresh, not Resume — the mode always starts a new session.
+    assert type(choice).__name__ == "Fresh"
+    assert choice.prompt.startswith("Address the review feedback")
+    assert "Swallows the error." in choice.prompt
+    assert "PR #34 (OPEN)" in choice.prompt
+
+
+def test_run_address_review_prompt_narrows_the_focus(isolated_xdg: Path, tmp_path: Path) -> None:
+    """--prompt composes with --address-review as it does with --research."""
+    task = _issue_backed_alpha_task(tmp_path)
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.run.launch_agent", return_value=(0, task)) as launch,
+        patch("goblin_watcher.review_feed.collect", return_value=_feed()),
+    ):
+        res = runner.invoke(
+            app,
+            [
+                "run",
+                task.id,
+                "--project",
+                "alpha",
+                "--address-review",
+                "--prompt",
+                "Only the gh.py thread.",
+            ],
+        )
+    assert res.exit_code == 0, res.output
+    choice = launch.call_args.kwargs["choice"]
+    assert "Focus on the following in particular" in choice.prompt
+    assert "Only the gh.py thread." in choice.prompt
+
+
+def test_run_address_review_works_without_a_tracking_item(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """Unlike --research, the input is the PR, not the ticket — a branch-only
+    task with a PR is a perfectly good target."""
+    _bootstrap_two_projects(tmp_path)
+
+    runner = CliRunner()
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    with (
+        patch("goblin_watcher.commands.run.launch_agent", return_value=(0, task)) as launch,
+        patch("goblin_watcher.review_feed.collect", return_value=_feed()),
+    ):
+        res = runner.invoke(app, ["run", task.id, "--project", "alpha", "--address-review"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["choice"].prompt.startswith("Address the review feedback")
+
+
+def test_run_address_review_conflicts_with_session(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Both `--session <id>` and the bare-`--session` picker sentinel are
+    refused, so the mode can never reach a picker branch."""
+    from goblin_watcher.picker import SESSION_PICK_SENTINEL
+
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    for value in ("x", SESSION_PICK_SENTINEL):
+        with patch("goblin_watcher.commands.run.choose_session") as picker:
+            res = runner.invoke(
+                app,
+                ["run", "spike-foo", "--project", "alpha", "--address-review", "--session", value],
+            )
+        assert res.exit_code != 0
+        assert res.exception is not None
+        assert "--address-review and --session are mutually exclusive" in str(res.exception), value
+        picker.assert_not_called()
+
+
+def test_run_address_review_conflicts_with_the_other_modes(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    base = ["run", "spike-foo", "--project", "alpha", "--address-review"]
+    for other, message in (
+        ("--research", "--research and --address-review are mutually exclusive"),
+        (
+            "--adversarial-review",
+            "--adversarial-review and --address-review are mutually exclusive",
+        ),
+    ):
+        res = runner.invoke(app, [*base, other])
+        assert res.exit_code != 0, other
+        assert res.exception is not None
+        assert message in str(res.exception), other
+
+
+def test_run_all_three_modes_at_once_is_one_error(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        [
+            "run",
+            "spike-foo",
+            "--project",
+            "alpha",
+            "--research",
+            "--adversarial-review",
+            "--address-review",
+        ],
+    )
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "are mutually exclusive" in str(res.exception)
+
+
+def test_run_address_review_surfaces_a_missing_pr(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`review_feed.collect` refuses loudly; `gw run` must not swallow that into
+    a session seeded with nothing."""
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.run.launch_agent") as launch,
+        patch("goblin_watcher.gh.pr_for_branch", return_value=None),
+    ):
+        res = runner.invoke(app, ["run", "spike-foo", "--project", "alpha", "--address-review"])
+    assert res.exit_code != 0
+    assert res.exception is not None
+    assert "no pull request to address review on" in str(res.exception)
+    launch.assert_not_called()
+
+
+def test_run_address_review_does_not_fetch_before_cheaper_checks_fail(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The gh round-trip is the slowest thing in the command; a bad --agent
+    shouldn't cost the user a network wait first."""
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    with patch("goblin_watcher.review_feed.collect") as collect:
+        res = runner.invoke(
+            app,
+            ["run", "spike-foo", "--project", "alpha", "--address-review", "--agent", "nope"],
+        )
+    assert res.exit_code != 0
+    collect.assert_not_called()
