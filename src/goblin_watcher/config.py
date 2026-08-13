@@ -23,8 +23,33 @@ Windowing = str  # "inline" | "tmux" | "headless" — validated where used, not 
 SplitDirection = Literal["vertical", "horizontal"]
 
 
+class LinearTransitionsConfig(BaseModel):
+    """Opt-in workflow-state moves on the task's Linear ticket (ADR 0012).
+
+    Each field names a workflow state on the ticket's own team, matched
+    case-insensitively:
+
+        [linear.transitions]
+        on_session_start = "In Progress"
+        on_pr_open       = "In Review"
+
+    Unset — the default — means gw writes nothing, which is the same
+    read-only posture it has always had. A state name that the team doesn't
+    define is reported once, at the moment it would have been used, and the
+    session or PR carries on regardless.
+    """
+
+    on_session_start: str | None = None
+    on_pr_open: str | None = None
+    # Wall-clock cap on the two round-trips a transition costs. Shorter than the
+    # client's own 15s default because nothing is waiting on the answer: the
+    # agent launch (or the PR that already exists) is what the user came for.
+    timeout_seconds: float = 8.0
+
+
 class LinearConfig(BaseModel):
     api_key: str | None = None  # literal key or "op://..." reference
+    transitions: LinearTransitionsConfig = Field(default_factory=LinearTransitionsConfig)
 
 
 class TmuxConfig(BaseModel):

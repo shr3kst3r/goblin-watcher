@@ -107,3 +107,64 @@ def test_create_comment_unconfirmed_raises(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(json={"data": {"commentCreate": {"success": False}}})
     with LinearClient("key") as client, pytest.raises(GoblinError, match="did not confirm"):
         client.create_comment("issue-uuid", "body")
+
+
+def test_fetch_issue_workflow_parses_team_states(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        json={
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "issue-uuid",
+                            "state": {"id": "s1", "name": "Todo"},
+                            "team": {
+                                "key": "ENG",
+                                "states": {
+                                    "nodes": [
+                                        {"id": "s1", "name": "Todo"},
+                                        {"id": "s2", "name": "In Progress"},
+                                        # Malformed rows are dropped, not fatal.
+                                        {"id": None, "name": "Broken"},
+                                    ]
+                                },
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    with LinearClient("key") as client:
+        workflow = client.fetch_issue_workflow("eng-7")
+
+    assert workflow.issue_id == "issue-uuid"
+    assert workflow.team_key == "ENG"
+    assert workflow.state == "Todo"
+    assert workflow.state_names == ["Todo", "In Progress"]
+    found = workflow.find_state("in progress")
+    assert found is not None and found.id == "s2"
+    assert workflow.find_state("Done") is None
+
+
+def test_fetch_issue_workflow_not_found(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"data": {"issues": {"nodes": []}}})
+    with LinearClient("key") as client, pytest.raises(GoblinError, match="not found"):
+        client.fetch_issue_workflow("ENG-999")
+
+
+def test_update_issue_state_posts_mutation(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"data": {"issueUpdate": {"success": True}}})
+    with LinearClient("key") as client:
+        client.update_issue_state("issue-uuid", "state-id")
+    import json as _json
+
+    payload = _json.loads(httpx_mock.get_requests()[0].content)
+    assert "issueUpdate" in payload["query"]
+    assert payload["variables"] == {"issueId": "issue-uuid", "stateId": "state-id"}
+
+
+def test_update_issue_state_unconfirmed_raises(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(json={"data": {"issueUpdate": {"success": False}}})
+    with LinearClient("key") as client, pytest.raises(GoblinError, match="did not confirm"):
+        client.update_issue_state("issue-uuid", "state-id")

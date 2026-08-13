@@ -11,6 +11,7 @@ from goblin_watcher import (
     config,
     gh,
     git,
+    linear_transitions,
     modes,
     paths,
     secrets,
@@ -555,6 +556,10 @@ def new(
         else build_seed_prompt(task, user_prompt=prompt, mode=mode_spec)
     )
     choice = Fresh(prompt=seed_prompt)
+    # Below `no_launch`, because the ticket moves when a session actually starts.
+    # Opt-in and fail-open (ADR 0012): unset config is a no-op, and a Linear that
+    # is down or slow costs one muted line, never the launch.
+    task = linear_transitions.apply(proj, task, "on_session_start")
     console.print(f"Launching {agent_badge(agent_name)} (fresh) in [muted]{windowing_mode}[/]…")
     exit_code, _ = launch(
         project=proj,

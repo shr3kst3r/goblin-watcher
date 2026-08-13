@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from goblin_watcher import gh, git, state
+from goblin_watcher import gh, git, linear_transitions, state
 from goblin_watcher.commands.task import _find_task
 from goblin_watcher.completion_enumerators import complete_projects, complete_tasks
 from goblin_watcher.console import console, print_success
@@ -293,6 +293,11 @@ def open_(
             print_success(f"Posted PR link to Linear issue {task.linear.identifier}")
         except GoblinError as e:
             console.print(f"[muted]Skipped Linear notification: {e.message}[/]")
+
+    # Last, and after the PR URLs are already on screen: the ticket move is opt-in
+    # (ADR 0012) and fails open, so a Linear that is down or slow costs one muted
+    # line and nothing else. The PR exists either way.
+    linear_transitions.apply(proj, task, "on_pr_open")
 
 
 _CHECK_GLYPHS = {"passing": "[green]✓[/]", "failing": "[red]✗[/]", "pending": "[hint]●[/]"}
