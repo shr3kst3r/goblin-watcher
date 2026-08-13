@@ -138,12 +138,44 @@ The consequence to know about: a session started outside `gw` is adopted by a
 sync pass or by a plain `gw status`, never by a watch tick.
 
 `gw status --active` narrows the tree to tasks with work in flight — a session
-whose transcript moved within `defaults.activity_grace_seconds` (default 900),
-or a live headless pid. The grace window is much wider than the 120s behind the
-`● active` badge on purpose: an agent that stops to ask a question goes quiet
-within two minutes, which is precisely when it most needs to stay on screen. The
-filter runs *before* the ticket refresh, so `--active` is faster than a full
-status, not just shorter.
+the transcript classifies as `working`, a session whose transcript moved within
+`defaults.activity_grace_seconds` (default 900), or a live headless pid. The
+first of those is what mtime alone could never give: an agent twenty minutes
+into one tool call writes nothing and used to drop off the dashboard while it
+was busiest. The mtime grace window stays as a second signal, much wider than
+the 120s fallback threshold on purpose — an agent that stops to ask a question
+goes quiet within two minutes, which is precisely when it most needs to stay on
+screen. The filter runs *before* the ticket refresh, so `--active` is faster
+than a full status, not just shorter.
+
+### What the agent is doing, from the transcript
+
+Session state is classified from the shape of the transcript's tail, not its
+mtime (ADR 0010). `goblin_watcher.activity.classify` is the one entry point, and
+`gw status` and a sync pass both call it, so the badge and the notification can
+never disagree:
+
+| state | what it means | badge |
+| --- | --- | --- |
+| `working` | a tool call is outstanding, or the turn was handed over and not yet answered | `● working` |
+| `needs-you` | the last turn ended on a question | `◆ needs you` |
+| `done` | the last turn finished with nothing pending | `✓ done` |
+| `idle` | quiet, and the transcript can't say which of the two | `idle <age>` |
+| `unknown` | no transcript on disk at all | *(nothing)* |
+
+`Agent.read_tail(path)` supplies the raw shape — pending tool call, who spoke
+last, the tail of the final assistant turn — and reads a bounded 256 KiB window
+from the *end* of the file, so a multi-megabyte transcript costs the same as a
+small one and `--watch` can call it every tick. `claude` and `codex` implement
+it; `gemini`, `antigravity`, and `managed` have no transcript gw can parse and
+fall back to the mtime reading (`working` while the file moves,
+`defaults.activity_active_seconds`; `idle` once it stops). So does a session the
+transcript calls `working` that has been silent past
+`defaults.activity_grace_seconds` — an agent killed mid-call leaves its tool
+call unmatched forever, and would otherwise never leave `--active`.
+
+Nothing is stored. Classification is a pure function of the file on disk, so no
+`SessionRecord` field can go stale against the transcript it describes.
 
 ### Edge-triggered notifications
 
@@ -151,7 +183,14 @@ The pass compares each signal against the last value recorded in
 `sync/state.json` and fires only on change, so an event is announced exactly
 once and a quiet day produces zero notifications:
 
-- `agent-idle` — a session's transcript stopped being written (active → idle only)
+- `agent-needs-you` — a session's last turn ended on a question. The body is the
+  question itself; this is the one worth leaving on.
+- `agent-done` — a session finished a turn with nothing pending
+- `agent-idle` — a session went quiet and the transcript can't say why: an agent
+  gw can't parse, or one abandoned mid-tool-call. What the single pre-ADR-0009
+  event used to mean, now narrowed to the cases that still can't do better. A
+  config that lists `agent-idle` alone predates the split and is read as asking
+  for all three.
 - `pr-merged` — PR state became `MERGED`
 - `parent-merged` — a task stacked on this one (`Task.parent_task`) needs a rebase,
   because the branch under it just landed. Rides the parent's `pr-merged` edge, so
@@ -242,7 +281,7 @@ prune = true               # merged + clean tasks; never forces
 scratch_prune_days = 0     # 0 disables; scratch has no merge signal, only idleness
 notify = "auto"            # auto | macos | command | off
 notify_command = []        # argv; title and body appended
-notify_events = ["agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
+notify_events = ["agent-needs-you", "agent-done", "agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
 ```
 
 ## Files

@@ -29,6 +29,7 @@ Multiple sessions per task are allowed (e.g. two claude conversations on the sam
 
 ```
 src/goblin_watcher/
+├── activity.py            # working / needs-you / done, classified from the transcript tail (ADR 0010)
 ├── cli.py                 # Typer app + custom dispatcher for `gw <LINEAR-ID>`
 ├── command_log.py         # JSONL audit log of every `gw` invocation
 ├── console.py             # Rich Console singleton + colored agent badges
@@ -134,11 +135,30 @@ Two invariants when touching this:
 - **No consumer branches on a mode's name.** Every check reads a field. `allows_prompt` is *derived* from the shape (a seed mode has no `{focus}` slot), not configured, so user modes inherit the refusal. If a new mode needs behaviour no field expresses, add the field — don't special-case the name.
 - **A mode contributes prompt text and policy flags, never code.** `[modes.<name>]` in the user's `config.toml` is a supported extension point; letting it name a command to run would make it the plugin system this file forbids. A mode that needs a data-gathering step (like `--address-review`'s review feed) belongs in gw, not in the registry.
 
+## Agent activity states
+
+What an agent is doing is classified from the *shape of its transcript's tail*, never from file mtime (ADR 0010). `activity.classify(session)` is the single entry point; `gw status`'s badge and `gw sync`'s notifications both call it, so they can't disagree. Five states, and the names are load-bearing — other surfaces key off them:
+
+| state | meaning | badge | sync event |
+| --- | --- | --- | --- |
+| `working` | tool call outstanding, or the turn is the agent's and unanswered | `● working` | — |
+| `needs-you` | last turn ended on a question | `◆ needs you` | `agent-needs-you` |
+| `done` | last turn finished, nothing pending | `✓ done` | `agent-done` |
+| `idle` | quiet, and the transcript can't say why | `idle <age>` | `agent-idle` |
+| `unknown` | no transcript on disk | *(none)* | — |
+
+Four things to keep true when touching this:
+
+- **Agents report shape, not meaning.** `Agent.read_tail(path)` returns a `TranscriptTail` (pending tool call, who spoke last, the tail of the final assistant turn). Naming a state from it — including the question heuristic — lives in `activity.py`, written once. Don't push classification down into an agent module.
+- **`read_tail` takes a path, and reads a bounded window.** It's called per session per render, and `gw status --watch` renders every two seconds. Use `agents/_tail.py`; never parse a whole transcript, and never route it through `read_transcript`'s `(session_id, cwd)` lookup (codex re-globs `~/.codex/sessions`).
+- **Nothing is persisted.** Classification is a pure function of the file on disk. Don't add a `SessionRecord` field caching it.
+- **Every degradation lands on `idle` or `unknown`.** An unparseable record, an unknown agent, a drifted format — all return None from `read_tail` and fall back to mtime. A transcript-reading bug must never break `gw status`.
+
 ## Adding an agent
 
 The registered set is `claude`, `codex`, `gemini`, `antigravity` (Google Antigravity's `agy` CLI), plus `managed` (scaffold; see ADR 0002 and `docs/designs/sessions-and-windowing.md`). To wire another:
-1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `headless_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `env`.
-2. Declare `transcripts: TranscriptCapability` on the class — `PARSEABLE_TRANSCRIPTS` if `read_transcript` / `render_transcript` are real, otherwise `TranscriptCapability(parseable=False, reason="…")`. Stubbing them silently empties out session summaries, descriptions, turn counts, the `● active` badge, and the `agent-idle` notification; the declaration is what `gw doctor` warns from, so it has to be honest. `tests/test_agents_transcript_capability.py` asserts the declaration matches what the methods actually return.
+1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `headless_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `read_tail`, `env`.
+2. Declare `transcripts: TranscriptCapability` on the class — `PARSEABLE_TRANSCRIPTS` if `read_transcript` / `render_transcript` are real, otherwise `TranscriptCapability(parseable=False, reason="…")`. Stubbing them silently empties out session summaries, descriptions, turn counts, and the transcript-derived activity states (such an agent can only report `working`/`idle` off mtime, never `needs-you` or `done`); the declaration is what `gw doctor` warns from, so it has to be honest. `tests/test_agents_transcript_capability.py` asserts the declaration matches what the methods actually return.
 3. Add it to `models.AgentName`.
 4. Add it to `agents/registry.registry`.
 5. Add a row to `commands/doctor.py`'s binary check list. Agents with no local binary (e.g. `managed`) get a custom check function instead. The per-agent transcript row is generated from the registry — no doctor edit needed for that one.
@@ -163,7 +183,7 @@ Test against a fake `tmux` (see `tests/test_windowing_tmux.py`) — never call t
 
 `windowing = "headless"` (or `--windowing headless`) routes spawns through `HeadlessWindower`, for unattended runs from cron, a queue, or another agent. It `Popen`s the agent's print mode (`Agent.headless_command` — `claude -p`, `codex exec`, `agy -p`, `gemini -p`) with `start_new_session=True` and stdin on `/dev/null`, appends stdout+stderr to `<project>/.goblin/logs/<task>-<session>.log`, records the pid in a sibling `.pid`, and returns 0 as soon as the spawn succeeds.
 
-It is deliberately narrow: fresh sessions only (a `Resume` choice is refused), no exit-status capture, and `send` raises. Completion rides on `gw sync`'s edge-triggered `agent-idle` notification. Keep `unsafe = true` or the agent stalls at its first permission prompt with nobody to answer. See ADR 0007.
+It is deliberately narrow: fresh sessions only (a `Resume` choice is refused), no exit-status capture, and `send` raises. Completion rides on `gw sync`'s edge-triggered `agent-done` notification. Keep `unsafe = true` or the agent stalls at its first permission prompt with nobody to answer. See ADR 0007.
 
 `Windower` declares two booleans the launcher branches on: `detaches` (run returns while the agent is still going, so post-run reconciliation is skipped) and `headless` (no terminal, so build the argv from `headless_command`). Never reintroduce a `windower.name == "..."` check for either.
 

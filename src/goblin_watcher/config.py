@@ -59,10 +59,16 @@ class DefaultsConfig(BaseModel):
     # Same, for a task's cached GitHub issue state (`gh issue view`). Cheaper
     # than the Linear round-trip but still a subprocess per issue-backed task.
     github_issue_state_ttl_seconds: int = 300
-    # A session whose transcript was modified within this window shows as
-    # `● active` in `gw status`; older activity shows as `idle <age>`.
+    # Fallback activity window for agents whose transcripts gw can't parse
+    # (gemini, antigravity, managed): modified within this many seconds shows
+    # as `● working` in `gw status`, older shows as `idle <age>`. Agents with a
+    # readable transcript are classified from its shape instead (ADR 0010) and
+    # ignore this.
     activity_active_seconds: int = 120
-    # How long a session keeps counting as "in flight" for `gw status --active`.
+    # How long a session keeps counting as "in flight" for `gw status --active`,
+    # and how long a transcript that claims to be mid tool call is believed
+    # before the silence wins and it is called `idle` — an agent killed
+    # mid-call leaves its tool call unmatched forever.
     # Deliberately much wider than `activity_active_seconds`: an agent that
     # stopped to ask a question goes quiet within two minutes, and that is
     # exactly the moment you most want it still on the dashboard.
@@ -75,7 +81,15 @@ NotifyTransport = Literal["auto", "macos", "command", "off"]
 
 # Events a sync pass can notify on. Edge-triggered: each fires once, when the
 # underlying state actually changes (ADR 0005).
+#
+# The three agent-* events are the transcript-derived states (ADR 0010).
+# `agent-idle` predates them and used to mean "the transcript stopped moving",
+# which conflated a finished run with a blocked one; it now fires only for
+# agents gw can't classify. A config that lists `agent-idle` alone is read as
+# the legacy request for all three — see `sync.engine.event_enabled`.
 SyncEvent = Literal[
+    "agent-needs-you",
+    "agent-done",
     "agent-idle",
     "pr-merged",
     "parent-merged",
@@ -85,6 +99,8 @@ SyncEvent = Literal[
 ]
 
 _DEFAULT_SYNC_EVENTS: tuple[SyncEvent, ...] = (
+    "agent-needs-you",
+    "agent-done",
     "agent-idle",
     "pr-merged",
     "parent-merged",

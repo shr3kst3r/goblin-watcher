@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from goblin_watcher.models import UsageBucket
+
+# Who spoke last in a transcript. `None` when the tail held no message at all.
+LastRole = Literal["user", "assistant"]
 
 
 @dataclass
@@ -53,8 +56,9 @@ class TranscriptCapability:
     transcripts can't be parsed, `read_transcript` returns an empty
     `TranscriptSummary` and `render_transcript` returns None, which quietly
     empties out half the product: rolling summaries, LLM-refreshed
-    descriptions, turn counts, the `● active` badge, and — because sync's
-    activity edge keys off `transcript_mtime` — the `agent-idle` notification.
+    descriptions, turn counts, and the transcript-derived activity states
+    (ADR 0010) — such an agent can only ever report `working` or `idle` off
+    file mtime, never `needs-you` or `done`.
 
     `reason` is a short lowercase fragment naming the obstacle (e.g. "the CLI
     keeps conversations in an internal SQLite store"); `gw doctor` composes it
@@ -71,6 +75,29 @@ class TranscriptCapability:
 
 
 PARSEABLE_TRANSCRIPTS = TranscriptCapability(parseable=True)
+
+
+@dataclass(frozen=True)
+class TranscriptTail:
+    """What the *end* of a transcript says about the agent's state.
+
+    Deliberately shape, not meaning: whether a tool call is still outstanding,
+    who spoke last, and the text of the final assistant turn. Naming a state
+    from that is `activity.classify`'s job — the question-detection heuristic is
+    agent-independent and has no business being written five times.
+
+    * `pending_tool` — the agent asked for a tool and no result has come back,
+      so it is mid-call right now.
+    * `last_role` — `"user"` means the turn was handed to the agent and it
+      hasn't answered yet; `"assistant"` means it finished speaking.
+    * `last_assistant` — the tail of the final assistant message, trimmed from
+      the front (see `_tail.tail_text`), because how a turn *ends* is what says
+      whether it ended on a question.
+    """
+
+    pending_tool: bool = False
+    last_role: LastRole | None = None
+    last_assistant: str | None = None
 
 
 @runtime_checkable
@@ -149,6 +176,22 @@ class Agent(Protocol):
 
     def read_transcript(self, session_id: str, cwd: Path) -> TranscriptSummary:
         """Parse the agent's transcript file for `session_id` into a summary."""
+        ...
+
+    def read_tail(self, transcript_path: Path) -> TranscriptTail | None:
+        """Shape of the last few records of `transcript_path`, for classification.
+
+        Takes a path rather than `(session_id, cwd)` on purpose: this is called
+        on every `gw status` render and every `--watch` tick, and the path is
+        already on the `SessionRecord`. Going through `read_transcript`'s
+        lookup instead would re-glob the agent's whole session store each time
+        (codex walks `~/.codex/sessions` recursively).
+
+        Implementations read a bounded window from the *end* of the file
+        (`agents._tail`) so cost doesn't scale with transcript size. Return None
+        when this agent's transcripts can't be parsed, or the window held
+        nothing usable — callers then fall back to the mtime heuristic.
+        """
         ...
 
     def render_transcript(self, session_id: str, cwd: Path) -> str | None:

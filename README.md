@@ -409,7 +409,7 @@ gw config show                              # resolved config (file merged over 
 gw sync status                              # is background sync scheduled? when did it last run?
 ```
 
-Each session row in `gw status` carries an activity hint derived from the transcript's mtime: `● active` while the agent is producing output, `idle <age>` once it has gone quiet (done, or waiting on you). Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
+Each session row in `gw status` says what its agent is doing, read off the shape of the transcript rather than the file's mtime: `● working` while a tool call is outstanding, `◆ needs you` when the last turn ended on a question, `✓ done` when it finished without one. Agents whose transcripts gw can't parse (gemini, antigravity) keep the blunter mtime reading — `● working` while the file moves, `idle <age>` once it stops. Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
 
 `gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
 
@@ -417,10 +417,11 @@ Each session row in `gw status` carries an activity hint derived from the transc
 
 Once you have thirty tracked tasks, the full tree is three hundred lines and the two agents actually working are somewhere in the middle of it. `--active` keeps only the tasks with something in flight:
 
+- a session the transcript says is `● working` — mid tool call, however long ago the file last moved,
 - a session whose transcript has been written within `defaults.activity_grace_seconds` (default 900 — fifteen minutes), or
 - a live headless run, detected from its pid file.
 
-The grace window is deliberately much wider than the two minutes behind the `● active` badge. An agent that stops to ask you a question goes quiet almost immediately, and that is exactly when you want it still on screen — so `● active` and `idle 6m` both stay, `idle 2h` doesn't. A live headless run is a second, independent signal: it has no terminal and can go a long time between transcript writes, so it earns a `⚡ headless` badge and stays regardless of mtime. Projects with nothing in flight drop out entirely rather than rendering an empty heading.
+The first one is the case mtime could never see: an agent twenty minutes into a single tool call writes nothing, and used to drop off the dashboard exactly while it was busiest. The grace window stays as a second signal, deliberately much wider than the two minutes behind the mtime fallback — an agent that stops to ask you a question goes quiet almost immediately, and that is exactly when you want it still on screen, so `◆ needs you 6m` stays and `idle 2h` doesn't. A live headless run is a third, independent signal: it has no terminal and can go a long time between transcript writes, so it earns a `⚡ headless` badge and stays regardless. Projects with nothing in flight drop out entirely rather than rendering an empty heading.
 
 `--watch` (`-w`) redraws in place every `--interval` seconds (default 2) until you Ctrl-C. Together they're the thing you leave open on a second monitor:
 
@@ -509,7 +510,9 @@ changes, so a quiet day produces none:
 
 | Event | Fires when |
 |---|---|
-| `agent-idle` | a session that was producing output goes quiet |
+| `agent-needs-you` | a session's last turn ended on a question — the body carries the question |
+| `agent-done` | a session finished a turn with nothing pending |
+| `agent-idle` | a session went quiet and its transcript can't say which of the two it was |
 | `pr-merged` | the PR's state becomes `MERGED` |
 | `parent-merged` | a task you're stacked on landed, so your branch needs a rebase |
 | `checks-failed` / `checks-passed` | CI flips |
@@ -580,8 +583,9 @@ agent = "claude"                  # "claude" | "codex" | "gemini" | "antigravity
 windowing = "inline"              # "inline" | "tmux" | "headless" (see Headless windowing below)
 summary_ttl_seconds = 30          # how long a session summary is considered fresh
 unsafe = true                     # spawn agents with their bypass-permission flag (see below)
-activity_active_seconds = 120     # transcript touched within this → `● active`; older → `idle <age>`
-activity_grace_seconds = 900      # how long a session stays on the `gw status --active` dashboard
+activity_active_seconds = 120     # mtime fallback for agents gw can't classify: newer → `● working`, older → `idle`
+activity_grace_seconds = 900      # how long a session stays on `gw status --active`, and how long a
+                                  # transcript claiming to be mid tool call is believed before silence wins
 
 [linear]
 # Literal key, or an `op://vault/item/field` reference resolved via the 1Password CLI.
@@ -599,7 +603,7 @@ prune = true                      # auto-prune merged AND clean tasks; never for
 scratch_prune_days = 0            # prune scratch spaces idle > N days (0 = off)
 notify = "auto"                   # "auto" (macOS notifications on darwin) | "macos" | "command" | "off"
 notify_command = []               # argv for notify = "command"; title and body are appended
-notify_events = ["agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
+notify_events = ["agent-needs-you", "agent-done", "agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
 
 [setup]                           # applied to every freshly materialized worktree (above)
 copy = [".env"]                   # gitignored files to copy in from the project root
@@ -646,7 +650,7 @@ gw run eng-123 --new --windowing headless --prompt "rerun the failing tests"
 - stdin is `/dev/null`, so an agent that asks for input gets EOF instead of hanging.
 - The run survives the shell that launched it — a cron slot or a queue worker can exit straight away.
 
-To be told when it finishes, install background sync (`gw sync install`) and keep the `agent-idle` event on: it fires once, on the edge, when the session's transcript goes quiet. That's the whole notification path — nothing waits on the agent, so its exit status isn't recorded. Check the log for a run that failed to start.
+To be told when it finishes, install background sync (`gw sync install`) and keep the `agent-done` event on: it fires once, on the edge, when the transcript shows the turn completed with nothing pending. If the agent stopped to ask something instead, you get `agent-needs-you` with the question in the body. That's the whole notification path — nothing waits on the agent, so its exit status isn't recorded. Check the log for a run that failed to start.
 
 Three things headless mode won't do:
 
@@ -654,7 +658,7 @@ Three things headless mode won't do:
 - **Take input.** `gw session send` refuses — there's no prompt sitting there to type into.
 - **Ask permission.** Keep `unsafe = true` (the default). Without it the agent stops at its first approval prompt with nobody to answer, which looks like a hang; `gw` warns but doesn't refuse.
 
-Also note that `agent-idle` needs a transcript gw can read, which today means claude and codex. A headless gemini or antigravity run completes silently.
+Also note that `agent-done` and `agent-needs-you` need a transcript gw can read, which today means claude and codex. A headless gemini or antigravity run falls back to `agent-idle` off the file's mtime.
 
 ### Talk to a running agent
 
@@ -683,7 +687,7 @@ For unattended runs (`--windowing headless`) each agent is launched in its print
 
 Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
-`gw doctor` checks which binaries are on PATH and resolves the Linear key. It also warns, per agent, when `gw` can't parse that agent's transcripts — gemini and antigravity keep their history somewhere `gw` doesn't read, so their sessions have no rolling summary, no LLM description, no turn count, and never fire an `agent-idle` notification.
+`gw doctor` checks which binaries are on PATH and resolves the Linear key. It also warns, per agent, when `gw` can't parse that agent's transcripts — gemini and antigravity keep their history somewhere `gw` doesn't read, so their sessions have no rolling summary, no LLM description, no turn count, and can never report `◆ needs you` or `✓ done` — only the blunter mtime reading.
 
 ### Unsafe mode (skip permission prompts)
 

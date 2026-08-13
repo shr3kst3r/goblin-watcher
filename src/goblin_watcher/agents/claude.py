@@ -14,12 +14,15 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goblin_watcher.agents._tail import tail_records, tail_text
 from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
 from goblin_watcher.agents.base import (
     PARSEABLE_TRANSCRIPTS,
+    LastRole,
     RawSession,
     TranscriptCapability,
     TranscriptSummary,
+    TranscriptTail,
 )
 
 # Claude Code's cwd encoding replaces any character that isn't an ASCII letter,
@@ -52,7 +55,7 @@ class ClaudeAgent:
     ) -> list[str]:
         # `-p` (print mode) runs the turn to completion and exits, writing the
         # final result to stdout. The transcript still lands in the usual
-        # per-cwd JSONL, so session discovery and `gw sync`'s agent-idle edge
+        # per-cwd JSONL, so session discovery and `gw sync`'s activity edges
         # work exactly as they do for an interactive run.
         del cwd
         cmd = self._prefix(unsafe)
@@ -122,6 +125,9 @@ class ClaudeAgent:
     def render_transcript(self, session_id: str, cwd: Path) -> str | None:
         path = self._project_dir(cwd) / f"{session_id}.jsonl"
         return _render_transcript(path)
+
+    def read_tail(self, transcript_path: Path) -> TranscriptTail | None:
+        return _read_tail(transcript_path)
 
 
 def _iter_messages(path: Path):
@@ -342,6 +348,85 @@ def _extract_full_text(msg: dict) -> str | None:
     if len(text) > _FULL_MESSAGE_CAP:
         text = text[: _FULL_MESSAGE_CAP - 1] + "…"
     return text
+
+
+# ---------------------------------------------------------------------------
+# Tail shape, for idle classification (see `goblin_watcher.activity`).
+
+
+def _blocks(msg: dict) -> list[dict]:
+    inner = msg.get("message") or msg
+    content = inner.get("content")
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict)]
+
+
+def _joined_text(msg: dict) -> str | None:
+    """Every text block of `msg`, concatenated in order. None when there is none."""
+    inner = msg.get("message") or msg
+    content = inner.get("content")
+    if isinstance(content, str):
+        return content or None
+    chunks = [b.get("text") or "" for b in _blocks(msg) if b.get("type") == "text"]
+    joined = "\n".join(c for c in chunks if c)
+    if joined:
+        return joined
+    text = inner.get("text")
+    return text if isinstance(text, str) and text else None
+
+
+def _read_tail(path: Path) -> TranscriptTail | None:
+    """Classify-able shape of the end of a claude JSONL transcript.
+
+    A `tool_use` block with no later `tool_result` carrying its id is the
+    agent mid-call. Tool results arrive as records with `type: "user"`, so they
+    are matched off and then skipped — counting one as a human turn is what
+    would make a busy agent look like it was waiting on you.
+
+    Sidechain records (subagent traffic) are skipped entirely: while a subagent
+    runs, the *parent's* `Task` tool_use is itself unmatched, so the main
+    thread already reads as working without double-counting the child's calls.
+    """
+    records = tail_records(path)
+    if not records:
+        return None
+    pending: set[str] = set()
+    last_role: LastRole | None = None
+    last_assistant: str | None = None
+    for msg in records:
+        if msg.get("isSidechain"):
+            continue
+        role = (msg.get("type") or msg.get("role") or "").lower()
+        if role in {"assistant", "ai"}:
+            last_role = "assistant"
+            for block in _blocks(msg):
+                if block.get("type") == "tool_use":
+                    tool_id = block.get("id")
+                    if isinstance(tool_id, str) and tool_id:
+                        pending.add(tool_id)
+            text = _joined_text(msg)
+            if text:
+                last_assistant = tail_text(text)
+        elif role in {"user", "human"}:
+            results = [b for b in _blocks(msg) if b.get("type") == "tool_result"]
+            for block in results:
+                tool_id = block.get("tool_use_id")
+                if isinstance(tool_id, str):
+                    pending.discard(tool_id)
+            if results or msg.get("isMeta"):
+                continue
+            last_role = "user"
+            # A human turn supersedes whatever the agent last said: the answer
+            # to "did it end on a question" is now "it was answered".
+            last_assistant = None
+    if last_role is None:
+        return None
+    return TranscriptTail(
+        pending_tool=bool(pending),
+        last_role=last_role,
+        last_assistant=last_assistant,
+    )
 
 
 def _render_transcript(path: Path) -> str | None:

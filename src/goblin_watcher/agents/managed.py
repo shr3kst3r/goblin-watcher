@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from goblin_watcher.agents.base import RawSession, TranscriptCapability, TranscriptSummary
+from goblin_watcher.agents.base import (
+    RawSession,
+    TranscriptCapability,
+    TranscriptSummary,
+    TranscriptTail,
+)
 from goblin_watcher.errors import GoblinError
 
 
@@ -186,6 +191,12 @@ class ManagedAgent:
 
     def render_transcript(self, session_id: str, cwd: Path) -> str | None:
         del session_id, cwd
+        return None
+
+    def read_tail(self, transcript_path: Path) -> TranscriptTail | None:
+        # Transcript events stream from the remote sandbox (`stream_events`);
+        # nothing lands on local disk for the classifier to read.
+        del transcript_path
         return None
 
     def env(self) -> dict[str, str]:
