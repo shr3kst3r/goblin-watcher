@@ -57,7 +57,7 @@ src/goblin_watcher/
 ├── agents/                # Agent protocol + claude/codex/gemini/antigravity impls + launcher
 ├── windowing/             # Windower protocol + Inline + Tmux + Headless impls
 ├── sync/                  # background sync: engine, journal, indicator cache, notify, launchd
-├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / sync / doctor / history / version)
+├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / diff / sync / doctor / history / version)
 └── templates/spawn_prompt.md
 ```
 
@@ -173,6 +173,16 @@ Four things to keep true when touching this:
 - **Suggestable modes are `ModeSpec.suggest_when`, never a name.** A mode with no `suggest_when` is never suggested, and a returned name that isn't in the candidate list is dropped at parse time.
 
 `description.run_llm` is gw's only cheap-model call; classification shares the `description_agent` / `description_model` pair rather than adding a second LLM surface. Off switches: `--no-classify`, `defaults.classify_tickets`, `GW_CLASSIFY=off`, or `description_agent = "off"`. `tests/conftest.py` sets `GW_CLASSIFY=off` in `isolated_xdg` — **no test may reach a real model**; unset it deliberately and patch `description.run_llm` when testing this path.
+
+## Diffs
+
+`commands/diff.py` owns both `gw diff` and the `--diffstat` annotation `gw status` renders (`diff.status_suffix`). Three invariants:
+
+- **Committed ranges are three-dot (`base...branch`).** That's the merge-base comparison a PR shows. Two-dot reports everything the base branch has gained since the task started as a reversion. (`commands/pr._pr_body` still uses two-dot via `git.diffstat`; leave that alone unless you're fixing it deliberately.)
+- **Diffs are read from the project root, not the worktree.** Refs are shared, so an archived task — worktree dropped, branch kept — still diffs. Only the uncommitted overlay touches the worktree, and only when it's actually there.
+- **`git.diff_range` is the single primitive** (`git diff [--stat] <range_spec>`, tolerant of unresolvable refs). `git.diffstat` and `git.commits_between` sit on top of it. Don't add another diff shell-out.
+
+Untracked files are listed separately (`git.untracked_files`) because `git diff` can't see them, and a brand-new file from an agent that hasn't committed is exactly the case you're looking for. See `docs/designs/inspecting-changes.md`.
 
 ## Adding an agent
 

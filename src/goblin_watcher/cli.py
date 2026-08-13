@@ -22,6 +22,9 @@ from goblin_watcher.commands import (
     describe as describe_cmd,
 )
 from goblin_watcher.commands import (
+    diff as diff_cmd,
+)
+from goblin_watcher.commands import (
     doctor as doctor_cmd,
 )
 from goblin_watcher.commands import (
@@ -110,6 +113,9 @@ app.command(
     help="Create a scratch space: a plain directory not associated with any project.",
 )(scratch_cmd.scratch)
 app.command("status", help="Tree view of projects, tasks, and sessions.")(status_cmd.status)
+app.command("diff", help="Show what a task's branch changed: commits, diffstat, and patch.")(
+    diff_cmd.diff
+)
 app.command("doctor", help="Check dependencies and configuration.")(doctor_cmd.doctor)
 app.command("completion", help="Print a shell completion script (zsh/bash/fish).")(
     completion_cmd.completion

@@ -109,6 +109,7 @@ gw gh-<N> [options]                    → sugar over `gw new --issue`
 gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir [options]
 gw run [PATH|TASK-ID] [options]
 gw status
+gw diff [PATH|TASK-ID] [options]
 
 gw project new|ls|info|rm
 gw task ls|show|rm
