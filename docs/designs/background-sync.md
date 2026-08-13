@@ -130,6 +130,11 @@ once and a quiet day produces zero notifications:
 
 - `agent-idle` — a session's transcript stopped being written (active → idle only)
 - `pr-merged` — PR state became `MERGED`
+- `parent-merged` — a task stacked on this one (`Task.parent_task`) needs a rebase,
+  because the branch under it just landed. Rides the parent's `pr-merged` edge, so
+  it inherits once-per-transition for free and reaches the children while the
+  parent record still exists (step 5 runs before the prune in step 7). The
+  notification names the *child* — that's the branch with work to do.
 - `checks-failed` / `checks-passed` — CI rollup flipped
 - `prunable` — a merged branch that can't be auto-pruned because it's dirty
 
@@ -214,7 +219,7 @@ prune = true               # merged + clean tasks; never forces
 scratch_prune_days = 0     # 0 disables; scratch has no merge signal, only idleness
 notify = "auto"            # auto | macos | command | off
 notify_command = []        # argv; title and body appended
-notify_events = ["agent-idle", "pr-merged", "checks-failed", "checks-passed", "prunable"]
+notify_events = ["agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
 ```
 
 ## Files

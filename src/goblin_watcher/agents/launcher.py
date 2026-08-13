@@ -13,7 +13,7 @@ from typing import cast
 from goblin_watcher import gh, prompt_addition, sessions, state
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.console import console
-from goblin_watcher.errors import TaskNotFoundError
+from goblin_watcher.errors import GoblinError, TaskNotFoundError
 from goblin_watcher.models import AgentName, GhIssue, Project, SessionRecord, Task
 from goblin_watcher.review_feed import RepoReview, ReviewFeed, clip_body, clip_hunk
 from goblin_watcher.windowing.base import Windower
@@ -86,6 +86,31 @@ def _persist_record(
         return updated
 
 
+def _check_headless(choice: SessionChoice, unsafe: bool) -> None:
+    """Guard the headless path before anything is persisted or spawned.
+
+    Resume is refused rather than approximated: an agent's print mode is
+    "run this prompt to completion", and resuming a conversation with nothing
+    to say would either hang on stdin or burn a turn to no effect. Starting a
+    fresh headless run with the follow-up as its prompt is the honest
+    equivalent.
+    """
+    if isinstance(choice, Resume):
+        raise GoblinError(
+            "Headless windowing can only start a fresh session, not resume one.",
+            hint="Drop --session (optionally passing --prompt with what you want done), "
+            "or pick --windowing inline/tmux to resume interactively.",
+        )
+    if not unsafe:
+        # Not fatal — some agents' print mode is useful read-only — but an
+        # unattended run that stops dead at its first permission prompt looks
+        # like a hang, so say so up front.
+        console.print(
+            "[hint]Warning[/]: headless run without --unsafe. The agent will be blocked "
+            "on any tool call that needs approval, with nobody there to approve it."
+        )
+
+
 def launch(
     *,
     project: Project,
@@ -96,6 +121,8 @@ def launch(
     unsafe: bool = False,
 ) -> tuple[int, Task]:
     """Run the agent for `task`. Returns (exit_code, updated_task)."""
+    if windower.headless:
+        _check_headless(choice, unsafe)
     # A multi-repo task launches in its workspace (each repo is a subdir);
     # a single-repo task launches directly in its worktree.
     cwd = task.agent_cwd
@@ -111,9 +138,11 @@ def launch(
     preassigned: str | None = None
     if isinstance(choice, Fresh):
         preassigned = agent.new_session_id()
-        cmd = agent.spawn_command(
-            prompt=choice.prompt, cwd=cwd, unsafe=unsafe, session_id=preassigned
-        )
+        # A headless windower has no terminal to draw a TUI on, so the agent
+        # runs its print/exec mode instead (`_check_headless` has already
+        # ruled out the resume branch).
+        build = agent.headless_command if windower.headless else agent.spawn_command
+        cmd = build(prompt=choice.prompt, cwd=cwd, unsafe=unsafe, session_id=preassigned)
     else:
         cmd = agent.resume_command(session_id=choice.session_id, cwd=cwd, unsafe=unsafe)
 
@@ -146,11 +175,11 @@ def launch(
         task=task, cmd=cmd, cwd=cwd, env=extra_env, session_id=pre_record.session_id
     )
 
-    # Tmux hands the agent off to a background pane and returns while the agent
-    # is still starting up, so a post-launch `capture_session_id` would race
-    # with the agent's first write. Leave the pre-saved record in place — for
-    # agents with a preassigned id it already holds the real one.
-    if windower.name == "tmux":
+    # Detaching windowers (tmux, headless) return while the agent is still
+    # starting up, so a post-launch `capture_session_id` would race with its
+    # first write. Leave the pre-saved record in place — for agents with a
+    # preassigned id it already holds the real one.
+    if windower.detaches:
         return exit_code, task
 
     # A preassigned id IS the session's id by construction; capturing would

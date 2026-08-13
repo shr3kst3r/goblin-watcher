@@ -57,6 +57,25 @@ def test_status_renders_linear_state_when_present(isolated_xdg: Path, tmp_path: 
     assert "Do the thing" in res.output
 
 
+def test_status_renders_the_task_status(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Rich reads `[open]` as a markup tag and swallows it, so the status has to
+    be rendered in parens or it never reaches the user at all."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    # A hyphenated status is the harder case: Rich parses `[pr-open]` too.
+    state.save_task(proj, task.model_copy(update={"status": "pr-open"}))
+
+    res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    assert "(pr-open)" in res.output
+
+
 def test_status_omits_linear_state_when_no_linear(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = tmp_path / "alpha"
     _init_repo(repo)
@@ -408,3 +427,65 @@ def test_status_shows_idle_for_old_transcript(isolated_xdg: Path, tmp_path: Path
     assert res.exit_code == 0, res.output
     assert "● active" not in res.output
     assert "idle" in res.output
+
+
+def _bootstrap_task_with_usage(tmp_path: Path, usage: list) -> None:
+    """A project with one task carrying one claude session with `usage`."""
+    from datetime import UTC, datetime
+
+    from goblin_watcher.models import SessionRecord
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    now = datetime.now(UTC)
+    record = SessionRecord(
+        agent="claude",
+        session_id="s1",
+        created_at=now,
+        last_used_at=now,
+        summary="working",
+        summary_updated_at=now,
+        usage=usage,
+    )
+    state.save_task(proj, task.model_copy(update={"sessions": [record]}))
+
+
+def test_status_cost_rolls_up_session_task_and_project(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.models import UsageBucket
+
+    _bootstrap_task_with_usage(
+        tmp_path,
+        [UsageBucket(model="claude-opus-5", input_tokens=1_000_000, output_tokens=1_000_000)],
+    )
+    runner = CliRunner(env={"COLUMNS": "400"})
+    res = runner.invoke(app, ["status", "--cost", "--no-linear"])
+    assert res.exit_code == 0, res.output
+    # $5 input + $25 output, shown on the session, its task, its project, and the total.
+    assert res.output.count("~$30.00") == 4
+    assert "1.0M in · 1.0M out" in res.output
+    assert "list prices" in res.output
+
+
+def test_status_without_cost_stays_quiet_about_tokens(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.models import UsageBucket
+
+    _bootstrap_task_with_usage(
+        tmp_path, [UsageBucket(model="claude-opus-5", output_tokens=1_000_000)]
+    )
+    runner = CliRunner()
+    res = runner.invoke(app, ["status", "--no-linear"])
+    assert res.exit_code == 0, res.output
+    assert "$" not in res.output
+
+
+def test_status_cost_says_so_when_nothing_recorded(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_task_with_usage(tmp_path, [])
+    runner = CliRunner()
+    res = runner.invoke(app, ["status", "--cost", "--no-linear"])
+    assert res.exit_code == 0, res.output
+    assert "No token usage recorded" in res.output

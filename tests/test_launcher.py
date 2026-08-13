@@ -2,12 +2,14 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from goblin_watcher import state
 from goblin_watcher.agents.base import RawSession, TranscriptSummary
 from goblin_watcher.agents.launcher import Fresh, Resume, launch
 from goblin_watcher.cli import app
+from goblin_watcher.errors import GoblinError
 from goblin_watcher.models import Task
 from goblin_watcher.review_feed import ReviewFeed
 
@@ -21,6 +23,7 @@ class _StubAgent:
         self._preassign = preassign_id
         self.capture_calls = 0
         self.spawn_session_ids: list[str | None] = []
+        self.headless_session_ids: list[str | None] = []
 
     def spawn_command(
         self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
@@ -28,6 +31,13 @@ class _StubAgent:
         del prompt, cwd, unsafe
         self.spawn_session_ids.append(session_id)
         return ["stub", "spawn"]
+
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        del prompt, cwd, unsafe
+        self.headless_session_ids.append(session_id)
+        return ["stub", "-p"]
 
     def new_session_id(self) -> str | None:
         return self._preassign
@@ -59,6 +69,8 @@ class _AsyncWindower:
     """Mimics tmux: returns immediately after dispatch, without running the agent."""
 
     name = "tmux"
+    detaches = True
+    headless = False
 
     def __init__(self) -> None:
         self.observed_task: Task | None = None
@@ -85,6 +97,8 @@ class _AsyncWindower:
 
 class _InlineWindower:
     name = "inline"
+    detaches = False
+    headless = False
 
     def run(
         self,
@@ -333,6 +347,8 @@ class _DeletingWindower:
     """Mimics the task being removed while the agent runs (`gw task rm`, sync prune)."""
 
     name = "inline"
+    detaches = False
+    headless = False
 
     def run(
         self,
@@ -559,6 +575,99 @@ def test_build_seed_prompt_without_any_ticket_says_so(isolated_xdg: Path, tmp_pa
     seed = build_seed_prompt(_bootstrap(tmp_path))
     assert "(no Linear issue or GitHub issue attached — fresh task)" in seed
     assert "SPIKE-FOO" in seed
+
+
+class _HeadlessWindower:
+    """Mimics the headless windower: no terminal, and returns while it runs."""
+
+    name = "headless"
+    detaches = True
+    headless = True
+
+    def __init__(self) -> None:
+        self.observed_cmd: list[str] | None = None
+
+    def run(
+        self,
+        *,
+        task: Task,
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        session_id: str | None = None,
+    ) -> int:
+        del task, cwd, env, session_id
+        self.observed_cmd = cmd
+        return 0
+
+    def is_live(self, task: Task) -> bool:
+        del task
+        return False
+
+
+def test_headless_windower_uses_the_agents_print_mode(isolated_xdg: Path, tmp_path: Path) -> None:
+    """A windower with no terminal must not launch the agent's TUI (gh-15)."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+
+    agent = _StubAgent(preassign_id="pre-id")
+    windower = _HeadlessWindower()
+    exit_code, _ = launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Fresh(prompt="kick off"),
+        windower=windower,
+    )
+
+    assert exit_code == 0
+    assert windower.observed_cmd == ["stub", "-p"]
+    assert agent.spawn_session_ids == []
+    # The preassigned id rides along, so the log file and the SessionRecord
+    # agree on which run they belong to.
+    assert agent.headless_session_ids == ["pre-id"]
+    # Detaching windower: nothing is reconciled after dispatch, and the
+    # pre-dispatch record is what persists.
+    assert agent.capture_calls == 0
+    [persisted] = state.list_tasks(proj)
+    assert [s.session_id for s in persisted.sessions] == ["pre-id"]
+
+
+def test_headless_refuses_to_resume(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Print mode runs one prompt to completion; there is no conversation to
+    rejoin, so the launcher says so instead of spawning something useless."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    windower = _HeadlessWindower()
+
+    with pytest.raises(GoblinError) as exc:
+        launch(
+            project=proj,
+            task=task,
+            agent=_StubAgent(),
+            choice=Resume(session_id="whatever"),
+            windower=windower,
+        )
+    assert "only start a fresh session" in exc.value.message
+    # Refused before anything was dispatched or written.
+    assert windower.observed_cmd is None
+    [persisted] = state.list_tasks(proj)
+    assert persisted.sessions == []
+
+
+def test_headless_without_unsafe_warns(isolated_xdg: Path, tmp_path: Path, capsys) -> None:
+    """An unattended run blocked on a permission prompt looks like a hang."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    launch(
+        project=proj,
+        task=task,
+        agent=_StubAgent(),
+        choice=Fresh(prompt="kick off"),
+        windower=_HeadlessWindower(),
+        unsafe=False,
+    )
+    assert "without --unsafe" in capsys.readouterr().out
 
 
 def _feed(**over: object) -> ReviewFeed:

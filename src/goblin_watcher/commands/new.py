@@ -17,7 +17,7 @@ from goblin_watcher.linear import LinearClient, parse_identifier
 from goblin_watcher.models import GhIssue, LinearIssue, Project, Task
 from goblin_watcher.slug import branch_slug, random_branch_name, slugify
 from goblin_watcher.task_resolver import resolve_project
-from goblin_watcher.windowing import get_windower
+from goblin_watcher.windowing import WINDOWING_MODES, get_windower
 
 
 def _now() -> datetime:
@@ -116,6 +116,24 @@ def _refresh_base(repo: Path, base: str) -> git.PullBaseResult:
     elif res.outcome in {"up_to_date", "no_remote_branch"}:
         console.print(f"[muted]{res.detail}[/]")
     return res
+
+
+def _parent_task_for_base(proj: Project, base: str) -> str | None:
+    """Id of the task that owns `base`, or None when nothing does.
+
+    This is what turns `--from <branch>` into a recorded stack (gh-20): without
+    it a four-deep chain is four unrelated tasks. The project's default branch
+    never counts, even if some task happens to sit on it — "stacked on main" is
+    just the ordinary case, and treating it as a parent would nest every task
+    under whoever owns that branch.
+
+    Returns an id, not a `Task`: readers look the record up fresh, because the
+    parent may well be pruned before the child is next rendered.
+    """
+    if base == proj.default_branch:
+        return None
+    owner = state.find_task_by_branch(proj, base)
+    return owner.id if owner is not None else None
 
 
 def _load_existing_task(proj: Project, task_id: str) -> Task | None:
@@ -284,8 +302,9 @@ def new(
     windowing: str | None = typer.Option(
         None,
         "--windowing",
-        help="Overrides config.",
-        click_type=click.Choice(["inline", "tmux"]),
+        help="Where the agent runs. Overrides config. 'headless' detaches an "
+        "unattended print-mode run and logs it to <project>/.goblin/logs/.",
+        click_type=click.Choice(list(WINDOWING_MODES)),
     ),
     unsafe: bool | None = typer.Option(
         None,
@@ -431,6 +450,8 @@ def new(
         ("base", task.base_branch),
         ("worktree", str(task.worktree_path)),
     ]
+    if task.parent_task is not None:
+        settings.append(("stacked on", f"task {task.parent_task}"))
     if task.is_multi_repo:
         settings.append(("workspace", str(task.workspace_path)))
         for r in task.secondary_repos:
@@ -554,6 +575,7 @@ def _from_new_branch(
             branch=final_branch,
             worktree_path=worktree_dir,
             base_branch=base,
+            parent_task=_parent_task_for_base(proj, base),
             created_at=_now(),
         ),
         materialized=True,
@@ -695,6 +717,9 @@ def _from_pr(
             branch=info.head_ref,
             worktree_path=worktree_dir,
             base_branch=info.base_ref,
+            # A PR targeting something other than the default branch is a stacked
+            # PR; if we track the task that owns that branch, record the link.
+            parent_task=_parent_task_for_base(proj, info.base_ref),
             pr_url=info.url,
             status="pr-open",
             created_at=_now(),
@@ -787,6 +812,7 @@ def _from_linear(
             branch=branch,
             worktree_path=worktree_dir,
             base_branch=base,
+            parent_task=_parent_task_for_base(proj, base),
             created_at=_now(),
         ),
         materialized=materialized,
@@ -954,6 +980,7 @@ def _from_issue(
             branch=branch,
             worktree_path=worktree_dir,
             base_branch=base,
+            parent_task=_parent_task_for_base(proj, base),
             created_at=_now(),
         ),
         materialized=materialized,

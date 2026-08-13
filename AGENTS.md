@@ -46,12 +46,13 @@ src/goblin_watcher/
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
 ├── review_feed.py         # PR review threads + failing-check logs for `gw run --address-review`
+├── usage.py               # token rollups + list-price cost estimates (docs/designs/token-usage-and-cost.md)
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── worktree_setup.py      # [setup] copy/link/run bootstrap applied to new worktrees (ADR 0007)
 ├── picker.py              # questionary-backed interactive session picker
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini/antigravity impls + launcher
-├── windowing/             # Windower protocol + Inline + Tmux impls
+├── windowing/             # Windower protocol + Inline + Tmux + Headless impls
 ├── sync/                  # background sync: engine, journal, indicator cache, notify, launchd
 ├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / sync / doctor / history / version)
 └── templates/spawn_prompt.md
@@ -115,7 +116,7 @@ Two invariants when touching this:
 ## Adding an agent
 
 The registered set is `claude`, `codex`, `gemini`, `antigravity` (Google Antigravity's `agy` CLI), plus `managed` (scaffold; see ADR 0002 and `docs/designs/sessions-and-windowing.md`). To wire another:
-1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `env`.
+1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `headless_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `env`.
 2. Add it to `models.AgentName`.
 3. Add it to `agents/registry.registry`.
 4. Add a row to `commands/doctor.py`'s binary check list. Agents with no local binary (e.g. `managed`) get a custom check function instead.
@@ -135,6 +136,16 @@ Resist adding entry-point discovery or a plugin system — keep it static.
 - `mark_idle = true` (default `false`) sets `monitor-silence <mark_idle_seconds>` on each task window — when the agent goes quiet (done or waiting for input), tmux marks the window with a `~` in the status bar. No bell, no banner, no focus-stealing. `mark_idle_seconds` defaults to `5`. Caveat: any agent that streams a heartbeat/spinner will never trigger this; verify your agent actually falls silent at its prompt.
 
 Test against a fake `tmux` (see `tests/test_windowing_tmux.py`) — never call the real binary in tests.
+
+## Headless mode
+
+`windowing = "headless"` (or `--windowing headless`) routes spawns through `HeadlessWindower`, for unattended runs from cron, a queue, or another agent. It `Popen`s the agent's print mode (`Agent.headless_command` — `claude -p`, `codex exec`, `agy -p`, `gemini -p`) with `start_new_session=True` and stdin on `/dev/null`, appends stdout+stderr to `<project>/.goblin/logs/<task>-<session>.log`, records the pid in a sibling `.pid`, and returns 0 as soon as the spawn succeeds.
+
+It is deliberately narrow: fresh sessions only (a `Resume` choice is refused), no exit-status capture, and `send` raises. Completion rides on `gw sync`'s edge-triggered `agent-idle` notification. Keep `unsafe = true` or the agent stalls at its first permission prompt with nobody to answer. See ADR 0007.
+
+`Windower` declares two booleans the launcher branches on: `detaches` (run returns while the agent is still going, so post-run reconciliation is skipped) and `headless` (no terminal, so build the argv from `headless_command`). Never reintroduce a `windower.name == "..."` check for either.
+
+Patch `subprocess.Popen` in tests (`tests/test_windowing_headless.py`) — never spawn a real agent.
 
 ## What not to refactor
 

@@ -99,7 +99,7 @@ Accepts three forms, parsed by `gh.parse_issue_ref`:
 
 1. Resolve project (via `--project NAME`, or the interactive picker — `task_resolver.resolve_project` auto-picks when only one is registered).
 2. Final branch = `{project.branch_prefix}{name}` with collision suffix (`-2`, `-3`, ...) if needed.
-3. Base = `--from <branch>` or `project.default_branch`. If `--from` names a branch that's only on origin, gw fetches and creates a local tracking branch before the worktree add.
+3. Base = `--from <branch>` or `project.default_branch`. If `--from` names a branch that's only on origin, gw fetches and creates a local tracking branch before the worktree add. If it names a branch gw already tracks, the stack is recorded — see [Stacked tasks](#stacked-tasks---from).
 4. `git worktree add -b <branch> <dest> <base>` creates the worktree + branch.
 5. Task id derived from the branch slug.
 
@@ -185,6 +185,30 @@ GitHub only auto-closes across repositories when the PR author can write to the 
 
 The issue body is deliberately **not** copied into the PR body (unlike the Linear path, where reviewers may not have Linear access) — on GitHub the linked issue is one click away.
 
+## Stacked tasks (`--from`)
+
+`--from <branch>` bases a fresh branch on something other than `project.default_branch`. When that base turns out to be another task's **primary** branch, `commands/new._parent_task_for_base` records it as `Task.parent_task` — otherwise nothing is recorded (see the rules below). It applies wherever a base is chosen: `--linear`, `--issue`, `--branch-name`, `--branch-auto`, and `--pr` (whose base comes from the PR itself, so a stacked PR is detected without any flag).
+
+Two rules keep the link honest:
+
+- **The default branch is never a parent.** "Stacked on `main`" is the ordinary case; treating it as a stack would nest every task under whichever one happens to own that branch.
+- **An untracked base records nothing.** Stacking on a teammate's branch is legitimate and common, and there is no task to point at.
+
+The recorded id is what four surfaces read:
+
+| Surface | What it does |
+|---|---|
+| `gw status` | nests the child under its parent (`_stack_order` topologically sorts so parents render first) and appends `⤴ restack: <parent> merged` once the parent lands |
+| `gw task show` | prints a `stacked on <id> (branch …)` line |
+| `gw pr open` | adds a "Stacked on `<branch>`" section citing the parent's task and PR URL — primary repo only |
+| `gw sync` | fires `parent-merged` off the parent's `pr-merged` edge, naming the child |
+
+It stores an id rather than a branch name because the branch is exactly what disappears when the parent lands. That makes a dangling `parent_task` normal, not an error: `state.find_parent_task` returns `None` and the surfaces degrade to "no longer tracked" / omit the section. `gw task rename` repoints children (`commands/task._repoint_children`) so a record-only rename doesn't fake an orphan.
+
+Nothing rebases automatically. Rewriting history in a worktree that may have a live agent in it is not a cleanup an unattended pass is allowed to do (same reasoning as "pruning never forces", ADR 0005), so the child gets told and the human decides. `gw task restack` is the obvious follow-on and deliberately not built yet.
+
+`parent_task` lives on `Task`, not `TaskRepo`: it describes the primary branch. A secondary repo in a multi-repo workspace sits on its own project's default branch, so the PR body skips the stack note for it.
+
 ## Multi-repo tasks
 
 A task can span more than one repository (ADR 0003). The extra repos are
@@ -242,6 +266,7 @@ and `gw task rm` tears down every worktree + the workspace directory.
 ## Tests
 
 - `tests/test_slug.py` — slug rules for the branch name builder.
+- `tests/test_stacked_tasks.py` — `--from` parent resolution and every surface that reads it.
 - `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`.
 - `tests/test_cli_linear_flow.py` — end-to-end for `--linear` (with `pytest-httpx` mock).
 - `tests/test_cli_issue_flow.py` — end-to-end for `--issue` and the `gw gh-42` shorthand.

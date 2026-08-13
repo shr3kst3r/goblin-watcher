@@ -77,6 +77,13 @@ def test_managed_agent_resume_raises_unwired_error() -> None:
         agent.resume_command(session_id=None, cwd=Path("/tmp"))
 
 
+def test_managed_agent_headless_raises_unwired_error() -> None:
+    """There is no local process to detach: the sandbox is already remote."""
+    agent = ManagedAgent()
+    with pytest.raises(GoblinError):
+        agent.headless_command(prompt="hi", cwd=Path("/tmp"))
+
+
 def test_managed_agent_read_only_protocol_methods_return_empty() -> None:
     agent = ManagedAgent()
     cwd = Path("/tmp")

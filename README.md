@@ -177,6 +177,22 @@ gw new --issue org/tracker#3 --project my-repo     # tracking issue in another r
 gw new --issue 42 --research                       # investigate and report back, don't implement
 ```
 
+#### `--from` — stacked branches
+
+`--from <branch>` bases the new task on something other than the default branch. When that branch belongs to a task gw already tracks, the link is recorded as `parent_task` on the new task, and the stack becomes visible instead of looking like unrelated work:
+
+- `gw status` nests the child under its parent, so a four-deep chain renders as one chain.
+- `gw task show` prints a `stacked on` line.
+- `gw pr open` adds a "Stacked on `<branch>`" section to the PR body, linking the parent's PR when it has one.
+- Once the parent's PR merges, `gw sync` fires a `parent-merged` notification naming the *child* — the branch that now needs rebasing.
+
+```bash
+gw new --branch-name feat/part-2 --from feat/part-1   # stacked on the feat/part-1 task
+gw new --pr 412                                       # a PR whose base is a tracked branch, too
+```
+
+Nothing rebases automatically. The default branch never counts as a parent, and an untracked base branch (a teammate's, say) records no link — there's no task to point at.
+
 #### `--research` — spawn an investigation instead of an implementation
 
 ```bash
@@ -350,11 +366,14 @@ gw pr open eng-123 --draft --notify-linear  # draft PR; also post the URL back t
 ```bash
 gw status                                   # tree: projects → tasks → sessions
 gw status --project my-repo            # limit to one project
+gw status --cost                            # same tree, annotated with tokens + estimated cost
 gw pr checks eng-123                        # one row per CI check: state, name, details URL
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
+gw session show <session-id>                # one session in full, including its token counts
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
 gw session send eng-123 "also fix the tests"  # type into a running agent's tmux pane
+gw history --cost                           # day-by-day token + cost rollup across every session
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
 gw config show                              # resolved config (file merged over defaults)
 gw sync status                              # is background sync scheduled? when did it last run?
@@ -363,6 +382,26 @@ gw sync status                              # is background sync scheduled? when
 Each session row in `gw status` carries an activity hint derived from the transcript's mtime: `● active` while the agent is producing output, `idle <age>` once it has gone quiet (done, or waiting on you). Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
 
 `gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
+
+### What did today cost?
+
+Claude's and codex's transcripts carry per-request token counts, so `gw` — the only thing that sees all N parallel sessions at once — can total them up:
+
+```bash
+gw session show <session-id>                # tokens + cost for one conversation
+gw status --cost                            # rolled up per session, per task, per project, plus a grand total
+gw history --cost --days 7                   # day by day, across everything
+```
+
+```
+ day           in     out  cache read  cache write     cost
+ 2026-08-13  3.8K  288.1K       73.6M         1.1M  ~$55.28
+ total       3.8K  288.1K       73.6M         1.1M  ~$55.28
+```
+
+Read the dollar figure as *what these tokens would have cost at published API rates* — it is an estimate, not a bill. It doesn't know about your subscription plan (where the marginal cost of a session is zero), negotiated rates, introductory pricing, or fast mode. Gemini and antigravity report nothing, because `gw` can't read their transcripts.
+
+Counts are parsed on the same pass that refreshes session summaries, so they cost no extra work and follow the same `summary_ttl_seconds` freshness rules — `gw history --cost` reads only what's already recorded, so run `gw status` or `gw session refresh` first if a session looks stale. Models `gw` has no rate for (codex's `gpt-*` models ship unpriced) still have their tokens counted; give them a price under `[cost.pricing]` and they join the dollar total.
 
 ### Add a fresh session to an existing task
 
@@ -419,6 +458,7 @@ changes, so a quiet day produces none:
 |---|---|
 | `agent-idle` | a session that was producing output goes quiet |
 | `pr-merged` | the PR's state becomes `MERGED` |
+| `parent-merged` | a task you're stacked on landed, so your branch needs a rebase |
 | `checks-failed` / `checks-passed` | CI flips |
 | `prunable` | a merged branch can't be auto-pruned because the worktree is dirty |
 
@@ -484,7 +524,7 @@ gw config edit                       # $EDITOR, validated on save
 ```toml
 [defaults]
 agent = "claude"                  # "claude" | "codex" | "gemini" | "antigravity"
-windowing = "inline"              # "inline" | "tmux"
+windowing = "inline"              # "inline" | "tmux" | "headless" (see Headless windowing below)
 summary_ttl_seconds = 30          # how long a session summary is considered fresh
 unsafe = true                     # spawn agents with their bypass-permission flag (see below)
 
@@ -504,13 +544,25 @@ prune = true                      # auto-prune merged AND clean tasks; never for
 scratch_prune_days = 0            # prune scratch spaces idle > N days (0 = off)
 notify = "auto"                   # "auto" (macOS notifications on darwin) | "macos" | "command" | "off"
 notify_command = []               # argv for notify = "command"; title and body are appended
-notify_events = ["agent-idle", "pr-merged", "checks-failed", "checks-passed", "prunable"]
+notify_events = ["agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
 
 [setup]                           # applied to every freshly materialized worktree (above)
 copy = [".env"]                   # gitignored files to copy in from the project root
 link = []                         # ... or symlink instead, e.g. "node_modules"
 run = ["uv sync --extra dev"]     # bootstrap commands, run in the new worktree
 timeout_seconds = 600             # per run step
+
+[cost]                            # rates behind `gw status --cost` / `gw history --cost`
+cache_read_multiplier = 0.1       # relative to the model's input rate
+cache_write_multiplier = 1.25     # 5-minute cache
+cache_write_1h_multiplier = 2.0   # 1-hour cache
+
+# Merged over gw's built-in table, keyed by the model id in the agent's
+# transcript. USD per million tokens. `gw config set` can't reach into a table —
+# use `gw config edit` for these.
+[cost.pricing."gpt-5-codex"]
+input = 1.25
+output = 10.0
 ```
 
 ## Tmux windowing
@@ -524,6 +576,31 @@ Set `windowing = "tmux"` in `config.toml`, or pass `--windowing tmux` on any spa
 
 Inline mode (default) just blocks on the agent process and returns when it exits.
 
+## Headless windowing (unattended runs)
+
+Set `windowing = "headless"`, or pass `--windowing headless` on a spawn command, to start an agent with no terminal at all:
+
+```bash
+gw new --issue 42 --windowing headless --prompt "fix this and open a PR"
+gw run eng-123 --new --windowing headless --prompt "rerun the failing tests"
+```
+
+`gw` starts the agent in the print mode every supported CLI already has (`claude -p`, `codex exec`, `agy -p`, `gemini -p`), detaches it into its own process group, and returns immediately:
+
+- stdout and stderr are appended to `<project>/.goblin/logs/<task>-<session>.log`, and the child's pid goes in a sibling `.pid` file. Both paths are printed at spawn.
+- stdin is `/dev/null`, so an agent that asks for input gets EOF instead of hanging.
+- The run survives the shell that launched it — a cron slot or a queue worker can exit straight away.
+
+To be told when it finishes, install background sync (`gw sync install`) and keep the `agent-idle` event on: it fires once, on the edge, when the session's transcript goes quiet. That's the whole notification path — nothing waits on the agent, so its exit status isn't recorded. Check the log for a run that failed to start.
+
+Three things headless mode won't do:
+
+- **Resume.** It only starts fresh sessions; print mode runs one prompt to completion. Start another headless run with the follow-up as its prompt.
+- **Take input.** `gw session send` refuses — there's no prompt sitting there to type into.
+- **Ask permission.** Keep `unsafe = true` (the default). Without it the agent stops at its first approval prompt with nobody to answer, which looks like a hang; `gw` warns but doesn't refuse.
+
+Also note that `agent-idle` needs a transcript gw can read, which today means claude and codex. A headless gemini or antigravity run completes silently.
+
 ### Talk to a running agent
 
 ```bash
@@ -536,7 +613,7 @@ The text is typed into the agent's pane and submitted, exactly as if you had att
 
 `gw` labels each pane with its session id when it opens it, so `--session` addresses one conversation on a task running several. With a single live pane the session is unambiguous and `--session` is optional. Panes that predate this labelling (or an agent spawned by hand) still take input as long as they're the only pane on the task.
 
-Inline windowing has no pane to address — the agent owns the terminal it was launched from — so `gw session send` says so rather than failing obscurely.
+Inline windowing has no pane to address — the agent owns the terminal it was launched from — so `gw session send` says so rather than failing obscurely. Headless runs refuse for their own reason: stdin is `/dev/null`.
 
 ## Agent support
 
@@ -546,6 +623,8 @@ Inline windowing has no pane to address — the agent owns the terminal it was l
 | **codex** | `codex "<prompt>"` | `codex resume` (codex's own picker) | Full — walks `~/.codex/sessions/**/rollout-*.jsonl`, matches tasks on `session_meta.cwd`, parses ids, summaries, turn counts |
 | **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | None — cwd-scoped checkpoints, no stable id; `list_sessions` / `read_transcript` are stubs, so sessions carry no summary |
 | **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Partial — conversation id recovered from `~/.gemini/antigravity-cli/cache/last_conversations.json`; transcripts live in SQLite and aren't parsed |
+
+For unattended runs (`--windowing headless`) each agent is launched in its print mode instead of the spawn column above: `claude -p`, `codex exec`, `agy -p`, `gemini -p`.
 
 Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
@@ -572,17 +651,19 @@ gw gh-<N>      [...any `gw new` flag]       # sugar for `gw new --issue <N>`
 gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--title ...] [--from ...] [--project NAME] [--with-project NAME]
        [--repo URL] [--agent ...] [--prompt ...] [--research] [--adversarial-review]
-       [--rm|--rm-force] [--no-launch] [--no-setup] [--windowing inline|tmux] [--unsafe|--no-unsafe]
+       [--rm|--rm-force] [--no-launch] [--no-setup]
+       [--windowing inline|tmux|headless] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
        [--research] [--adversarial-review] [--address-review]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
 gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
            [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
-gw status [--project NAME] [--no-linear] [--no-cache]   # tree view of projects → tasks → sessions
+gw status [--project NAME] [--no-linear] [--no-cache] [--cost]   # tree view of projects → tasks → sessions
 gw sync                                     # run one background-sync pass now, verbosely
 gw doctor                                   # binary + key resolution checks
 gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation (`gw history prune` trims it)
+gw history --cost [--days N]                # day-by-day token + cost rollup across every session (0 = all time)
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
 gw project new|ls|info|rm
@@ -615,6 +696,7 @@ Always reach for `gw <command> --help` for the full option list.
 ├── .goblin/
 │   ├── project.json                      # this project's record
 │   ├── setup.toml                        # optional; replaces the global [setup] table
+│   ├── logs/                             # headless runs: <task>-<session>.log + .pid
 │   └── tasks/
 │       ├── eng-123.json                  # one file per task; carries sessions[]
 │       └── .eng-123.lock                 # advisory lock sidecar for that task

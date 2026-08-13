@@ -20,7 +20,7 @@ from goblin_watcher.console import agent_badge, console, print_settings, print_s
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.models import Project, Task
 from goblin_watcher.slug import random_scratch_name, slugify
-from goblin_watcher.windowing import get_windower
+from goblin_watcher.windowing import WINDOWING_MODES, get_windower
 
 SCRATCH_PROJECT_NAME = "scratch"
 
@@ -99,8 +99,9 @@ def scratch(
     windowing: str | None = typer.Option(
         None,
         "--windowing",
-        help="Overrides config.",
-        click_type=click.Choice(["inline", "tmux"]),
+        help="Where the agent runs. Overrides config. 'headless' detaches an "
+        "unattended print-mode run and logs it to <project>/.goblin/logs/.",
+        click_type=click.Choice(list(WINDOWING_MODES)),
     ),
     unsafe: bool | None = typer.Option(
         None,
