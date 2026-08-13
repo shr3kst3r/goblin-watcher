@@ -3,7 +3,7 @@ from __future__ import annotations
 import click
 import typer
 
-from goblin_watcher import config, review_feed, sessions, state
+from goblin_watcher import config, linear_transitions, review_feed, sessions, state
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, Resume, build_seed_prompt
 from goblin_watcher.agents.launcher import launch as launch_agent
@@ -266,6 +266,11 @@ def run(
             ("unsafe", str(unsafe_mode).lower()),
         ]
     )
+    # Opt-in and fail-open (ADR 0012): unset config is a no-op, and a Linear that
+    # is down or slow costs one muted line, never the launch. Resuming counts as
+    # a session start too — the move is idempotent, so a ticket already in the
+    # target state costs one read and no write.
+    task = linear_transitions.apply(proj, task, "on_session_start")
     console.print(
         f"Launching {agent_badge(agent_name)} "
         f"({'resume' if isinstance(choice, Resume) else 'fresh'}) in [muted]{windowing_mode}[/]…"

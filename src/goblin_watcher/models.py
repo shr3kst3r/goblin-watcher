@@ -35,6 +35,37 @@ class LinearIssue(_Frozen):
     comments: list[LinearComment] = Field(default_factory=list)
 
 
+class LinearWorkflowState(_Frozen):
+    """One state in a Linear team's workflow (`Todo`, `In Progress`, …)."""
+
+    id: str
+    name: str
+
+
+class LinearIssueWorkflow(_Frozen):
+    """Where one issue sits in its team's workflow, and where it could go.
+
+    Read in a single query by `linear_transitions` so a configured state name
+    can be resolved to the id `issueUpdate` wants without a second round-trip,
+    and so a ticket already in the target state costs no write at all. Never
+    persisted — it is a snapshot of the API, not part of the task record.
+    """
+
+    issue_id: str
+    team_key: str
+    state: str
+    states: list[LinearWorkflowState] = Field(default_factory=list)
+
+    def find_state(self, name: str) -> LinearWorkflowState | None:
+        """The workflow state called `name`, matched case-insensitively."""
+        wanted = name.strip().casefold()
+        return next((s for s in self.states if s.name.casefold() == wanted), None)
+
+    @property
+    def state_names(self) -> list[str]:
+        return [s.name for s in self.states]
+
+
 class GhIssue(_Frozen):
     """A GitHub issue snapshot, taken when the task was created.
 

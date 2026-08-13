@@ -38,6 +38,7 @@ src/goblin_watcher/
 ├── locks.py               # advisory fcntl.flock on sidecar files (ADR 0004)
 ├── state.py               # JSON persistence: global registry + per-project tasks
 ├── linear_state.py        # TTL-cached Linear workflow-state refresh (status + sync)
+├── linear_transitions.py  # opt-in ticket moves on session start / PR open (ADR 0012)
 ├── github_state.py        # TTL-cached GitHub issue-state refresh (status + sync)
 ├── paths.py               # XDG resolution + per-project paths
 ├── models.py              # Pydantic: LinearIssue / GhIssue / Task / Project / SessionRecord / GlobalState
@@ -105,7 +106,7 @@ There is no CI in this repo — no GitHub Actions workflow, no external checks o
 - Never delete a worktree with uncommitted changes unless `--force` is passed (`gw task rm` and `gw task archive` both enforce this).
 - Never write outside: `<project>/.goblin/`, `<project>/.worktrees/`, the user's XDG dirs, or the project's working tree itself.
 - **Never call a branch merged from the commit graph alone.** A branch with no commits yet is an ancestor of its base and has nothing unique on it — indistinguishable from a merged one — so ancestry-based prune deleted brand-new tasks the moment anyone else landed on the base branch (#46). `merge_detection` takes the ancestry path only when `Task.fork_sha` is recorded *and* the branch tip has moved off it; a missing `fork_sha` means "unknown", never "no commits yet". Prefer PR state, which is the only detection that works on a squash-merge repo at all.
-- **Linear API is read-only by default.** Posting a comment requires the explicit `--notify-linear` flag on `gw pr open`.
+- **Linear API is read-only by default.** gw performs exactly two writes and neither is reachable until the user asks for it: posting a comment requires the explicit `--notify-linear` flag on `gw pr open`, and moving the ticket's workflow state requires a `[linear.transitions]` key in config (ADR 0012). Both fail open — a Linear that is down, slow, or misconfigured costs one muted line, never the session or the PR.
 - 1Password `op` references resolve lazily; only fetched when actually needed.
 
 ## State drift (`gw doctor --repair`)
@@ -164,6 +165,16 @@ Four things to keep true when touching this:
 - **`read_tail` takes a path, and reads a bounded window.** It's called per session per render, and `gw status --watch` renders every two seconds. Use `agents/_tail.py`; never parse a whole transcript, and never route it through `read_transcript`'s `(session_id, cwd)` lookup (codex re-globs `~/.codex/sessions`).
 - **Nothing is persisted.** Classification is a pure function of the file on disk. Don't add a `SessionRecord` field caching it.
 - **Every degradation lands on `idle` or `unknown`.** An unparseable record, an unknown agent, a drifted format — all return None from `read_tail` and fall back to mtime. A transcript-reading bug must never break `gw status`.
+
+## Linear state transitions
+
+`[linear.transitions]` moves the task's Linear ticket at the two moments it otherwise goes stale — `on_session_start` (`gw new`, `gw run`, fresh or resume) and `on_pr_open` (`gw pr open`). Both keys are unset by default, and unset means gw writes nothing. `linear_transitions.apply(project, task, trigger)` is the single entry point; each of the three call sites is one line. See ADR 0012 and `docs/designs/linear-integration.md`.
+
+Three invariants when touching this:
+
+- **`apply` never raises.** No API key, Linear unreachable or slow, a state name the team doesn't define, a mutation that returns unconfirmed — each prints one muted line and returns the task untouched. The agent still launches and the PR is already open; a bookkeeping write does not get to veto the work.
+- **The configured value is a state *name*, resolved against the ticket's own team.** One query returns the issue id, its current state, and the team's workflow states; the match is case-insensitive and a miss is reported with the states that do exist. Never invent a state, and never map gw's `Task.status` onto a team's workflow.
+- **A trigger is a config key, not a branch.** `Trigger` is a `Literal` of the key names and `apply` looks the value up. A third moment is a new key plus a call site — not an `if trigger == "..."`.
 
 ## The ticket check
 

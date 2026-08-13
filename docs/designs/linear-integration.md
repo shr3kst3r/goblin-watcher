@@ -1,17 +1,19 @@
 # Linear Integration
 
-Current-state design of how `goblin-watcher` reads from Linear.
+Current-state design of how `goblin-watcher` reads from — and, when asked, writes to — Linear.
 
 ## Surface area
 
-Read-only by default. Two read operations are exposed today; everything else (comments, status changes) is **not** wired up to avoid surprising the team.
+Read-only by default. Two writes exist, and each is unreachable until the user turns it on.
 
 | Operation | Where | Status |
 |---|---|---|
 | Fetch issue by identifier | `gw new --linear ENG-123`, `gw ENG-123` | Implemented |
-| Post a comment with the PR URL | `gw pr open --notify-linear` | Implemented (`LinearClient.create_comment`, the only Linear write gw performs) |
+| Refresh an issue's workflow state | `gw status`, `gw sync` (TTL-cached, `linear_state.py`) | Implemented |
+| Post a comment with the PR URL | `gw pr open --notify-linear` | Write · opt-in per invocation (`LinearClient.create_comment`) |
+| Move the issue's workflow state | session start and PR open, via `[linear.transitions]` | Write · opt-in via config (`LinearClient.update_issue_state`, ADR 0012) |
 
-The boundary is stated in root AGENTS.md's safety section: Linear is read-only **unless** `--notify-linear` is passed explicitly.
+The boundary is stated in root AGENTS.md's safety section: Linear is read-only **unless** `--notify-linear` is passed explicitly, or a `[linear.transitions]` key is set.
 
 ## Authentication
 
@@ -51,11 +53,34 @@ Linear's GraphQL `issue(id:)` field takes a UUID, not the human-readable `ENG-12
 
 A missing node (`nodes == []`) → `GoblinError("Linear issue ENG-123 not found.")`. We never re-fetch with a different filter; if the user typo'd the team key or pulled an issue from a team they don't have access to, the error makes that obvious.
 
+## State transitions (`[linear.transitions]`)
+
+Tickets go stale at two moments gw is synchronously present for. Both are opt-in and unset by default (ADR 0012):
+
+```toml
+[linear.transitions]
+on_session_start = "In Progress"   # gw new (below --no-launch), gw run (fresh and resume)
+on_pr_open       = "In Review"     # gw pr open, after the PR URLs are printed
+timeout_seconds  = 8.0             # wall-clock cap on the two round-trips
+```
+
+`linear_transitions.apply(project, task, trigger)` is the single entry point, and all three call sites (`commands/new.py`, `commands/run.py`, `commands/pr.py`) are one line each. What it does, in order:
+
+1. No ticket on the task, or no config key for this trigger → return, having touched nothing. This is the default path.
+2. `FETCH_ISSUE_WORKFLOW` — one query returning the issue's internal id, its current state, and every state its **own team** defines.
+3. Already in the target state (case-insensitive) → no write. Resuming a session all day doesn't churn the ticket's activity feed.
+4. Name not in the team's workflow → one muted line naming the states that *are* available; no write.
+5. `UPDATE_ISSUE_STATE` (`issueUpdate(id:, input: {stateId:})`), then a success line and a write-back of the new state into `Task.linear.state` / `Task.linear_state_updated_at` — so `gw status` doesn't keep rendering the state gw just moved away from.
+
+**`apply` never raises.** A missing API key, an unreachable or slow Linear, an unconfirmed mutation, a malformed response — each prints `Skipped Linear transition on <trigger>: …` and returns the task unchanged. The agent still launches; the PR is already open. This is the same fail-open posture as `classify.advise`, and for the same reason: the hook sits between the user and the thing they actually asked for.
+
+`Trigger` is a `Literal["on_session_start", "on_pr_open"]` whose values *are* the config keys, so a trigger is looked up rather than branched on. A third moment would be a new key plus a call site.
+
 ## Client lifecycle
 
 `linear/client.LinearClient` wraps an `httpx.Client`. Two construction modes:
 
-- **Self-owned** (`LinearClient(api_key)`): creates an internal `httpx.Client` with `timeout=15.0` and closes it via the `__exit__` / `close()` path.
+- **Self-owned** (`LinearClient(api_key)`): creates an internal `httpx.Client` with `timeout=15.0` and closes it via the `__exit__` / `close()` path. The `timeout=` parameter overrides that default; `linear_transitions` passes its own, shorter cap.
 - **Injected** (`LinearClient(api_key, client=...)`): tests pass `pytest_httpx`'s mocked client. The mocked client is not closed by `__exit__`.
 
 `__enter__` / `__exit__` exist solely so `with LinearClient(...) as c:` reads cleanly in `commands/new.py`. There is no async path.
@@ -94,21 +119,25 @@ A team can be served by multiple projects (e.g. one repo per service in a monore
 ## What we deliberately don't do
 
 - **No webhook listener / pull loop.** The integration is poll-on-demand. The user types `gw ENG-123` and we fetch.
-- **No caching.** We refetch every time. The plan reserved `<project>/.goblin/cache/linear/<id>.json` for later; not implemented.
-- **No issue mutation.** Even `--notify-linear` is on hold until the team confirms how PR-link comments should be formatted.
+- **No unprompted mutation.** Both writes require the user to ask: a flag per invocation for the comment, a config key for the state moves. Nothing gw does by default changes anything in Linear.
+- **No transition on merge or prune.** The two implemented triggers are moments gw is synchronously present for and can report on. A background `gw sync` pass writing to the tracker is a different decision and hasn't been made.
+- **No state creation.** A configured name that the team's workflow doesn't define is reported, never created.
 - **No async.** `httpx.Client` (sync) is plenty fast for one query per ticket invocation.
 
 ## Code map
 
 - `src/goblin_watcher/linear/__init__.py` — re-exports `LinearClient`, `parse_identifier`.
 - `src/goblin_watcher/linear/client.py` — `LinearClient`, identifier parsing, error mapping.
-- `src/goblin_watcher/linear/queries.py` — the single GraphQL query.
+- `src/goblin_watcher/linear/queries.py` — the GraphQL documents (two queries for reads, one for the workflow lookup, two mutations).
+- `src/goblin_watcher/linear_state.py` — TTL-cached workflow-state refresh for `gw status` / `gw sync`.
+- `src/goblin_watcher/linear_transitions.py` — the opt-in state moves and their fail-open wrapper.
 - `src/goblin_watcher/secrets.py` — `get_linear_api_key`, `resolve_op_reference`.
 - `src/goblin_watcher/commands/new.py` — `_resolve_or_register_linear_project`, `_from_linear`.
 - `src/goblin_watcher/commands/doctor.py` — `_linear_key_check`.
 
 ## Tests
 
-- `tests/test_linear_client.py` — happy path, 401, GraphQL errors, not-found, empty-key rejection. Uses `pytest_httpx`.
+- `tests/test_linear_client.py` — happy path, 401, GraphQL errors, not-found, empty-key rejection, the workflow lookup and the state mutation. Uses `pytest_httpx`.
+- `tests/test_linear_transitions.py` — unset config makes no request; the move and its cache write-back; case-insensitive matching; already-in-state skips the write; unknown state, auth failure, API failure and an unconfirmed mutation all warn and continue; `gw run` still launches when Linear is down.
 - `tests/test_secrets.py` — env precedence, config literal, `op://` resolution (mocked), missing-op handling.
 - `tests/test_cli_linear_flow.py` — full CLI flow with team-matched project, with `--repo` auto-register, and via the `gw <LINEAR-ID>` shortcut.

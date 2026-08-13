@@ -325,7 +325,7 @@ gw pr open eng-123 [--project NAME] [--draft] [--notify-linear]
 
 Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. The PR is titled after the task's tracking item, and the body is templated from it: a Linear ticket contributes a `Resolves ENG-123` line plus its description and comment thread; a GitHub issue contributes a `Closes #42 — <title>` line (`Closes owner/repo#42` when the issue lives in another repo). The PR URL is persisted on the task record. Pass `--project` if the same task id exists in more than one registered project.
 
-Re-running is idempotent: if an open PR already exists for the branch, the push still happens but `gh pr create` is skipped. `--notify-linear` posts a comment with the PR URL(s) on the task's Linear issue — the only write `gw` ever performs against Linear.
+Re-running is idempotent: if an open PR already exists for the branch, the push still happens but `gh pr create` is skipped. `--notify-linear` posts a comment with the PR URL(s) on the task's Linear issue. That comment and the opt-in state moves under [Moving the Linear ticket automatically](#moving-the-linear-ticket-automatically) are the only writes `gw` ever performs against Linear.
 
 ### `gw pr checks` — which check broke
 
@@ -618,6 +618,11 @@ classify_timeout_seconds = 20     # it's synchronous, so it gives up fast and sa
 # Env var LINEAR_API_KEY takes precedence.
 api_key = "op://Personal/Linear/api_key"
 
+[linear.transitions]              # move the ticket automatically (see below); unset = no write
+on_session_start = "In Progress"  # gw new / gw run, once the agent is about to launch
+on_pr_open = "In Review"          # gw pr open, once the PR exists
+timeout_seconds = 8.0             # a slow Linear is skipped, never waited on
+
 [tmux]
 session_name = "goblin"           # tmux session that hosts every task
 attach_on_spawn = true            # `gw` execs `tmux attach -t <session>` after spawning
@@ -648,6 +653,35 @@ cache_write_1h_multiplier = 2.0   # 1-hour cache
 [cost.pricing."gpt-5-codex"]
 input = 1.25
 output = 10.0
+```
+
+## Moving the Linear ticket automatically
+
+`gw` never writes to Linear unless you ask it to. Two things count as asking: the `--notify-linear` flag on `gw pr open`, and these keys:
+
+```toml
+[linear.transitions]
+on_session_start = "In Progress"
+on_pr_open = "In Review"
+```
+
+With them set, `gw new` and `gw run` move the task's ticket as the agent launches, and `gw pr open` moves it once the PR is up. Leave either one out and that moment writes nothing — which is the default.
+
+The value is a workflow-state **name**, matched case-insensitively against the states the ticket's own team defines. So it's whatever your team actually calls it (`Started`, `Doing`, `Code Review`), not a fixed vocabulary.
+
+Four things worth knowing:
+
+- **It never blocks you.** No API key, Linear down, Linear slow, a state name your team doesn't have, a mutation that comes back unconfirmed — you get one dim line saying it was skipped, and your agent launches anyway. The PR is already open by the time the PR-open move runs.
+- **It's idempotent.** A ticket already in the target state costs a read and no write, so resuming the same session ten times doesn't fill the ticket's activity feed.
+- **Resuming counts as starting.** `gw run` on an existing session applies `on_session_start` too — picking a ticket back up is working on it.
+- **Only these two moments.** Nothing moves the ticket on merge, on prune, or in background sync.
+
+Set them from the shell if you'd rather not open the file:
+
+```bash
+gw config set linear.transitions.on_session_start "In Progress"
+gw config set linear.transitions.on_pr_open "In Review"
+gw config unset linear.transitions.on_pr_open        # back to writing nothing
 ```
 
 ## Tmux windowing
