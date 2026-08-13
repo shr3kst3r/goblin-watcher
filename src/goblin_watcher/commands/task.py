@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from rich.table import Table
 
-from goblin_watcher import gh, git, state, workspace
+from goblin_watcher import gh, git, paths, state, workspace, worktree_setup
 from goblin_watcher.completion_enumerators import complete_projects, complete_tasks
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
@@ -320,6 +320,11 @@ def add_repo(
     from_: str | None = typer.Option(
         None, "--from", help="Base branch for the added repo (defaults to its project's default)."
     ),
+    no_setup: bool = typer.Option(
+        False,
+        "--no-setup",
+        help="Skip the added repo's configured setup (the [setup] copy/link/run steps).",
+    ),
 ) -> None:
     """Add another repository to an existing task (creating a multi-repo workspace)."""
     proj, task = _find_task(task_id, task_project)
@@ -347,10 +352,69 @@ def add_repo(
     console.print(f"  workspace   {task.workspace_path}")
     for r in task.all_repos():
         console.print(f"  {r.project:<10}  {r.worktree_path}  [muted]({r.branch})[/]")
+
+    if not no_setup:
+        result = worktree_setup.setup_task_repos(task, [added])
+        if not result.ok:
+            raise worktree_setup.setup_failure(task.id, result)
+
     console.print(
         "[muted]Relaunch the agent (`gw run "
         f"{task.id}`) so it picks up the new repo in its workspace.[/]"
     )
+
+
+@app.command("setup")
+def setup(
+    task_id: str = typer.Argument(..., help="Task id.", autocompletion=complete_tasks),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
+    repo: str | None = typer.Option(
+        None,
+        "--repo",
+        help="Only set up this project's checkout on a multi-repo task.",
+        autocompletion=complete_projects,
+    ),
+) -> None:
+    """Re-run the configured setup steps against a task's worktree(s).
+
+    The same steps `gw new` applies when it materializes a worktree: copy the
+    gitignored files a bare checkout lacks, link what shouldn't be duplicated,
+    then run the project's bootstrap commands.
+    """
+    proj, task = _find_task(task_id, project)
+    repos = task.all_repos()
+    if repo is not None:
+        wanted = repo.strip().lower()
+        repos = [r for r in repos if r.project == wanted]
+        if not repos:
+            joined = ", ".join(r.project for r in task.all_repos())
+            raise GoblinError(
+                f"Task {task.id!r} has no repo for project {wanted!r}.",
+                hint=f"It spans: {joined}.",
+            )
+
+    missing = [r.worktree_path for r in repos if not r.worktree_path.exists()]
+    if missing:
+        raise GoblinError(
+            f"Worktree {missing[0]} does not exist.",
+            hint=f"Recreate the task (`gw new --rm …`) or remove it (`gw task rm {task.id}`).",
+        )
+
+    result = worktree_setup.setup_task_repos(task, repos)
+    if not result.ok:
+        raise worktree_setup.setup_failure(task.id, result)
+    if not result.ran_anything:
+        console.print(
+            f"[muted]No setup configured for {proj.name!r} — add a [setup] table to "
+            f"{paths.config_file()} or {paths.project_setup_file(proj.root)}.[/]"
+        )
+        return
+    print_success(f"Setup complete for task {task.id!r}")
 
 
 def destroy_task(

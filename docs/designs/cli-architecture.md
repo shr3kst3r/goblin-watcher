@@ -113,7 +113,7 @@ gw status
 gw project new|ls|info|rm
 gw task ls|show|rm
 gw session ls|show|refresh|rm
-gw pr open|status
+gw pr open|status|checks
 
 gw doctor
 gw version

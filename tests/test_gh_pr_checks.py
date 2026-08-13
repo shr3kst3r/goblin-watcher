@@ -1,4 +1,4 @@
-"""`gh.pr_checks` — gw's CI-status rollup. Never calls the real `gh`."""
+"""`gh.pr_checks` / `gh.pr_check_runs` — gw's CI status. Never calls the real `gh`."""
 
 from __future__ import annotations
 
@@ -106,3 +106,71 @@ def test_invalid_json_returns_none() -> None:
         _check(subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""))
         is None
     )
+
+
+def _runs(res: subprocess.CompletedProcess[str]) -> list[gh.CheckRun] | None:
+    which, run = _run_with(res)
+    with which, run:
+        return gh.pr_check_runs("https://gh/pr/1")
+
+
+def test_check_runs_keep_name_state_and_url() -> None:
+    """The whole point of gh-18: the rollup's detail survives the call."""
+    runs = _runs(
+        _rollup(
+            {
+                "__typename": "CheckRun",
+                "name": "test",
+                "workflowName": "verify",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "detailsUrl": "https://github.com/o/r/actions/runs/1",
+            },
+            {
+                "__typename": "StatusContext",
+                "context": "ci/azure",
+                "state": "SUCCESS",
+                "targetUrl": "https://dev.azure.com/build/2",
+            },
+        )
+    )
+    assert runs is not None
+    assert [(r.label, r.state, r.detail, r.url) for r in runs] == [
+        ("verify / test", "failing", "FAILURE", "https://github.com/o/r/actions/runs/1"),
+        ("ci/azure", "passing", "SUCCESS", "https://dev.azure.com/build/2"),
+    ]
+
+
+def test_check_run_detail_falls_back_to_status_while_running() -> None:
+    """An in-flight check has no conclusion yet — show what it's doing instead."""
+    runs = _runs(_rollup({"name": "test", "status": "IN_PROGRESS", "conclusion": None}))
+    assert runs is not None
+    [run] = runs
+    assert (run.state, run.detail, run.url) == ("pending", "IN_PROGRESS", None)
+
+
+def test_check_run_label_is_bare_name_without_a_workflow() -> None:
+    runs = _runs(_rollup({"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}))
+    assert runs is not None
+    assert runs[0].label == "test"
+
+
+def test_check_runs_and_rollup_agree_on_no_signal() -> None:
+    """`pr_check_runs` must return None wherever `pr_checks` does, so callers
+    can't render an empty check list as "this PR has no CI"."""
+    no_signal = [
+        _rollup(),
+        subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom"),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""),
+    ]
+    for res in no_signal:
+        assert _check(res) is None
+        assert _runs(res) is None
+    with patch("goblin_watcher.gh.shutil.which", return_value=None):
+        assert gh.pr_check_runs("https://gh/pr/1") is None
+
+
+def test_unnamed_check_still_gets_a_row() -> None:
+    runs = _runs(_rollup({"status": "COMPLETED", "conclusion": "SUCCESS"}))
+    assert runs is not None
+    assert runs[0].name == "(unnamed check)"
