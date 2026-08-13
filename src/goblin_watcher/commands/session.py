@@ -3,10 +3,11 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime, timedelta
 
+import click
 import typer
 from rich.table import Table
 
-from goblin_watcher import description, git, sessions, state
+from goblin_watcher import config, description, git, sessions, state
 from goblin_watcher.agents import get_agent
 from goblin_watcher.completion_enumerators import (
     complete_projects,
@@ -16,6 +17,8 @@ from goblin_watcher.completion_enumerators import (
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
 from goblin_watcher.models import Project, SessionRecord, Task
+from goblin_watcher.task_resolver import resolve_task
+from goblin_watcher.windowing import get_windower
 
 app = typer.Typer()
 
@@ -105,6 +108,71 @@ def ls(
             s.session_id,
         )
     console.print(table)
+
+
+@app.command("send")
+def send(
+    target: str = typer.Argument(
+        ...,
+        help="Task id, or a path inside its worktree ('.' for cwd).",
+        autocompletion=complete_tasks,
+    ),
+    message: str = typer.Argument(..., help="Text to type into the running agent."),
+    session: str | None = typer.Option(
+        None,
+        "--session",
+        help="Which session's pane to send to. Required when a task has several live panes.",
+        autocompletion=complete_sessions,
+    ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit task lookup to a single project.",
+        autocompletion=complete_projects,
+    ),
+    windowing: str | None = typer.Option(
+        None,
+        "--windowing",
+        help="Overrides config.",
+        click_type=click.Choice(["inline", "tmux"]),
+    ),
+    enter: bool = typer.Option(
+        True,
+        "--enter/--no-enter",
+        help="Submit the text. --no-enter leaves it in the agent's input box.",
+    ),
+) -> None:
+    """Send input to a running agent session, as if typed at its keyboard.
+
+    The point is supervising several agents at once: adding "also fix the
+    tests" to a task in flight shouldn't require attaching to its pane.
+
+    Needs a windower with an addressable pane (tmux). With one live pane on the
+    task the session is unambiguous; with several, name one with `--session`.
+    """
+    if not message and not enter:
+        raise GoblinError(
+            "Nothing to send: empty message with --no-enter.",
+            hint="Pass some text, or drop --no-enter to just press Enter.",
+        )
+    project_filter: str | None = None
+    if project is not None:
+        normalized = project.strip().lower()
+        # Validate up-front so a typo raises ProjectNotFoundError instead of
+        # silently falling through to the picker chain.
+        state.get_project(normalized)
+        project_filter = normalized
+    task = resolve_task(target, project_filter)
+    if session is not None and not any(s.session_id == session for s in task.sessions):
+        raise GoblinError(
+            f"Session {session!r} is not on task {task.id!r}.",
+            hint=f"Run `gw session ls --task {task.id}` to see its sessions.",
+        )
+    windowing_mode = windowing or config.load().defaults.windowing
+    where = get_windower(windowing_mode).send(
+        task=task, text=message, session_id=session, enter=enter
+    )
+    print_success(f"Sent to {task.id} [muted]({where})[/]")
 
 
 @app.command("show")
