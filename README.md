@@ -327,11 +327,14 @@ gw pr open eng-123 --draft --notify-linear  # draft PR; also post the URL back t
 ```bash
 gw status                                   # tree: projects → tasks → sessions
 gw status --project my-repo            # limit to one project
+gw status --cost                            # same tree, annotated with tokens + estimated cost
 gw pr checks eng-123                        # one row per CI check: state, name, details URL
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
+gw session show <session-id>                # one session in full, including its token counts
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
 gw session send eng-123 "also fix the tests"  # type into a running agent's tmux pane
+gw history --cost                           # day-by-day token + cost rollup across every session
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
 gw config show                              # resolved config (file merged over defaults)
 gw sync status                              # is background sync scheduled? when did it last run?
@@ -340,6 +343,26 @@ gw sync status                              # is background sync scheduled? when
 Each session row in `gw status` carries an activity hint derived from the transcript's mtime: `● active` while the agent is producing output, `idle <age>` once it has gone quiet (done, or waiting on you). Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
 
 `gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
+
+### What did today cost?
+
+Claude's and codex's transcripts carry per-request token counts, so `gw` — the only thing that sees all N parallel sessions at once — can total them up:
+
+```bash
+gw session show <session-id>                # tokens + cost for one conversation
+gw status --cost                            # rolled up per session, per task, per project, plus a grand total
+gw history --cost --days 7                   # day by day, across everything
+```
+
+```
+ day           in     out  cache read  cache write     cost
+ 2026-08-13  3.8K  288.1K       73.6M         1.1M  ~$55.28
+ total       3.8K  288.1K       73.6M         1.1M  ~$55.28
+```
+
+Read the dollar figure as *what these tokens would have cost at published API rates* — it is an estimate, not a bill. It doesn't know about your subscription plan (where the marginal cost of a session is zero), negotiated rates, introductory pricing, or fast mode. Gemini and antigravity report nothing, because `gw` can't read their transcripts.
+
+Counts are parsed on the same pass that refreshes session summaries, so they cost no extra work and follow the same `summary_ttl_seconds` freshness rules — `gw history --cost` reads only what's already recorded, so run `gw status` or `gw session refresh` first if a session looks stale. Models `gw` has no rate for (codex's `gpt-*` models ship unpriced) still have their tokens counted; give them a price under `[cost.pricing]` and they join the dollar total.
 
 ### Add a fresh session to an existing task
 
@@ -488,6 +511,18 @@ copy = [".env"]                   # gitignored files to copy in from the project
 link = []                         # ... or symlink instead, e.g. "node_modules"
 run = ["uv sync --extra dev"]     # bootstrap commands, run in the new worktree
 timeout_seconds = 600             # per run step
+
+[cost]                            # rates behind `gw status --cost` / `gw history --cost`
+cache_read_multiplier = 0.1       # relative to the model's input rate
+cache_write_multiplier = 1.25     # 5-minute cache
+cache_write_1h_multiplier = 2.0   # 1-hour cache
+
+# Merged over gw's built-in table, keyed by the model id in the agent's
+# transcript. USD per million tokens. `gw config set` can't reach into a table —
+# use `gw config edit` for these.
+[cost.pricing."gpt-5-codex"]
+input = 1.25
+output = 10.0
 ```
 
 ## Tmux windowing
@@ -584,10 +619,11 @@ gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
 gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
            [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
-gw status [--project NAME] [--no-linear] [--no-cache]   # tree view of projects → tasks → sessions
+gw status [--project NAME] [--no-linear] [--no-cache] [--cost]   # tree view of projects → tasks → sessions
 gw sync                                     # run one background-sync pass now, verbosely
 gw doctor                                   # binary + key resolution checks
 gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation (`gw history prune` trims it)
+gw history --cost [--days N]                # day-by-day token + cost rollup across every session (0 = all time)
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
 gw project new|ls|info|rm

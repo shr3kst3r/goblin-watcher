@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from goblin_watcher.models import UsageBucket
+
 
 @dataclass
 class RawSession:
@@ -27,6 +29,9 @@ class TranscriptSummary:
     start of the session plus a handful of the most recent exchanges,
     chronological (oldest first). Agents that can't easily parse their
     transcripts leave these empty.
+
+    `usage` carries per-(model, day) token counts read off the same pass, so
+    cost accounting costs nothing beyond the walk the summary already does.
     """
 
     turn_count: int = 0
@@ -37,6 +42,7 @@ class TranscriptSummary:
     recent_user_snippets: list[str] = field(default_factory=list)
     recent_assistant_snippets: list[str] = field(default_factory=list)
     extras: dict[str, str] = field(default_factory=dict)
+    usage: list[UsageBucket] = field(default_factory=list)
 
 
 @runtime_checkable

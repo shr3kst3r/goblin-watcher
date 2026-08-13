@@ -45,6 +45,7 @@ src/goblin_watcher/
 ├── gh.py                  # Thin wrapper around the `gh` CLI for PR + issue ops
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
+├── usage.py               # token rollups + list-price cost estimates (docs/designs/token-usage-and-cost.md)
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── worktree_setup.py      # [setup] copy/link/run bootstrap applied to new worktrees (ADR 0007)
 ├── picker.py              # questionary-backed interactive session picker

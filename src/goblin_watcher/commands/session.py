@@ -7,7 +7,7 @@ import click
 import typer
 from rich.table import Table
 
-from goblin_watcher import config, description, git, sessions, state
+from goblin_watcher import config, description, git, sessions, state, usage
 from goblin_watcher.agents import get_agent
 from goblin_watcher.completion_enumerators import (
     complete_projects,
@@ -198,6 +198,26 @@ def show(
     console.print(f"  created_at     {s.created_at.isoformat()}")
     console.print(f"  last_used_at   {s.last_used_at.isoformat()}")
     console.print(f"  transcript     {s.transcript_path or '(unknown)'}")
+    _print_usage(s)
+
+
+def _print_usage(s: SessionRecord) -> None:
+    """Token and cost lines, when the agent's transcript carried usage.
+
+    Agents whose transcripts gw can't read (gemini, antigravity) print a
+    placeholder rather than a misleading zero.
+    """
+    rollup = usage.for_session(s)
+    if rollup.is_empty:
+        console.print("  tokens         [muted](none recorded)[/]")
+        return
+    console.print(f"  tokens         {usage.fmt_tokens_line(rollup)}")
+    models = sorted({b.model for b in s.usage if b.model})
+    model_note = f"  [muted]({', '.join(models)})[/]" if models else ""
+    console.print(f"  cost           {usage.fmt_cost(rollup)}{model_note}")
+    note = usage.unpriced_note(rollup)
+    if note:
+        console.print(f"  [muted]{note}[/]")
 
 
 @app.command("refresh")
