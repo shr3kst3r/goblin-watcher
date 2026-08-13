@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from goblin_watcher import git, state
@@ -907,3 +908,125 @@ def test_linear_shortcut_dispatcher_is_case_insensitive() -> None:
     # Subcommands keep winning: no digits-suffix pattern, no rewrite.
     assert _rewrite_task_shortcut(["run", "eng-123"]) == ["run", "eng-123"]
     assert _rewrite_task_shortcut(["status"]) == ["status"]
+
+
+# ---------------------------------------------------------------------------
+# Advisory ticket classification (ADR 0011)
+
+
+def _issue_info() -> object:
+    from goblin_watcher.gh import IssueInfo
+
+    return IssueInfo(
+        number=42,
+        repo="org/repo",
+        title="Should we shard the events table?",
+        body="Writes are slow. Worth understanding before we commit to anything.",
+        state="OPEN",
+        url="https://github.com/org/repo/issues/42",
+        labels=(),
+        assignees=(),
+    )
+
+
+def test_new_issue_prints_the_ticket_check_but_still_does_what_was_asked(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The classification is advice, not a decision: it names `--mode research`
+    and the session still launches with the default implementation brief."""
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    monkeypatch.delenv("GW_CLASSIFY")
+
+    answer = (
+        '{"mode": "research", "reason": "It asks whether to shard, not to shard.",'
+        ' "ambiguities": ["No target write latency", "Shard by tenant or by time?"]}'
+    )
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.gh.issue_view", return_value=_issue_info()),
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch,
+        patch("goblin_watcher.description.run_llm", return_value=answer) as run_llm,
+    ):
+        res = runner.invoke(app, ["new", "--issue", "42", "--project", "alpha"])
+    assert res.exit_code == 0, res.output
+    assert run_llm.call_count == 1
+    assert "suggests --mode research" in res.output
+    assert "2 things here are ambiguous" in res.output
+    assert "- No target write latency" in res.output
+    # Advisory only: the mode gw actually used is still the default, and the
+    # research brief was never rendered.
+    assert "(default)" in res.output
+    assert not launch.call_args.kwargs["choice"].prompt.startswith("Research task —")
+
+
+def test_new_no_classify_makes_no_model_call(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    monkeypatch.delenv("GW_CLASSIFY")
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.gh.issue_view", return_value=_issue_info()),
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)),
+        patch("goblin_watcher.description.run_llm") as run_llm,
+    ):
+        res = runner.invoke(app, ["new", "--issue", "42", "--project", "alpha", "--no-classify"])
+    assert res.exit_code == 0, res.output
+    assert run_llm.call_count == 0
+    assert "Ticket check" not in res.output
+
+
+def test_new_survives_a_failing_ticket_check(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken classification must never cost the user their task."""
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    monkeypatch.delenv("GW_CLASSIFY")
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.gh.issue_view", return_value=_issue_info()),
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch,
+        patch("goblin_watcher.description.run_llm", side_effect=RuntimeError("boom")),
+    ):
+        res = runner.invoke(app, ["new", "--issue", "42", "--project", "alpha"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_count == 1
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.github_issue is not None
+    assert task.worktree_path.exists()
+
+
+def test_new_ticketless_task_is_never_classified(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `--branch-name` task carries no ticket, so there is nothing to read."""
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+    monkeypatch.delenv("GW_CLASSIFY")
+
+    runner = CliRunner()
+    with (
+        patch("goblin_watcher.commands.new.launch", return_value=(0, None)),
+        patch("goblin_watcher.description.run_llm") as run_llm,
+    ):
+        res = runner.invoke(app, ["new", "--branch-name", "spike/foo"])
+    assert res.exit_code == 0, res.output
+    assert run_llm.call_count == 0

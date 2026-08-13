@@ -6,7 +6,18 @@ from pathlib import Path
 import click
 import typer
 
-from goblin_watcher import config, gh, git, modes, paths, secrets, state, workspace, worktree_setup
+from goblin_watcher import (
+    classify,
+    config,
+    gh,
+    git,
+    modes,
+    paths,
+    secrets,
+    state,
+    workspace,
+    worktree_setup,
+)
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
 from goblin_watcher.commands.task import destroy_task, dirty_worktrees
@@ -363,6 +374,12 @@ def new(
         help="Alias for `--mode adversarial-review`. Seeds the session with "
         "`/codex:adversarial-review`; forces --agent claude.",
     ),
+    no_classify: bool = typer.Option(
+        False,
+        "--no-classify",
+        help="Skip the advisory ticket check — one cheap model call that reads the "
+        "ticket and prints a suggested --mode plus anything ambiguous in it.",
+    ),
     research: bool = typer.Option(
         False,
         "--research",
@@ -506,6 +523,13 @@ def new(
         ("mode", mode_spec.name if mode_spec is not None else "(default)"),
     ]
     print_settings(settings)
+
+    # Advisory only (ADR 0011): the first thing in this command that has read the
+    # ticket, printed while the reader can still act on it. It never overrides
+    # `mode_spec`, `agent_name`, or the seed prompt below — the mode it names is
+    # a suggestion for the next invocation — and every failure inside it is
+    # swallowed, because the task and worktree above already exist.
+    classify.advise(task, mode=mode_spec, enabled=not no_classify)
 
     if not no_setup and setup_targets:
         setup_result = worktree_setup.setup_task_repos(task, setup_targets)

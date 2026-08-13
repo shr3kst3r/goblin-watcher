@@ -221,6 +221,30 @@ Your template gets the same slots as gw's own briefs: `{ticket_id}`, `{title}`, 
 
 `gw run` still takes `--research` / `--adversarial-review` / `--address-review` as flags; `--mode` is `gw new` for now.
 
+#### The ticket check — read the ticket before working it
+
+Agent, mode, and prompt are all chosen up front, by someone who may only have skimmed the ticket. So on a ticket-backed source (`--linear`, `--issue`), `gw new` spends one cheap model call reading it and prints what it found, right after the task's settings and before the agent starts:
+
+```
+Ticket check (advisory — nothing below was applied):
+  suggests --mode research — it asks whether to shard, not to shard
+  2 things here are ambiguous:
+    - No target write latency is given
+    - Shard by tenant or by time?
+```
+
+It is **advice, and only advice**. It never changes the mode, the agent, or the prompt you asked for — the run above still launches the default implementation brief. It also never gets in the way: a missing binary, a timeout, or unparseable output prints nothing and the launch proceeds, because your branch and worktree already exist by then.
+
+Which modes it can suggest is data. A mode is offered only if it sets `suggest_when`, so `research` is suggestable and `adversarial-review` isn't — and your own mode joins in for the price of one sentence:
+
+```toml
+[modes.spike]
+template = "spike_prompt.md"
+suggest_when = "the ticket is a timeboxed experiment with no committed outcome"
+```
+
+Turning it off, narrowest first: `gw new --no-classify` (this run), `classify_tickets = false` (config), `GW_CLASSIFY=off` (environment — for scripts and cron). `description_agent = "off"` disables it too, along with every other model call gw makes. It reuses that same `description_agent` / `description_model` pair, so there's nothing extra to configure. See [ADR 0011](docs/adrs/0011-advisory-ticket-classification.md).
+
 #### `--research` — spawn an investigation instead of an implementation
 
 ```bash
@@ -586,6 +610,8 @@ unsafe = true                     # spawn agents with their bypass-permission fl
 activity_active_seconds = 120     # mtime fallback for agents gw can't classify: newer → `● working`, older → `idle`
 activity_grace_seconds = 900      # how long a session stays on `gw status --active`, and how long a
                                   # transcript claiming to be mid tool call is believed before silence wins
+classify_tickets = true           # advisory ticket check on `gw new` (see below); `--no-classify` skips one run
+classify_timeout_seconds = 20     # it's synchronous, so it gives up fast and says nothing
 
 [linear]
 # Literal key, or an `op://vault/item/field` reference resolved via the 1Password CLI.
@@ -726,7 +752,7 @@ gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--title ...] [--from ...] [--project NAME] [--with-project NAME]
        [--repo URL] [--agent ...] [--prompt ...]
        [--mode NAME] [--research] [--adversarial-review]
-       [--rm|--rm-force] [--no-launch] [--no-setup]
+       [--rm|--rm-force] [--no-launch] [--no-setup] [--no-classify]
        [--windowing inline|tmux|headless] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
        [--research] [--adversarial-review] [--address-review]

@@ -148,6 +148,7 @@ A mode is a `ModeSpec` and is exactly one of two shapes:
 | `requires_ticket` | Refuse the mode when the task carries no Linear ticket / GitHub issue. |
 | `focus_lead` | Sentence introducing the `{focus}` paragraph `--prompt` renders into. |
 | `summary` | One line for help text and error hints. |
+| `suggest_when` | The ticket shape that should make the ticket check *suggest* this mode. Empty (the default) means never suggested. See "Ticket classification" below. |
 
 Template slots available to a mode's brief: `{ticket_id}`, `{title}`, `{repos_block}`, `{description}`, `{addition_block}`, `{focus}`. Anything else is a `GoblinError` naming the valid set.
 
@@ -196,6 +197,30 @@ Four things to know:
 - **Unlike `--research`, it does not require a tracking item** — the input is the PR, so a `--branch`- or `--pr`-sourced task is a valid target.
 - **The brief forbids writing to GitHub.** The agent reports in-session and pushes with `gw pr open` (idempotent for an open PR). Replying to and resolving threads stays the user's, in keeping with how `--notify-linear` gates the only other external write.
 - **Plain PR conversation comments are excluded** — only review threads carry resolved/unresolved state, and without it there is no way to tell standing feedback from feedback already handled.
+
+## Ticket classification (the advisory ticket check)
+
+`gw new` chooses the agent, the mode, and the prompt from the command line — before anything has read the ticket. `classify.advise(task, mode=…, enabled=…)` is the one thing on that path that does read it: one call to the cheap description model (`description.run_llm`, so the same `description_agent` / `description_model` pair), printed under the task's settings block and before the agent is launched. ADR 0011 records the decision.
+
+It prints at most two things:
+
+- **A suggested mode.** Candidates come from the registry, filtered by `ModeSpec.suggest_when` — a mode with no `suggest_when` is never offered, which is why `research` can be suggested and `adversarial-review` can't (a review ritual is not a ticket shape). The mode the command line already asked for is filtered out too, so a `--mode research` run never suggests `--mode research`.
+- **Up to three ambiguities** — things an engineer would have to guess to work the ticket. Three is the cap, matching the issue's own framing; the model is told not to pad the list.
+
+When it has neither to report it says so in one muted line, because silence and a broken check look identical.
+
+The contract, in both directions:
+
+- **Advisory only.** Nothing in `classify` touches the task, the mode, the agent, or the seed prompt. The mode it names is a suggestion for the *next* invocation. `tests/test_cli_new_sources.py` asserts this directly: the check names `--mode research` and the session still launches with the default work brief.
+- **Never in the way.** `advise` catches everything. A missing binary, a timeout, a banner-wrapped answer, malformed JSON, an invented mode name — each one prints nothing and returns `None`. It runs *after* the branch and worktree exist, so there is nothing left for a failure to protect.
+
+Shape details worth knowing:
+
+- The ticket goes into the prompt through `launcher.format_ticket_context` — the same block the agent's brief gets — so the advice is about the document the agent will actually read. It is clipped to 8k chars.
+- Output is parsed by scanning for the first decodable JSON object, not by trusting stdout: agent CLIs prepend banners and wrap answers in fences. Anything unregistered or over-long is then dropped rather than shown, since advice you have to verify is worse than none.
+- A task with no tracking item (`--branch`, `--branch-name`, `--dir`, `--pr`, scratch) is skipped without a model call — there is nothing to classify but a branch slug.
+- Three off switches, in order of scope: `defaults.classify_tickets = false` (config), `GW_CLASSIFY=off` (environment — for scripts, cron, and the test suite, which sets it in `conftest.isolated_xdg` so no test can reach a model), and `--no-classify` (this run). `description_agent = "off"` disables it too, because it disables every model call gw makes.
+- `classify_timeout_seconds` defaults to 20, shorter than the 30s description timeout: this call is synchronous with someone waiting on it.
 
 ## Tracking-item state refresh
 
@@ -294,6 +319,8 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `src/goblin_watcher/review_feed.py` — PR-feedback gathering + the embedding bounds (ADR 0008).
 - `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`, `render_mode_prompt`, `format_review_block`.
 - `src/goblin_watcher/modes.py` — the `--mode` registry: `ModeSpec`, `BUILTIN_MODES`, `resolve`, `template_path` (ADR 0009).
+- `src/goblin_watcher/classify.py` — the advisory ticket check: `advise`, `suggestable_modes`, `parse` (ADR 0011).
+- `src/goblin_watcher/description.py` — `run_llm`, gw's only cheap-model call, shared by descriptions and classification.
 - `src/goblin_watcher/templates/spawn_prompt.md` — the work brief.
 - `src/goblin_watcher/templates/research_prompt.md` — the `--research` brief (ADR 0006).
 - `src/goblin_watcher/templates/address_review_prompt.md` — the `--address-review` brief (ADR 0008).
@@ -304,6 +331,7 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `tests/test_stacked_tasks.py` — `--from` parent resolution and every surface that reads it.
 - `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`, and `--mode` (built-in, alias, and user-defined).
 - `tests/test_modes.py` — the registry itself: lookup, spec validation, template resolution.
+- `tests/test_classify.py` — the ticket check: candidate filtering, prompt shape, output parsing, every off switch, and the fail-open paths.
 - `tests/test_cli_linear_flow.py` — end-to-end for `--linear` (with `pytest-httpx` mock).
 - `tests/test_cli_issue_flow.py` — end-to-end for `--issue` and the `gw gh-42` shorthand.
 - `tests/test_launcher.py` — `build_seed_prompt` for all three briefs.

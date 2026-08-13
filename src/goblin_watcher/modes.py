@@ -25,10 +25,12 @@ replaces the global `[setup]` table. Nothing here is discovered from the
 filesystem or from entry points — `AGENTS.md` rules that out for agents and the
 same reasoning holds here. A mode is a prompt, not a plugin.
 
-Extending the registry (this is the seam issue #28's ticket classification
-hangs off): add an entry to `BUILTIN_MODES`, and a field to `ModeSpec` only if
-the new behaviour cannot be expressed by the existing ones. Every consumer
-reads the spec's fields; none of them branch on a mode's name.
+Extending the registry: add an entry to `BUILTIN_MODES`, and a field to
+`ModeSpec` only if the new behaviour cannot be expressed by the existing ones.
+Every consumer reads the spec's fields; none of them branch on a mode's name.
+`suggest_when` is the field ticket classification (`classify`, ADR 0011) hangs
+off: it says when gw should *suggest* the mode, so a user's own mode becomes
+suggestable by writing one sentence rather than by being special-cased.
 """
 
 from __future__ import annotations
@@ -69,6 +71,12 @@ class ModeSpec(BaseModel):
     focus_lead: str = _DEFAULT_FOCUS_LEAD
     # One line for `gw new --help` and error hints.
     summary: str = ""
+    # The ticket shape that should make gw *suggest* this mode at task-creation
+    # time (`classify`, ADR 0011), written as the condition itself: "the ticket
+    # is question-shaped rather than …". Empty means never suggested, which is
+    # the default and the right answer for a mode that answers to a working
+    # style rather than to anything readable in the ticket.
+    suggest_when: str = ""
 
     @property
     def allows_prompt(self) -> bool:
@@ -90,12 +98,20 @@ BUILTIN_MODES: dict[str, ModeSpec] = {
             "be the wrong thing to look at"
         ),
         summary="Investigate the ticket and report findings in the session; don't implement.",
+        suggest_when=(
+            "the ticket is question-shaped rather than change-shaped — it asks whether, "
+            "why, or how something works, asks for an investigation, comparison, or "
+            "recommendation, or has to be understood before anyone can say what to "
+            "change. Not merely because it is large or vague"
+        ),
     ),
     "adversarial-review": ModeSpec(
         name="adversarial-review",
         seed="/codex:adversarial-review --wait",
         agent="claude",
         summary="Seed `/codex:adversarial-review --wait` as the entire first message.",
+        # No `suggest_when`: this is a review ritual you choose, not a shape a
+        # ticket can have.
     ),
 }
 
