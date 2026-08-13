@@ -404,6 +404,37 @@ Everything a pass does is journaled to `~/.local/share/goblin-watcher/logs/sync.
 which is what `gw sync watch` and `gw sync status` read. Trim it with
 `gw sync prune-journal --days 30`.
 
+## Worktree setup
+
+A fresh worktree is a bare checkout. No `.env`, no `.venv`, no `node_modules`, nothing `uv sync` would have built — anything gitignored simply isn't there, so without a hook the first thing a spawned agent does is rediscover the project's bootstrap, or fail at it and start guessing.
+
+Declare that bootstrap once and `gw` applies it every time it materializes a worktree:
+
+```toml
+[setup]
+copy = [".env", ".env.local", ".claude/settings.local.json"]
+link = ["node_modules"]                # symlink instead of copy — big, rebuildable
+run  = ["uv sync --extra dev"]
+timeout_seconds = 600                  # per run step
+```
+
+- **`copy`** / **`link`** are paths relative to the project root, reproduced at the same relative path inside the worktree. A missing source is skipped, not an error — `.env.local` doesn't exist in every checkout.
+- **`run`** entries execute in the new worktree, in order, after `copy` and `link`. A string goes through `sh -c` (so `&&`, pipes, and `$VARS` work); an argv list — `["just", "hooks"]` — is exec'd directly with no shell. Each step gets `GW_PROJECT`, `GW_PROJECT_ROOT`, `GW_WORKTREE`, and `GW_TASK_ID` in its environment.
+
+Setup runs on `gw new`, `gw <LINEAR-ID>`, `gw gh-<N>`, `gw scratch`, and `gw task add-repo` — anywhere a worktree is created. It does **not** run for `gw new --dir`, which adopts a checkout you already bootstrapped yourself. Pass `--no-setup` to skip it, and `gw task setup <id>` to re-run it by hand.
+
+**Per-project override.** A project that needs its own bootstrap gets a `<project-root>/.goblin/setup.toml`, which replaces the global `[setup]` table outright (the same "presence wins" rule `gw prompt` uses for `prompt.md`). Either spelling works there — a bare table, or one nested under `[setup]`:
+
+```toml
+# <project-root>/.goblin/setup.toml
+copy = [".env"]
+run  = ["pnpm install --frozen-lockfile"]
+```
+
+**Failures are loud.** Every step is journaled to `~/.local/share/goblin-watcher/logs/setup.jsonl` and printed as it happens; a failing `run` step skips the rest and stops `gw new` before it launches the agent, so you get a reported error instead of an agent quietly working in a half-built worktree. Fix the cause, then `gw task setup <id>` and `gw run <id>`.
+
+**`copy`/`link` paths must stay inside the project root.** Absolute paths, `..` components, and symlinks pointing outside are all refused — that boundary is what keeps a setup table from reaching into `~/.ssh`.
+
 ## Configuration
 
 Optional config at `~/.config/goblin-watcher/config.toml`. Edit it directly, or via `gw config`:
@@ -439,6 +470,12 @@ scratch_prune_days = 0            # prune scratch spaces idle > N days (0 = off)
 notify = "auto"                   # "auto" (macOS notifications on darwin) | "macos" | "command" | "off"
 notify_command = []               # argv for notify = "command"; title and body are appended
 notify_events = ["agent-idle", "pr-merged", "checks-failed", "checks-passed", "prunable"]
+
+[setup]                           # applied to every freshly materialized worktree (above)
+copy = [".env"]                   # gitignored files to copy in from the project root
+link = []                         # ... or symlink instead, e.g. "node_modules"
+run = ["uv sync --extra dev"]     # bootstrap commands, run in the new worktree
+timeout_seconds = 600             # per run step
 ```
 
 ## Tmux windowing
@@ -484,11 +521,11 @@ gw gh-<N>      [...any `gw new` flag]       # sugar for `gw new --issue <N>`
 gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--title ...] [--from ...] [--project NAME] [--with-project NAME]
        [--repo URL] [--agent ...] [--prompt ...] [--research] [--adversarial-review]
-       [--rm|--rm-force] [--no-launch] [--windowing inline|tmux] [--unsafe|--no-unsafe]
+       [--rm|--rm-force] [--no-launch] [--no-setup] [--windowing inline|tmux] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
        [--research] [--adversarial-review]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
-gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch]
+gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
            [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
 gw status [--project NAME] [--no-linear] [--no-cache]   # tree view of projects → tasks → sessions
@@ -498,7 +535,9 @@ gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
 gw project new|ls|info|rm
-gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch/--scratch-older-than)
+gw task ls|show|rename|setup|add-repo|rm|prune   # all accept --project to scope to one project
+                                        # `setup` re-runs the [setup] steps (also: --repo NAME)
+                                        # `prune` also: --dry-run/--force/--no-fetch/--scratch-older-than
 gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
 gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
 gw sync run|watch|status|install|uninstall|prune-journal   # background refresh; `run` is what the scheduler calls
@@ -516,7 +555,7 @@ Always reach for `gw <command> --help` for the full option list.
 ├── state.json                            # registry of projects
 ├── state.lock                            # advisory lock for registry writes (ADR 0004)
 ├── sync/                                 # background-sync state + cached task indicators
-└── logs/                                 # commands.jsonl, sync.jsonl
+└── logs/                                 # commands.jsonl, sync.jsonl, setup.jsonl
 
 ~/.config/goblin-watcher/
 └── config.toml                           # user config (above)
@@ -524,6 +563,7 @@ Always reach for `gw <command> --help` for the full option list.
 <project-root>/
 ├── .goblin/
 │   ├── project.json                      # this project's record
+│   ├── setup.toml                        # optional; replaces the global [setup] table
 │   └── tasks/
 │       ├── eng-123.json                  # one file per task; carries sessions[]
 │       └── .eng-123.lock                 # advisory lock sidecar for that task

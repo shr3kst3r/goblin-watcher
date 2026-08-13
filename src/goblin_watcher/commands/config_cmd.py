@@ -64,6 +64,21 @@ def _parse_value(value: str) -> Any:
         return value
 
 
+def _lookup_field(cls: Any, part: str) -> Any:
+    """The model field `part` names on `cls`, matched by alias first.
+
+    Users write the TOML spelling (`setup.copy`), not the Python attribute name
+    (`setup.copy_paths`), so the alias is the primary key here.
+    """
+    fields = getattr(cls, "model_fields", None)
+    if fields is None:
+        return None
+    for name, field in fields.items():
+        if part in (field.alias, name):
+            return field
+    return None
+
+
 def _ensure_known_key(key: str) -> None:
     """Reject `set` on a key the Config model doesn't define.
 
@@ -73,14 +88,14 @@ def _ensure_known_key(key: str) -> None:
     cls: Any = config.Config
     parts = key.split(".")
     for i, part in enumerate(parts):
-        fields = getattr(cls, "model_fields", None)
-        if fields is None or part not in fields:
+        field = _lookup_field(cls, part)
+        if field is None:
             raise GoblinError(
                 f"Unknown config key {key!r}.",
                 hint="Run `gw config show` to see the available keys.",
             )
         if i < len(parts) - 1:
-            cls = fields[part].annotation
+            cls = field.annotation
 
 
 def _dig(data: dict[str, Any], key: str) -> Any:
@@ -104,7 +119,7 @@ def show() -> None:
         console.print("[muted](not present; showing defaults)[/]")
     console.print()
     # Plain stdout: TOML's `[section]` headers would read as Rich markup.
-    sys.stdout.write(tomli_w.dumps(config.load().model_dump(exclude_none=True)))
+    sys.stdout.write(tomli_w.dumps(config.dump_toml_dict(config.load())))
 
 
 @app.command("path")
@@ -116,7 +131,7 @@ def path() -> None:
 @app.command("get")
 def get(key: str = typer.Argument(..., help="Dotted key, e.g. defaults.agent.")) -> None:
     """Print one resolved config value."""
-    value = _dig(config.load().model_dump(exclude_none=True), key)
+    value = _dig(config.dump_toml_dict(config.load()), key)
     if isinstance(value, dict):
         sys.stdout.write(tomli_w.dumps(value))
     else:
