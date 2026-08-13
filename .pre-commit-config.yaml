@@ -17,10 +17,12 @@ repos:
     hooks:
       - id: gitleaks
 
+  # Keep in step with the `ruff` that `uv sync --extra dev` resolves — an older
+  # pinned ruff here can't parse pyproject's `target-version` and fails to start.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.15.13
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
 

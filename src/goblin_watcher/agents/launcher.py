@@ -204,7 +204,7 @@ def build_seed_prompt(
       in the session. `user_prompt` narrows the investigation's focus instead of
       becoming the trailer.
     - `review=<feed>`: `address_review_prompt.md`. The PR's unresolved review
-      threads and failing-check output are embedded in the brief (ADR 0007), and
+      threads and failing-check output are embedded in the brief (ADR 0008), and
       `user_prompt` narrows the focus as it does for research.
 
     `research` and `review` are mutually exclusive; the command layer rejects the
@@ -309,10 +309,14 @@ def _format_thread(index: int, thread: gh.ReviewThread) -> str:
 
 
 def _format_check(check: gh.FailingCheck) -> str:
-    """One failing check: its name and URL, plus the log tail when gw has one."""
-    header = f"{check.name} — {check.conclusion.lower()}"
-    if check.details_url:
-        header += f"\n{check.details_url}"
+    """One failing check: its name and URL, plus the log tail when gw has one.
+
+    `CheckRun.label` qualifies the job with its workflow — two workflows can each
+    have a `test` job, and the bare name wouldn't say which one broke.
+    """
+    header = f"{check.run.label} — {check.run.detail.lower()}"
+    if check.run.url:
+        header += f"\n{check.run.url}"
     if not check.log:
         return f"{header}\n(no log available — open the URL above to read it)"
     return f"{header}\n{_fenced(check.log)}"

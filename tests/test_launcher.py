@@ -596,9 +596,13 @@ def _feed(**over: object) -> ReviewFeed:
         ),
         "failing": (
             gh.FailingCheck(
-                name="verify",
-                conclusion="FAILURE",
-                details_url="https://github.com/org/repo/actions/runs/1/job/2",
+                run=gh.CheckRun(
+                    name="verify",
+                    state="failing",
+                    detail="FAILURE",
+                    url="https://github.com/org/repo/actions/runs/1/job/2",
+                    workflow="CI",
+                ),
                 log="E   assert 1 == 2",
             ),
         ),
@@ -609,7 +613,7 @@ def _feed(**over: object) -> ReviewFeed:
 
 def test_address_review_prompt_carries_the_feedback(isolated_xdg: Path, tmp_path: Path) -> None:
     """The whole point of the mode: the agent starts from what was said, not
-    from an instruction to go find it (ADR 0007)."""
+    from an instruction to go find it (ADR 0008)."""
     from goblin_watcher.agents.launcher import build_seed_prompt
 
     seed = build_seed_prompt(_issue_backed_task(tmp_path), review=_feed())
@@ -658,11 +662,15 @@ def test_address_review_prompt_shows_a_url_when_it_has_no_log(
     from goblin_watcher.agents.launcher import build_seed_prompt
 
     check = gh.FailingCheck(
-        name="circleci", conclusion="FAILURE", details_url="https://circleci.com/b/1"
+        run=gh.CheckRun(
+            name="circleci", state="failing", detail="FAILURE", url="https://circleci.com/b/1"
+        )
     )
     seed = build_seed_prompt(_issue_backed_task(tmp_path), review=_feed(failing=(check,)))
     assert "https://circleci.com/b/1" in seed
     assert "(no log available — open the URL above to read it)" in seed
+    # No workflow on a status context, so the label is the bare name.
+    assert "circleci — failure" in seed
 
 
 def test_address_review_prompt_names_the_repo_only_when_multi_repo(
@@ -689,7 +697,7 @@ def test_address_review_prompt_does_not_ask_for_github_writes(
     isolated_xdg: Path, tmp_path: Path
 ) -> None:
     """gw's house style keeps external writes behind explicit flags; the agent
-    reports in-session and pushes code, nothing more (ADR 0007)."""
+    reports in-session and pushes code, nothing more (ADR 0008)."""
     from goblin_watcher.agents.launcher import build_seed_prompt
 
     seed = _flat(build_seed_prompt(_issue_backed_task(tmp_path), review=_feed()))
@@ -744,9 +752,7 @@ def test_address_review_prompt_survives_backticks_in_the_evidence(
         comments=(gh.ReviewComment(author="alice", body="Wrong language tag.", created_at=""),),
     )
     check = gh.FailingCheck(
-        name="docs",
-        conclusion="FAILURE",
-        details_url="https://x/1",
+        run=gh.CheckRun(name="docs", state="failing", detail="FAILURE", url="https://x/1"),
         log="expected:\n```\nfoo\n```",
     )
     seed = build_seed_prompt(

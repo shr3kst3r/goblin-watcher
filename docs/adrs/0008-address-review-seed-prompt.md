@@ -1,4 +1,4 @@
-# 0007. Address-review mode fetches the feedback rather than telling the agent to
+# 0008. Address-review mode fetches the feedback rather than telling the agent to
 
 - Status: accepted
 - Date: 2026-08-13
@@ -68,6 +68,10 @@ Five constraints come with it:
    capped.** `reviewThreads` is not reachable through `gh pr view --json` at all,
    so the query is hand-written. Logs cost a subprocess each, so only the first
    `MAX_LOGGED_CHECKS` get one; the rest keep their URL and lose the inline log.
+   Which checks count as failed is decided by `_check_state`, the same function
+   `pr_check_runs` (ADR 0007's `gw pr checks`) uses, and a failed check is
+   carried as that command's `CheckRun` — a check `gw pr checks` calls failing
+   must be exactly one `--address-review` seeds.
 
 2. **Everything embedded is bounded.** Logs are clipped to their last
    `MAX_LOG_LINES` / `MAX_LOG_CHARS` (a job's error is at the end), comment

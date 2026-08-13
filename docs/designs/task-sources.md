@@ -146,7 +146,7 @@ Three things to know:
 
 ### Address-review mode (`--address-review`)
 
-`gw run --address-review` seeds the address-review brief: the same task context, plus the PR's outstanding feedback embedded verbatim, plus a brief to adjudicate each item against the code before changing anything. `--prompt` composes, narrowing the focus. ADR 0007 records why gw fetches the feedback instead of instructing the agent to.
+`gw run --address-review` seeds the address-review brief: the same task context, plus the PR's outstanding feedback embedded verbatim, plus a brief to adjudicate each item against the code before changing anything. `--prompt` composes, narrowing the focus. ADR 0008 records why gw fetches the feedback instead of instructing the agent to.
 
 `review_feed.collect(task)` does the gathering, once per repo on the task:
 
@@ -233,11 +233,11 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `src/goblin_watcher/linear/client.py` — `parse_identifier`, `LinearClient.fetch_issue`.
 - `src/goblin_watcher/gh.py` — `parse_issue_ref`, `issue_view`, `issue_state`, `normalize_repo`, `pr_review`, `check_run_log`.
 - `src/goblin_watcher/github_state.py` — TTL-cached issue-state refresh.
-- `src/goblin_watcher/review_feed.py` — PR-feedback gathering + the embedding bounds (ADR 0007).
+- `src/goblin_watcher/review_feed.py` — PR-feedback gathering + the embedding bounds (ADR 0008).
 - `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`, `format_review_block`.
 - `src/goblin_watcher/templates/spawn_prompt.md` — the work brief.
 - `src/goblin_watcher/templates/research_prompt.md` — the `--research` brief (ADR 0006).
-- `src/goblin_watcher/templates/address_review_prompt.md` — the `--address-review` brief (ADR 0007).
+- `src/goblin_watcher/templates/address_review_prompt.md` — the `--address-review` brief (ADR 0008).
 
 ## Tests
 

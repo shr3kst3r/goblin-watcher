@@ -2,7 +2,7 @@
 
 `gw run --address-review` seeds a session with what a reviewer actually said and
 what CI actually printed, so the agent starts from the feedback instead of from
-an instruction to go find it (ADR 0007). This module is the gathering half: it
+an instruction to go find it (ADR 0008). This module is the gathering half: it
 resolves each of the task's repos to a PR, pulls the unresolved threads and the
 failing checks' logs, and bounds how much of that reaches the prompt. Rendering
 lives in `agents/launcher`, next to the template it fills.
@@ -132,18 +132,11 @@ def _with_logs(review: gh.PrReview, repo_slug: str) -> gh.PrReview:
         if index >= MAX_LOGGED_CHECKS:
             enriched.append(check)
             continue
-        log = gh.check_run_log(repo_slug, check.details_url)
+        log = gh.check_run_log(repo_slug, check.run.url or "")
         clipped = (
             _tail(clean_log(log), max_lines=MAX_LOG_LINES, max_chars=MAX_LOG_CHARS) if log else ""
         )
-        enriched.append(
-            gh.FailingCheck(
-                name=check.name,
-                conclusion=check.conclusion,
-                details_url=check.details_url,
-                log=clipped,
-            )
-        )
+        enriched.append(gh.FailingCheck(run=check.run, log=clipped))
     return gh.PrReview(
         number=review.number,
         title=review.title,

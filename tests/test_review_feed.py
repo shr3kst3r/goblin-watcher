@@ -48,8 +48,10 @@ def _thread(body: str = "This leaks a handle.") -> gh.ReviewThread:
     )
 
 
-def _check(name: str = "verify", url: str = "https://github.com/o/r/actions/runs/1/job/2"):  # type: ignore[no-untyped-def]
-    return gh.FailingCheck(name=name, conclusion="FAILURE", details_url=url)
+def _check(
+    name: str = "verify", url: str = "https://github.com/o/r/actions/runs/1/job/2"
+) -> gh.FailingCheck:
+    return gh.FailingCheck(run=gh.CheckRun(name=name, state="failing", detail="FAILURE", url=url))
 
 
 def test_scratch_tasks_are_refused(tmp_path: Path) -> None:
@@ -140,7 +142,7 @@ def test_a_check_with_no_fetchable_log_keeps_its_url(tmp_path: Path) -> None:
         feed = review_feed.collect(task)
     check = feed.repos[0].review.failing[0]
     assert check.log == ""
-    assert check.details_url.endswith("/job/2")
+    assert (check.run.url or "").endswith("/job/2")
 
 
 def test_log_fetching_is_capped_but_the_checks_are_not(tmp_path: Path) -> None:

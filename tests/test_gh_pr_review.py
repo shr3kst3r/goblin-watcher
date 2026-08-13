@@ -141,7 +141,7 @@ def test_failing_checks_cover_both_rollup_node_types() -> None:
         )
     )
     assert review is not None
-    assert [(c.name, c.details_url) for c in review.failing] == [
+    assert [(c.run.name, c.run.url) for c in review.failing] == [
         ("build", "https://x/2"),
         ("legacy/ci", "https://x/3"),
     ]

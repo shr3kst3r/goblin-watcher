@@ -47,6 +47,7 @@ src/goblin_watcher/
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
 ├── review_feed.py         # PR review threads + failing-check logs for `gw run --address-review`
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
+├── worktree_setup.py      # [setup] copy/link/run bootstrap applied to new worktrees (ADR 0007)
 ├── picker.py              # questionary-backed interactive session picker
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini/antigravity impls + launcher
@@ -101,6 +102,15 @@ The same command set runs in CI (`.github/workflows/verify.yml`).
 - Never write outside: `<project>/.goblin/`, `<project>/.worktrees/`, the user's XDG dirs, or the project's working tree itself.
 - **Linear API is read-only by default.** Posting a comment requires the explicit `--notify-linear` flag on `gw pr open`.
 - 1Password `op` references resolve lazily; only fetched when actually needed.
+
+## Worktree setup
+
+A new worktree is a bare checkout, so `worktree_setup.py` applies a declared bootstrap to it: `copy` (gitignored files pulled in from the project root), `link` (symlinks for the big rebuildable ones), then `run` (commands executed in the new worktree). Config comes from the global `[setup]` table, or from `<project_root>/.goblin/setup.toml` when the project has one — the project file replaces the global table whole, mirroring `prompt.md`. See ADR 0007 and `docs/designs/worktree-setup.md`.
+
+Two invariants when touching this:
+
+- `copy`/`link` entries go through `worktree_setup.resolve_inside`, which refuses absolute paths, `..` components, and symlinks resolving outside the project root. Don't add a code path that joins a config-supplied path without it.
+- Setup runs where a worktree is *materialized* — that's what `commands/new.Created.materialized` tracks. Sources that adopt an existing checkout (`--dir`) don't run it.
 
 ## Adding an agent
 
