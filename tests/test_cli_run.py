@@ -338,3 +338,64 @@ def test_run_project_flag_task_missing_in_scope_errors(isolated_xdg: Path, tmp_p
     ):
         res2 = runner.invoke(app, ["run", "spike-only-alpha"])
     assert res2.exit_code == 0, res2.output
+
+
+def test_run_windowing_headless_spawns_detached_and_logs(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """End-to-end for gh-15: `--windowing headless` accepts, detaches, and logs.
+
+    Patched at `subprocess.Popen` so the real agent binary is never invoked.
+    """
+    _bootstrap_two_projects(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+
+    class _FakeProc:
+        pid = 1234
+
+    runner = CliRunner()
+    with patch(
+        "goblin_watcher.windowing.headless.subprocess.Popen", return_value=_FakeProc()
+    ) as popen:
+        res = runner.invoke(
+            app,
+            ["run", task.id, "--project", "alpha", "--new", "--windowing", "headless"],
+        )
+    assert res.exit_code == 0, res.output
+    # Print mode, not the TUI.
+    assert popen.call_args.args[0][:2] == ["claude", "--dangerously-skip-permissions"]
+    assert "-p" in popen.call_args.args[0]
+    # The session record was written before dispatch, and the log is named after it.
+    [refreshed] = state.list_tasks(proj)
+    [record] = refreshed.sessions
+    log = proj.root / ".goblin" / "logs" / f"{task.id}-{record.session_id}.log"
+    assert log.exists()
+    # The user is told where to look and which pid to kill. (Rich wraps the
+    # path, so only the pid and the leading segment are matchable verbatim.)
+    assert "pid 1234" in res.output
+    assert ".goblin/logs" in res.output.replace("\n", "")
+
+
+def test_run_windowing_headless_refuses_to_resume(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.windowing.headless.subprocess.Popen") as popen:
+        res = runner.invoke(
+            app,
+            [
+                "run",
+                task.id,
+                "--project",
+                "alpha",
+                "--session",
+                "whatever",
+                "--windowing",
+                "headless",
+            ],
+        )
+    assert res.exit_code != 0
+    assert popen.call_count == 0

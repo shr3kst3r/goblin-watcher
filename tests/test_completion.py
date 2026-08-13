@@ -150,4 +150,4 @@ def test_static_zsh_agent_flag_lists_choices() -> None:
 
 def test_static_zsh_windowing_flag_lists_choices() -> None:
     script = _static_zsh_script()
-    assert "(inline tmux)" in script
+    assert "(inline tmux headless)" in script

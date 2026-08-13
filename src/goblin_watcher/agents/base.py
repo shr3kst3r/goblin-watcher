@@ -57,6 +57,21 @@ class Agent(Protocol):
         """
         ...
 
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        """Argv to run `prompt` to completion non-interactively, then exit.
+
+        Every registered CLI has such a mode — `claude -p`, `codex exec`,
+        `agy -p`, `gemini -p`. It draws no TUI, reads no input, writes plain
+        text to stdout and exits when the work is done, which is what
+        `HeadlessWindower` needs to detach a run from any terminal.
+
+        Same `unsafe` / `session_id` contract as `spawn_command`. Agents with
+        no headless mode of their own raise `GoblinError`.
+        """
+        ...
+
     def new_session_id(self) -> str | None:
         """A fresh id to preassign to the next spawned session, or None.
 

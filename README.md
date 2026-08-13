@@ -461,7 +461,7 @@ gw config edit                       # $EDITOR, validated on save
 ```toml
 [defaults]
 agent = "claude"                  # "claude" | "codex" | "gemini" | "antigravity"
-windowing = "inline"              # "inline" | "tmux"
+windowing = "inline"              # "inline" | "tmux" | "headless" (see Headless windowing below)
 summary_ttl_seconds = 30          # how long a session summary is considered fresh
 unsafe = true                     # spawn agents with their bypass-permission flag (see below)
 
@@ -501,6 +501,31 @@ Set `windowing = "tmux"` in `config.toml`, or pass `--windowing tmux` on any spa
 
 Inline mode (default) just blocks on the agent process and returns when it exits.
 
+## Headless windowing (unattended runs)
+
+Set `windowing = "headless"`, or pass `--windowing headless` on a spawn command, to start an agent with no terminal at all:
+
+```bash
+gw new --issue 42 --windowing headless --prompt "fix this and open a PR"
+gw run eng-123 --new --windowing headless --prompt "rerun the failing tests"
+```
+
+`gw` starts the agent in the print mode every supported CLI already has (`claude -p`, `codex exec`, `agy -p`, `gemini -p`), detaches it into its own process group, and returns immediately:
+
+- stdout and stderr are appended to `<project>/.goblin/logs/<task>-<session>.log`, and the child's pid goes in a sibling `.pid` file. Both paths are printed at spawn.
+- stdin is `/dev/null`, so an agent that asks for input gets EOF instead of hanging.
+- The run survives the shell that launched it — a cron slot or a queue worker can exit straight away.
+
+To be told when it finishes, install background sync (`gw sync install`) and keep the `agent-idle` event on: it fires once, on the edge, when the session's transcript goes quiet. That's the whole notification path — nothing waits on the agent, so its exit status isn't recorded. Check the log for a run that failed to start.
+
+Three things headless mode won't do:
+
+- **Resume.** It only starts fresh sessions; print mode runs one prompt to completion. Start another headless run with the follow-up as its prompt.
+- **Take input.** `gw session send` refuses — there's no prompt sitting there to type into.
+- **Ask permission.** Keep `unsafe = true` (the default). Without it the agent stops at its first approval prompt with nobody to answer, which looks like a hang; `gw` warns but doesn't refuse.
+
+Also note that `agent-idle` needs a transcript gw can read, which today means claude and codex. A headless gemini or antigravity run completes silently.
+
 ### Talk to a running agent
 
 ```bash
@@ -513,7 +538,7 @@ The text is typed into the agent's pane and submitted, exactly as if you had att
 
 `gw` labels each pane with its session id when it opens it, so `--session` addresses one conversation on a task running several. With a single live pane the session is unambiguous and `--session` is optional. Panes that predate this labelling (or an agent spawned by hand) still take input as long as they're the only pane on the task.
 
-Inline windowing has no pane to address — the agent owns the terminal it was launched from — so `gw session send` says so rather than failing obscurely.
+Inline windowing has no pane to address — the agent owns the terminal it was launched from — so `gw session send` says so rather than failing obscurely. Headless runs refuse for their own reason: stdin is `/dev/null`.
 
 ## Agent support
 
@@ -523,6 +548,8 @@ Inline windowing has no pane to address — the agent owns the terminal it was l
 | **codex** | `codex "<prompt>"` | `codex resume` (codex's own picker) | Full — walks `~/.codex/sessions/**/rollout-*.jsonl`, matches tasks on `session_meta.cwd`, parses ids, summaries, turn counts |
 | **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | None — cwd-scoped checkpoints, no stable id; `list_sessions` / `read_transcript` are stubs, so sessions carry no summary |
 | **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Partial — conversation id recovered from `~/.gemini/antigravity-cli/cache/last_conversations.json`; transcripts live in SQLite and aren't parsed |
+
+For unattended runs (`--windowing headless`) each agent is launched in its print mode instead of the spawn column above: `claude -p`, `codex exec`, `agy -p`, `gemini -p`.
 
 Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
@@ -549,7 +576,8 @@ gw gh-<N>      [...any `gw new` flag]       # sugar for `gw new --issue <N>`
 gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--title ...] [--from ...] [--project NAME] [--with-project NAME]
        [--repo URL] [--agent ...] [--prompt ...] [--research] [--adversarial-review]
-       [--rm|--rm-force] [--no-launch] [--no-setup] [--windowing inline|tmux] [--unsafe|--no-unsafe]
+       [--rm|--rm-force] [--no-launch] [--no-setup]
+       [--windowing inline|tmux|headless] [--unsafe|--no-unsafe]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
        [--research] [--adversarial-review]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
@@ -592,6 +620,7 @@ Always reach for `gw <command> --help` for the full option list.
 ├── .goblin/
 │   ├── project.json                      # this project's record
 │   ├── setup.toml                        # optional; replaces the global [setup] table
+│   ├── logs/                             # headless runs: <task>-<session>.log + .pid
 │   └── tasks/
 │       ├── eng-123.json                  # one file per task; carries sessions[]
 │       └── .eng-123.lock                 # advisory lock sidecar for that task

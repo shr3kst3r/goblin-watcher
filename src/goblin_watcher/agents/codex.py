@@ -47,6 +47,18 @@ class CodexAgent:
         del cwd, session_id
         return [*self._prefix(unsafe), prompt]
 
+    def headless_command(
+        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+    ) -> list[str]:
+        # `codex exec` is codex's non-interactive mode. The bypass flag goes
+        # *after* the subcommand: `exec` declares its own copy, and putting it
+        # before would rely on the root command's parser accepting it.
+        # A rollout is still written under ~/.codex/sessions, so transcript
+        # discovery by cwd is unchanged.
+        del cwd, session_id
+        flags = list(self.unsafe_flags) if unsafe else []
+        return [self.binary, "exec", *flags, prompt]
+
     def new_session_id(self) -> str | None:
         # The codex CLI has no way to preassign a session id at spawn.
         return None

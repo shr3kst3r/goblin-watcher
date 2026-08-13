@@ -9,6 +9,15 @@ from goblin_watcher.models import Task
 @runtime_checkable
 class Windower(Protocol):
     name: str
+    # True when `run` returns while the agent is still running, rather than
+    # blocking until it exits. The launcher skips post-run reconciliation for
+    # these: the transcript the agent is about to write doesn't exist yet, so
+    # `capture_session_id` would race it (or pick up an older session).
+    detaches: bool
+    # True when the windower hosts no terminal at all, so the agent has to be
+    # launched in its non-interactive print/exec mode
+    # (`Agent.headless_command`) rather than its interactive one.
+    headless: bool
 
     def run(
         self,

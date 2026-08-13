@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from goblin_watcher import paths
 
-Windowing = str  # "inline" | "tmux" — validated where used, not here.
+Windowing = str  # "inline" | "tmux" | "headless" — validated where used, not here.
 
 # Orientation of additional panes opened by `tmux split-window` for second+
 # sessions on the same task. "vertical" stacks panes top-over-bottom (tmux
