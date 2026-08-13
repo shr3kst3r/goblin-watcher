@@ -124,7 +124,7 @@ Accepts three forms, parsed by `gh.parse_issue_ref`:
 
 After Task creation (and unless `--no-launch`), the launcher needs a prompt string for `agent.spawn_command(prompt=...)`.
 
-`agents/launcher.build_seed_prompt(task)` selects one of two templates and fills the same context slots in either — a **work brief** (`templates/spawn_prompt.md`, the default) or a **research brief** (`templates/research_prompt.md`, when `research=True`). ADR 0006 records why a work mode is an alternate template rather than a canned `--prompt` or a slash-command bypass like `--adversarial-review`.
+`agents/launcher.build_seed_prompt(task)` selects one of three templates and fills the same context slots in each — a **work brief** (`templates/spawn_prompt.md`, the default), a **research brief** (`templates/research_prompt.md`, when `research=True`), or an **address-review brief** (`templates/address_review_prompt.md`, when a `review` feed is passed). ADR 0006 records why a work mode is an alternate template rather than a canned `--prompt` or a slash-command bypass like `--adversarial-review`.
 
 The `{ticket_id}` / `{title}` / `{description}` slots are filled from whichever tracking item the task carries (`Task.ticket_id` / `Task.ticket_title`):
 
@@ -143,6 +143,25 @@ Three things to know:
 - **It requires a tracking item.** `gw new --research` is refused for `--branch`, `--branch-name`, `--branch-auto`, `--dir`, and `--pr`; `gw run --research` is refused for any task carrying neither a Linear ticket nor a GitHub issue (scratch tasks included). A research brief about nothing is a silent no-op, so gw refuses loudly.
 - **The read-only boundary is advisory, not enforced.** `defaults.unsafe = true` is the documented default, so the agent runs with bypassed permissions and could still push or comment. What research mode buys is that the agent is not *instructed* to mutate anything; gw gates no command on it.
 - **The mode is a property of the session, not the task.** Nothing is persisted on `Task`, so a research session can be followed by an ordinary implementation session on the same task; `gw run --research` re-derives the mode from the flag each time.
+
+### Address-review mode (`--address-review`)
+
+`gw run --address-review` seeds the address-review brief: the same task context, plus the PR's outstanding feedback embedded verbatim, plus a brief to adjudicate each item against the code before changing anything. `--prompt` composes, narrowing the focus. ADR 0007 records why gw fetches the feedback instead of instructing the agent to.
+
+`review_feed.collect(task)` does the gathering, once per repo on the task:
+
+1. Resolve a PR URL — `TaskRepo.pr_url` when the record has one, else `gh.pr_for_branch` (a PR opened by hand is invisible on the record until something backfills it).
+2. `gh.pr_review(repo, number)` — one hand-written GraphQL query returning unresolved review threads (with diff hunks and full reply chains), `CHANGES_REQUESTED`/`COMMENTED` review bodies, and the head commit's check rollup. `reviewThreads` is not reachable through `gh pr view --json`, which is why the query is hand-written rather than a `gh` convenience call.
+3. `gh.check_run_log(repo, details_url)` per failing check — `gh run view --job <id> --log-failed`, with the job id parsed out of the Actions details URL. Non-Actions status contexts keep their URL and contribute no log.
+
+Fetched logs are first cleaned (`review_feed.clean_log` drops `gh`'s per-line job/step/timestamp stamp, its BOM, and ANSI colour), then everything embedded is bounded by the `MAX_*` constants in `review_feed`: log tails, comment-body heads, diff-hunk tails, and the number of checks that get a log fetch at all. Cleaning before clipping is deliberate — otherwise most of the budget is spent on scaffolding. Each clip leaves a visible marker.
+
+Four things to know:
+
+- **It requires a PR with something outstanding.** No PR, an unreadable PR, and a fully-clean PR are three distinct refusals. Pending checks are not failing checks. Scratch tasks are rejected outright.
+- **Unlike `--research`, it does not require a tracking item** — the input is the PR, so a `--branch`- or `--pr`-sourced task is a valid target.
+- **The brief forbids writing to GitHub.** The agent reports in-session and pushes with `gw pr open` (idempotent for an open PR). Replying to and resolving threads stays the user's, in keeping with how `--notify-linear` gates the only other external write.
+- **Plain PR conversation comments are excluded** — only review threads carry resolved/unresolved state, and without it there is no way to tell standing feedback from feedback already handled.
 
 ## Tracking-item state refresh
 
@@ -212,11 +231,13 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `src/goblin_watcher/slug.py` — `branch_slug`, `slugify`.
 - `src/goblin_watcher/git.py` — `branch_exists`, `remote_branch_exists`, `create_branch_from_remote`, `worktree_add`, `main_repo_root`.
 - `src/goblin_watcher/linear/client.py` — `parse_identifier`, `LinearClient.fetch_issue`.
-- `src/goblin_watcher/gh.py` — `parse_issue_ref`, `issue_view`, `issue_state`, `normalize_repo`.
+- `src/goblin_watcher/gh.py` — `parse_issue_ref`, `issue_view`, `issue_state`, `normalize_repo`, `pr_review`, `check_run_log`.
 - `src/goblin_watcher/github_state.py` — TTL-cached issue-state refresh.
-- `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`.
+- `src/goblin_watcher/review_feed.py` — PR-feedback gathering + the embedding bounds (ADR 0007).
+- `src/goblin_watcher/agents/launcher.py` — `build_seed_prompt`, `format_review_block`.
 - `src/goblin_watcher/templates/spawn_prompt.md` — the work brief.
 - `src/goblin_watcher/templates/research_prompt.md` — the `--research` brief (ADR 0006).
+- `src/goblin_watcher/templates/address_review_prompt.md` — the `--address-review` brief (ADR 0007).
 
 ## Tests
 
@@ -224,8 +245,10 @@ and `gw task rm` tears down every worktree + the workspace directory.
 - `tests/test_cli_new_sources.py` — end-to-end for `--branch-name`, `--branch`, `--dir`, `--pr`.
 - `tests/test_cli_linear_flow.py` — end-to-end for `--linear` (with `pytest-httpx` mock).
 - `tests/test_cli_issue_flow.py` — end-to-end for `--issue` and the `gw gh-42` shorthand.
-- `tests/test_launcher.py` — `build_seed_prompt` for both the work and research briefs.
-- `tests/test_cli_run.py` — `gw run`, including `--research` validation and seeding.
+- `tests/test_launcher.py` — `build_seed_prompt` for all three briefs.
+- `tests/test_cli_run.py` — `gw run`, including `--research` and `--address-review` validation and seeding.
+- `tests/test_review_feed.py` — PR resolution, the refusal cases, and the embedding bounds.
+- `tests/test_gh_pr_review.py` — GraphQL response parsing for `pr_review` + `check_run_log`.
 - `tests/test_gh_issues.py` — reference parsing and the `gh issue` wrappers.
 - `tests/test_github_state.py` — the issue-state TTL + `gw status` rendering.
 - `tests/test_git_worktree.py` — the `worktree_add` / branch-existence primitives.

@@ -9,6 +9,7 @@ from goblin_watcher.agents.base import RawSession, TranscriptSummary
 from goblin_watcher.agents.launcher import Fresh, Resume, launch
 from goblin_watcher.cli import app
 from goblin_watcher.models import Task
+from goblin_watcher.review_feed import ReviewFeed
 
 
 class _StubAgent:
@@ -558,3 +559,201 @@ def test_build_seed_prompt_without_any_ticket_says_so(isolated_xdg: Path, tmp_pa
     seed = build_seed_prompt(_bootstrap(tmp_path))
     assert "(no Linear issue or GitHub issue attached — fresh task)" in seed
     assert "SPIKE-FOO" in seed
+
+
+def _feed(**over: object) -> ReviewFeed:
+    """A one-repo review feed with one unresolved thread and one failing check."""
+    from goblin_watcher import gh
+    from goblin_watcher.review_feed import RepoReview, ReviewFeed
+
+    defaults: dict[str, object] = {
+        "number": 34,
+        "title": "Add --address-review",
+        "state": "OPEN",
+        "url": "https://github.com/org/repo/pull/34",
+        "threads": (
+            gh.ReviewThread(
+                path="src/goblin_watcher/gh.py",
+                line=120,
+                is_outdated=False,
+                diff_hunk="@@ -118,3 +118,3 @@\n-    return None\n+    return out",
+                comments=(
+                    gh.ReviewComment(
+                        author="alice",
+                        body="This swallows the error.",
+                        created_at="2026-08-13T10:00:00Z",
+                    ),
+                ),
+            ),
+        ),
+        "summaries": (
+            gh.ReviewSummary(
+                author="bob",
+                state="CHANGES_REQUESTED",
+                body="Two things before this lands.",
+                submitted_at="2026-08-13T11:00:00Z",
+            ),
+        ),
+        "failing": (
+            gh.FailingCheck(
+                name="verify",
+                conclusion="FAILURE",
+                details_url="https://github.com/org/repo/actions/runs/1/job/2",
+                log="E   assert 1 == 2",
+            ),
+        ),
+    }
+    review = gh.PrReview(**{**defaults, **over})  # type: ignore[arg-type]
+    return ReviewFeed(repos=(RepoReview(project="alpha", review=review),))
+
+
+def test_address_review_prompt_carries_the_feedback(isolated_xdg: Path, tmp_path: Path) -> None:
+    """The whole point of the mode: the agent starts from what was said, not
+    from an instruction to go find it (ADR 0007)."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    seed = build_seed_prompt(_issue_backed_task(tmp_path), review=_feed())
+    assert seed.startswith("Address the review feedback on this pull request.")
+    # Task context survives, exactly as it does for the other two briefs.
+    assert "org/repo#11: Add a research option" in seed
+    assert "PR #34 (OPEN): https://github.com/org/repo/pull/34" in seed
+    assert "Unresolved review threads (1):" in seed
+    assert "[1] src/goblin_watcher/gh.py:120" in seed
+    assert "This swallows the error." in seed
+    assert "Review summaries:" in seed
+    assert "Two things before this lands." in seed
+    assert "Failing checks (1):" in seed
+    assert "E   assert 1 == 2" in seed
+    assert "{" not in seed.split("```")[0]  # every template slot was filled
+
+
+def test_address_review_prompt_marks_outdated_threads(isolated_xdg: Path, tmp_path: Path) -> None:
+    """An outdated hunk is stale evidence — the agent has to re-read the code
+    rather than trust what the thread quotes."""
+    from goblin_watcher import gh
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    stale = gh.ReviewThread(
+        path="src/gh.py",
+        line=None,
+        is_outdated=True,
+        diff_hunk="",
+        comments=(gh.ReviewComment(author="alice", body="Still wrong.", created_at=""),),
+    )
+    seed = build_seed_prompt(_issue_backed_task(tmp_path), review=_feed(threads=(stale,)))
+    assert "[1] src/gh.py  (outdated — the diff has moved since this was written)" in seed
+    # A thread GitHub reports without a line renders the bare path, never
+    # `src/gh.py:None`.
+    assert "src/gh.py:" not in seed
+    # An empty hunk contributes no fence at all rather than an empty one.
+    assert "```diff" not in seed
+
+
+def test_address_review_prompt_shows_a_url_when_it_has_no_log(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A third-party status context has no fetchable log; saying so beats
+    rendering an empty code fence that reads as "CI printed nothing"."""
+    from goblin_watcher import gh
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    check = gh.FailingCheck(
+        name="circleci", conclusion="FAILURE", details_url="https://circleci.com/b/1"
+    )
+    seed = build_seed_prompt(_issue_backed_task(tmp_path), review=_feed(failing=(check,)))
+    assert "https://circleci.com/b/1" in seed
+    assert "(no log available — open the URL above to read it)" in seed
+
+
+def test_address_review_prompt_names_the_repo_only_when_multi_repo(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The same comment text against two checkouts is ambiguous without a label,
+    and noise with one."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+    from goblin_watcher.review_feed import RepoReview, ReviewFeed
+
+    task = _issue_backed_task(tmp_path)
+    single = _feed()
+    assert "[alpha] PR #34" not in build_seed_prompt(task, review=single)
+
+    pair = ReviewFeed(
+        repos=(*single.repos, RepoReview(project="beta", review=single.repos[0].review))
+    )
+    seed = build_seed_prompt(task, review=pair)
+    assert "[alpha] PR #34" in seed
+    assert "[beta] PR #34" in seed
+
+
+def test_address_review_prompt_does_not_ask_for_github_writes(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """gw's house style keeps external writes behind explicit flags; the agent
+    reports in-session and pushes code, nothing more (ADR 0007)."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    seed = _flat(build_seed_prompt(_issue_backed_task(tmp_path), review=_feed()))
+    assert "Do not reply to, resolve, or otherwise write to the review threads on GitHub" in seed
+    assert "do not comment on the Linear ticket or the GitHub issue" in seed
+    assert "Report here, in this session, what you changed" in seed
+    # Pushing the fix *is* the point, so the PR instruction stays — as a push,
+    # not as "open a second PR".
+    assert "push them with `gw pr open`" in seed
+
+
+def test_address_review_prompt_narrows_with_a_user_prompt(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """--prompt composes here as it does with --research: it focuses the work
+    instead of replacing the brief's trailer."""
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    task = _issue_backed_task(tmp_path)
+    seed = build_seed_prompt(task, "Just the gh.py thread.", review=_feed())
+    assert "Focus on the following in particular:" in seed
+    assert "Just the gh.py thread." in seed
+    # Absent prompt renders nothing at all, not an empty heading.
+    assert "Focus on the following" not in build_seed_prompt(task, review=_feed())
+
+
+def test_address_review_session_is_recognizable_in_the_picker(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """`_label_from_prompt` takes the first 80 chars, so the mode shows up in
+    the session list without anything being persisted on the Task."""
+    from goblin_watcher.agents.launcher import _label_from_prompt, build_seed_prompt
+
+    seed = build_seed_prompt(_issue_backed_task(tmp_path), review=_feed())
+    assert _label_from_prompt(seed).startswith("Address the review feedback")
+
+
+def test_address_review_prompt_survives_backticks_in_the_evidence(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A diff of a markdown file — or a CI log echoing one — carries its own ```
+    run. A fixed fence would close there and turn the rest into prose."""
+    from goblin_watcher import gh
+    from goblin_watcher.agents.launcher import build_seed_prompt
+
+    hunk = "@@ -1,4 +1,4 @@\n+```python\n+x = 1\n+```"
+    thread = gh.ReviewThread(
+        path="README.md",
+        line=4,
+        is_outdated=False,
+        diff_hunk=hunk,
+        comments=(gh.ReviewComment(author="alice", body="Wrong language tag.", created_at=""),),
+    )
+    check = gh.FailingCheck(
+        name="docs",
+        conclusion="FAILURE",
+        details_url="https://x/1",
+        log="expected:\n```\nfoo\n```",
+    )
+    seed = build_seed_prompt(
+        _issue_backed_task(tmp_path), review=_feed(threads=(thread,), failing=(check,))
+    )
+    assert "````diff" in seed
+    assert "+```python" in seed
+    # The comment after the hunk is still outside any fence.
+    assert "Wrong language tag." in seed
+    assert "````\nexpected:" in seed

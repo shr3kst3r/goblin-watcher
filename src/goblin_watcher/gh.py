@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from goblin_watcher.errors import GoblinError, MissingDependencyError
 
@@ -326,6 +327,14 @@ def pr_state(url: str) -> str | None:
         return None
 
 
+# The conclusions/states gw reads as "this check failed", shared by the coarse
+# `pr_checks` rollup and the per-check selection `pr_review` does. A check that
+# is failing for one and passing for the other would be a confusing lie.
+_FAILING_STATES = frozenset(
+    {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
+)
+
+
 def pr_checks(url: str) -> str | None:
     """Roll up a PR's CI checks to `passing`, `failing`, or `pending`.
 
@@ -351,7 +360,7 @@ def pr_checks(url: str) -> str | None:
     if not rollup:
         return None
 
-    failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+    failing = _FAILING_STATES
     pending = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED"}
     saw_pending = False
     for check in rollup:
@@ -533,3 +542,290 @@ def pr_for_branch(cwd: Path, branch: str) -> dict[str, str] | None:
         "state": item.get("state", ""),
         "number": str(item.get("number", "")),
     }
+
+
+@dataclass(frozen=True)
+class ReviewComment:
+    """One comment inside a review thread."""
+
+    author: str
+    body: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """An unresolved inline review thread, in file order.
+
+    `path`/`line` are None for a thread whose anchor GitHub no longer reports
+    (a file deleted since the comment landed). `is_outdated` means the diff has
+    moved on underneath it — worth showing, but the agent should re-read the
+    code rather than trust the hunk.
+    """
+
+    path: str | None
+    line: int | None
+    is_outdated: bool
+    diff_hunk: str
+    comments: tuple[ReviewComment, ...]
+
+
+@dataclass(frozen=True)
+class ReviewSummary:
+    """A review's top-level body — the prose a reviewer writes above the inline
+    comments, which carries no resolved/unresolved state of its own."""
+
+    author: str
+    state: str
+    body: str
+    submitted_at: str
+
+
+@dataclass(frozen=True)
+class FailingCheck:
+    """One check run or status context gw reads as failed.
+
+    `details_url` points at the run's page; `log` is the tail of its failing
+    steps when gw could fetch them (GitHub Actions only) and "" otherwise.
+    """
+
+    name: str
+    conclusion: str
+    details_url: str
+    log: str = ""
+
+
+@dataclass(frozen=True)
+class PrReview:
+    """A PR's outstanding review feedback: unresolved threads + failing checks."""
+
+    number: int
+    title: str
+    state: str
+    url: str
+    threads: tuple[ReviewThread, ...]
+    summaries: tuple[ReviewSummary, ...]
+    failing: tuple[FailingCheck, ...]
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.threads or self.summaries or self.failing)
+
+
+# One round-trip for everything `--address-review` seeds. Splitting this into
+# `gh pr view` calls would cost a request per facet and still not reach
+# `reviewThreads`, which the REST-backed `gh pr view --json` does not expose.
+_PR_REVIEW_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number
+      title
+      state
+      url
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          isOutdated
+          path
+          line
+          comments(first: 50) {
+            nodes { author { login } body createdAt diffHunk }
+          }
+        }
+      }
+      reviews(last: 30) {
+        nodes { author { login } state body submittedAt }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name conclusion detailsUrl }
+                  ... on StatusContext { context state targetUrl }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Review states whose body is feedback to act on. An APPROVED review's body is
+# congratulation, and a DISMISSED one has been explicitly overruled.
+_ACTIONABLE_REVIEW_STATES = frozenset({"CHANGES_REQUESTED", "COMMENTED"})
+
+# `https://github.com/owner/repo/actions/runs/<run>/job/<job>` — the shape a
+# GitHub Actions check run reports as its details URL, and the only one whose
+# logs gw knows how to fetch.
+_ACTIONS_JOB_URL_RE = re.compile(r"/actions/runs/\d+/job/(?P<job>\d+)")
+
+
+def _obj(value: object) -> dict[str, object]:
+    """A decoded JSON object, or `{}` for anything else.
+
+    GraphQL nulls out a whole field — a connection, an author, a rollup — when it
+    can't resolve it, so every level of the response has to survive being None.
+    Funnelling that through one helper keeps the walk below free of `isinstance`
+    ladders.
+    """
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+
+
+def _nodes(value: object) -> list[dict[str, object]]:
+    """`{"nodes": [...]}` → the dict entries, or `[]` for anything else."""
+    nodes = _obj(value).get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [_obj(n) for n in nodes if isinstance(n, dict)]
+
+
+def _login(value: object) -> str:
+    """`{"login": "alice"}` → `alice`. Author is null for a deleted account."""
+    return str(_obj(value).get("login") or "unknown")
+
+
+def _rollup_contexts(pr: dict[str, object]) -> list[dict[str, object]]:
+    """The check runs on the PR's head commit, or `[]` when there are none."""
+    commits = _nodes(pr.get("commits"))
+    if not commits:
+        return []
+    rollup = _obj(_obj(commits[-1].get("commit")).get("statusCheckRollup"))
+    return _nodes(rollup.get("contexts"))
+
+
+def _failing_checks(pr: dict[str, object]) -> tuple[FailingCheck, ...]:
+    """Select the failed checks from the head commit's rollup.
+
+    Handles both node types the rollup mixes: `CheckRun` (name + conclusion) and
+    the legacy `StatusContext` (context + state).
+    """
+    out: list[FailingCheck] = []
+    for ctx in _rollup_contexts(pr):
+        conclusion = str(ctx.get("conclusion") or ctx.get("state") or "").upper()
+        if conclusion not in _FAILING_STATES:
+            continue
+        name = str(ctx.get("name") or ctx.get("context") or "(unnamed check)")
+        url = str(ctx.get("detailsUrl") or ctx.get("targetUrl") or "")
+        out.append(FailingCheck(name=name, conclusion=conclusion, details_url=url))
+    return tuple(out)
+
+
+def pr_review(repo: str, number: int) -> PrReview | None:
+    """A PR's unresolved review threads, actionable review bodies, and failed checks.
+
+    Best-effort like the rest of this module's read paths: a missing `gh`, an
+    unparseable repo, or a failed API call all read as "no signal" (None) so the
+    caller can decide whether that is fatal. An *empty* `PrReview` is a different
+    answer — it means gw asked and the PR genuinely has nothing outstanding.
+    """
+    if shutil.which("gh") is None:
+        return None
+    owner, _, name = repo.partition("/")
+    if not owner or not name:
+        return None
+    res = _run(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={number}",
+            "-f",
+            f"query={_PR_REVIEW_QUERY}",
+        ]
+    )
+    import json
+
+    try:
+        payload = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+    # `gh` exits non-zero on a GraphQL error but still prints a body, so stdout
+    # is the signal, not the return code. A null anywhere down the chain (bad
+    # credentials, deleted PR, repo gone) collapses to `{}` and reads as
+    # "no signal" — a real PR always comes back with fields.
+    repo_data = _obj(_obj(payload).get("data")).get("repository")
+    pr = _obj(_obj(repo_data).get("pullRequest"))
+    if not pr:
+        return None
+
+    threads: list[ReviewThread] = []
+    for node in _nodes(pr.get("reviewThreads")):
+        if node.get("isResolved"):
+            continue
+        raw_comments = _nodes(node.get("comments"))
+        comments = tuple(
+            ReviewComment(
+                author=_login(c.get("author")),
+                body=str(c.get("body") or "").strip(),
+                created_at=str(c.get("createdAt") or ""),
+            )
+            for c in raw_comments
+        )
+        # A thread whose comments all came back empty carries nothing to act on.
+        if not any(c.body for c in comments):
+            continue
+        # The hunk is a property of the thread, but GitHub hangs it off each
+        # comment; the first one is the anchor the thread was opened against.
+        first = raw_comments[0]
+        line = node.get("line")
+        threads.append(
+            ReviewThread(
+                path=str(node["path"]) if node.get("path") else None,
+                line=int(line) if isinstance(line, int) else None,
+                is_outdated=bool(node.get("isOutdated")),
+                diff_hunk=str(first.get("diffHunk") or ""),
+                comments=comments,
+            )
+        )
+
+    summaries = tuple(
+        ReviewSummary(
+            author=_login(node.get("author")),
+            state=str(node.get("state") or ""),
+            body=str(node.get("body") or "").strip(),
+            submitted_at=str(node.get("submittedAt") or ""),
+        )
+        for node in _nodes(pr.get("reviews"))
+        if str(node.get("state") or "").upper() in _ACTIONABLE_REVIEW_STATES
+        and str(node.get("body") or "").strip()
+    )
+
+    reported_number = pr.get("number")
+    return PrReview(
+        number=reported_number if isinstance(reported_number, int) else number,
+        title=str(pr.get("title") or ""),
+        state=str(pr.get("state") or ""),
+        url=str(pr.get("url") or ""),
+        threads=tuple(threads),
+        summaries=summaries,
+        failing=_failing_checks(pr),
+    )
+
+
+def check_run_log(repo: str, details_url: str) -> str | None:
+    """The failing steps' log for a GitHub Actions check run, or None.
+
+    Returns None for any check gw can't fetch logs for — a non-Actions status
+    context, a run whose logs have expired, a missing `gh`. Callers show the
+    check's URL in that case rather than pretending there was no failure.
+    """
+    if shutil.which("gh") is None:
+        return None
+    m = _ACTIONS_JOB_URL_RE.search(details_url)
+    if m is None:
+        return None
+    res = _run(["run", "view", "--repo", repo, "--job", m.group("job"), "--log-failed"])
+    if res.returncode != 0:
+        return None
+    return res.stdout.strip() or None
