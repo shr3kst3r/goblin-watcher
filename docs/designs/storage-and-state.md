@@ -222,6 +222,29 @@ We do this to keep `.goblin/` and `.worktrees/` invisible to the host repo's too
 
 `state.find_task_by_worktree(project, path)` walks `list_tasks` looking for a worktree match — used by `gw run` to resolve `cwd → task`.
 
+## State drift and repair
+
+Nothing gw runs causes the drift that actually bites: a worktree removed with `rm -rf`, a branch deleted after a squash-merge on GitHub, `.git/info/exclude` clobbered by a re-`git init`, a task record deleted by hand. `drift.py` is the read-only detector; `gw doctor` renders the findings and `gw doctor --repair` applies the safe subset.
+
+| `DriftKind` | Detected by | Repairable |
+| --- | --- | --- |
+| `orphan-worktree` | a `git worktree list` entry under `<project>/.worktrees/` (or the configured `worktree_root`) that no task record claims | no |
+| `missing-worktree` | `repo.worktree_path` is gone while `repo.branch` still exists | no |
+| `missing-branch` | `repo.branch` is gone while the worktree is still on disk | no |
+| `orphan-record` | *every* repo on the task has lost both its worktree and its branch (or a scratch task's directory is gone) | yes — `state.delete_task_record` |
+| `missing-exclude` | `.git/info/exclude` lacks `.goblin/` or `.worktrees/` | yes — `git.add_to_local_exclude` |
+| `stale-indicator` | `sync/indicators.json` rows keyed to tasks that no longer exist | yes — dropped from the cache |
+
+The repairable set is exactly "fixes that cannot destroy work". `drift.REPAIRABLE_KINDS` is the whitelist, and `Finding.__post_init__` raises if a finding of any other kind claims to be repairable — the invariant is enforced in code, not by review. It matches sync's prune step, which refuses to force-delete a branch it can't prove is merged (`sync/engine._prune_blocker`).
+
+Three details that are easy to get wrong:
+
+- **The worktree-to-record match is global, not per-project.** A multi-repo task's secondary worktree lives in *that* repo's `.worktrees/` while the record lives with the primary project, so `drift._known_worktrees` collects claimed paths across every project before anything is called an orphan.
+- **Orphan detection is scoped to the project's worktree root.** That directory is gw's own; a worktree the user created elsewhere in the repo is deliberately not gw's business.
+- **An unregistered project means "can't tell", not "gone".** A repo whose project isn't in the registry can't be probed for a branch, and that ambiguity must never be the reason a record gets dropped.
+
+Detection never raises: a project whose root, repo, or exclude file can't be read is skipped so the rest of the report survives. Any finding makes `gw doctor` exit non-zero, which is what makes it usable as a scripted health gate.
+
 ## Migration model (none yet)
 
 `GlobalState.schema_version = 1` is the only versioned schema today. Plan: when v2 is needed, add a `state/migrations.py` that dispatches on the version field and rewrites in place. Per-project records (`project.json`, task JSON) don't carry version fields yet — if they ever need migration we'll add them then.
@@ -232,3 +255,4 @@ We do this to keep `.goblin/` and `.worktrees/` invisible to the host repo's too
 - `tests/test_paths.py` — XDG resolution, project meta dirs, worktree root override.
 - `tests/test_cli_project.py` — full project CRUD via the CLI.
 - `tests/test_cli_task.py` — task lifecycle inside a project.
+- `tests/test_cli_doctor_drift.py` — every drift kind, what `--repair` fixes, and what it refuses to touch.

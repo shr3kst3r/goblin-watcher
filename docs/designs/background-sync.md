@@ -275,7 +275,13 @@ Four surfaces sit on top:
   `gw history prune`. A pass every few minutes forever is otherwise an unbounded
   file.
 
-`gw doctor` carries an advisory row reporting whether sync is scheduled.
+`gw doctor` carries a `background sync` row. "Not scheduled" stays advisory —
+sync is opt-in. An *installed* job is held to a higher bar and fails doctor when
+it isn't actually running: launchd never loaded the plist, the plist's
+`StartInterval` is unreadable, or the last pass finished more than three
+intervals ago (the plist's mtime standing in for "installed at" when no pass has
+run yet, since `RunAtLoad` is off). A job that quietly stopped firing is
+otherwise indistinguishable from one with nothing to report.
 
 The plist bakes in the installing shell's `PATH`. launchd hands a job only
 `/usr/bin:/bin:/usr/sbin:/sbin`, so without it a scheduled pass loses `gh` (PR
