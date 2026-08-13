@@ -256,7 +256,7 @@ def build_seed_prompt(
                 ticket_id=task.ticket_id,
                 title=task.ticket_title or task.id,
                 repos_block=_format_repos_block(task),
-                description=_format_ticket_context(task),
+                description=format_ticket_context(task),
                 addition_block=addition_block,
                 review_block=format_review_block(review),
                 focus=_format_focus("Focus on the following in particular", prompt),
@@ -293,7 +293,7 @@ def build_seed_prompt(
         ticket_id=task.ticket_id,
         title=task.ticket_title or task.id,
         repos_block=_format_repos_block(task),
-        description=_format_ticket_context(task),
+        description=format_ticket_context(task),
         addition_block=addition_block,
         trailer=trailer,
     )
@@ -313,7 +313,7 @@ def render_mode_prompt(
         "ticket_id": task.ticket_id,
         "title": task.ticket_title or task.id,
         "repos_block": _format_repos_block(task),
-        "description": _format_ticket_context(task),
+        "description": format_ticket_context(task),
         "addition_block": addition_block,
         "focus": _format_focus(mode.focus_lead, user_prompt.strip()),
     }
@@ -443,12 +443,16 @@ def _format_repos_block(task: Task) -> str:
     return "\n".join(lines)
 
 
-def _format_ticket_context(task: Task) -> str:
+def format_ticket_context(task: Task) -> str:
     """Render the tracking item's description block for the seed prompt.
 
     Linear tickets contribute their description plus the comment thread; GitHub
     issues contribute their body. A task with neither says so explicitly, so the
     agent knows the thin prompt is the whole brief rather than a truncation.
+
+    Public because `classify` reads the ticket through it too: the classifier
+    must see exactly what the agent will be handed, or its advice is about a
+    different document.
     """
     if task.linear is not None:
         return _format_linear_context(task.linear)

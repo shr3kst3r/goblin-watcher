@@ -52,6 +52,14 @@ class DefaultsConfig(BaseModel):
     # head + tail with a marker in between. ~80k chars ≈ 20k input tokens ≈
     # $0.02 per Haiku refresh.
     description_max_transcript_chars: int = 80_000
+    # Advisory ticket classification on `gw new` (ADR 0011): one call to the
+    # `description_agent`/`description_model` pair above that reads the ticket
+    # and prints a mode suggestion plus anything ambiguous. Set false (or
+    # `description_agent = "off"`, which disables both) to skip it; `--no-classify`
+    # skips a single run. The timeout is short because this one is synchronous —
+    # the reader is waiting on it, and saying nothing beats making them wait.
+    classify_tickets: bool = True
+    classify_timeout_seconds: int = 20
     # How long a task's cached Linear workflow state stays fresh before
     # `gw status` re-fetches it. One API round-trip per Linear-backed task is
     # slow with many tasks; the cache keeps status snappy. 0 = always fetch.
@@ -62,7 +70,7 @@ class DefaultsConfig(BaseModel):
     # Fallback activity window for agents whose transcripts gw can't parse
     # (gemini, antigravity, managed): modified within this many seconds shows
     # as `● working` in `gw status`, older shows as `idle <age>`. Agents with a
-    # readable transcript are classified from its shape instead (ADR 0010) and
+    # readable transcript are classified from its shape instead (ADR 0011) and
     # ignore this.
     activity_active_seconds: int = 120
     # How long a session keeps counting as "in flight" for `gw status --active`,
@@ -82,7 +90,7 @@ NotifyTransport = Literal["auto", "macos", "command", "off"]
 # Events a sync pass can notify on. Edge-triggered: each fires once, when the
 # underlying state actually changes (ADR 0005).
 #
-# The three agent-* events are the transcript-derived states (ADR 0010).
+# The three agent-* events are the transcript-derived states (ADR 0011).
 # `agent-idle` predates them and used to mean "the transcript stopped moving",
 # which conflated a finished run with a blocked one; it now fires only for
 # agents gw can't classify. A config that lists `agent-idle` alone is read as

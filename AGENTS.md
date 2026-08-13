@@ -137,7 +137,7 @@ Two invariants when touching this:
 A **work mode** changes the agent's standing brief without changing the task (ADR 0006). `gw new --mode <name>` selects one from the registry in `modes.py`; `--research` and `--adversarial-review` are aliases kept for compatibility. See ADR 0009 and `docs/designs/task-sources.md`.
 
 To add one:
-1. Add a `ModeSpec` entry to `modes.BUILTIN_MODES` — exactly one of `template` (rendered through `build_seed_prompt` with the shared slots) or `seed` (a literal first message, for slash commands that must be the whole user message). Optional: `agent`, `requires_ticket`, `focus_lead`, `summary`.
+1. Add a `ModeSpec` entry to `modes.BUILTIN_MODES` — exactly one of `template` (rendered through `build_seed_prompt` with the shared slots) or `seed` (a literal first message, for slash commands that must be the whole user message). Optional: `agent`, `requires_ticket`, `focus_lead`, `summary`, `suggest_when`.
 2. Drop the template in `templates/` if it's a template mode. Slots: `{ticket_id}`, `{title}`, `{repos_block}`, `{description}`, `{addition_block}`, `{focus}`.
 3. Tests in `tests/test_modes.py` (the spec) and `tests/test_cli_new_sources.py` (the CLI).
 
@@ -164,6 +164,15 @@ Four things to keep true when touching this:
 - **`read_tail` takes a path, and reads a bounded window.** It's called per session per render, and `gw status --watch` renders every two seconds. Use `agents/_tail.py`; never parse a whole transcript, and never route it through `read_transcript`'s `(session_id, cwd)` lookup (codex re-globs `~/.codex/sessions`).
 - **Nothing is persisted.** Classification is a pure function of the file on disk. Don't add a `SessionRecord` field caching it.
 - **Every degradation lands on `idle` or `unknown`.** An unparseable record, an unknown agent, a drifted format — all return None from `read_tail` and fall back to mtime. A transcript-reading bug must never break `gw status`.
+
+## The ticket check
+
+`gw new` runs one cheap-model read of the ticket (`classify.advise`) after the task exists and before the agent launches: it prints a suggested `--mode` and up to three ambiguities. Two invariants, both load-bearing (ADR 0011):
+
+- **It is advisory and it fails open.** It never changes the task, the mode, the agent, or the seed prompt, and `advise` swallows every exception — a missing binary, a timeout, malformed output. It runs after the branch and worktree are on disk, so a failure has nothing left to protect. Don't add a code path where a classification result decides anything.
+- **Suggestable modes are `ModeSpec.suggest_when`, never a name.** A mode with no `suggest_when` is never suggested, and a returned name that isn't in the candidate list is dropped at parse time.
+
+`description.run_llm` is gw's only cheap-model call; classification shares the `description_agent` / `description_model` pair rather than adding a second LLM surface. Off switches: `--no-classify`, `defaults.classify_tickets`, `GW_CLASSIFY=off`, or `description_agent = "off"`. `tests/conftest.py` sets `GW_CLASSIFY=off` in `isolated_xdg` — **no test may reach a real model**; unset it deliberately and patch `description.run_llm` when testing this path.
 
 ## Adding an agent
 

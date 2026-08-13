@@ -343,6 +343,32 @@ def test_run_claude_returns_stdout_on_success(monkeypatch: pytest.MonkeyPatch) -
     assert description._run_claude("p", "claude-haiku-4-5") == "neat one-liner"
 
 
+def test_run_llm_dispatches_to_the_configured_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared cheap-model call `classify` reuses (ADR 0011)."""
+    _patch_config(monkeypatch, description_agent="codex", description_model="gpt-5-codex")
+    seen: dict[str, Any] = {}
+
+    def fake_run_codex(prompt: str, model: str, timeout: int = 0) -> str | None:
+        seen.update(prompt=prompt, model=model, timeout=timeout)
+        return "raw stdout"
+
+    monkeypatch.setattr("goblin_watcher.description._run_codex", fake_run_codex)
+    # Raw, not cleaned: each caller shapes the output for itself.
+    assert description.run_llm("classify this", timeout=5) == "raw stdout"
+    assert seen == {"prompt": "classify this", "model": "gpt-5-codex", "timeout": 5}
+
+
+def test_run_llm_returns_none_when_agent_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`description_agent = "off"` turns off every model call gw makes."""
+    _patch_config(monkeypatch, description_agent="off")
+
+    def boom(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("should not have been called")
+
+    monkeypatch.setattr("goblin_watcher.description._run_claude", boom)
+    assert description.run_llm("anything") is None
+
+
 def test_clean_strips_banner_and_quotes() -> None:
     raw = 'banner: warming up\n\n  "the real answer"  \n'
     assert description._clean(raw) == "the real answer"
@@ -515,7 +541,7 @@ def test_invoke_llm_uses_full_transcript_when_available(
 
     rendered: dict[str, str] = {}
 
-    def fake_run_claude(prompt: str, _model: str) -> str | None:
+    def fake_run_claude(prompt: str, _model: str, _timeout: int = 0) -> str | None:
         rendered["prompt"] = prompt
         return "described it"
 
@@ -571,7 +597,7 @@ def test_invoke_llm_falls_back_to_snippets_when_render_empty(
     _patch_config(monkeypatch)
     captured: dict[str, str] = {}
 
-    def fake_run_claude(prompt: str, _model: str) -> str | None:
+    def fake_run_claude(prompt: str, _model: str, _timeout: int = 0) -> str | None:
         captured["prompt"] = prompt
         return "ok"
 

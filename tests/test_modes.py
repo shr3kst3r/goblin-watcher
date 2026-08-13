@@ -114,3 +114,19 @@ def test_modes_round_trip_through_the_config_file(isolated_xdg: Path) -> None:
     reloaded = config.load()
     assert reloaded.modes["spike"].template == "spike_prompt.md"
     assert reloaded.modes["spike"].requires_ticket is True
+
+
+def test_suggest_when_is_opt_in_per_mode() -> None:
+    """Ticket classification reads this field, so what it says matters (ADR 0011).
+
+    `research` is a ticket *shape* gw can recognize; `adversarial-review` is a
+    working style you pick, and must never be suggested off the ticket text.
+    """
+    assert "question-shaped" in modes.BUILTIN_MODES["research"].suggest_when
+    assert modes.BUILTIN_MODES["adversarial-review"].suggest_when == ""
+
+
+def test_user_mode_can_opt_into_being_suggested() -> None:
+    spec = ModeSpec(template="x.md", suggest_when="the ticket is a timeboxed spike")
+    table = modes.available({"spike": spec})
+    assert table["spike"].suggest_when == "the ticket is a timeboxed spike"

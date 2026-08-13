@@ -11,6 +11,12 @@ Two halves:
 Any failure (binary missing, non-zero exit, timeout, parse error) is logged
 and swallowed; the session's existing `summary` snippet remains the display
 fallback.
+
+`run_llm` is the cheap-model call itself, exposed because it is gw's only one:
+ticket classification (`classify`) reuses this agent/model pair rather than
+introducing a second LLM surface with its own config, its own binary discovery,
+and its own failure modes. `description_agent = "off"` therefore turns off every
+model call gw makes, not just descriptions.
 """
 
 from __future__ import annotations
@@ -233,14 +239,14 @@ def _build_prompt(session: SessionRecord, parsed: TranscriptSummary | None) -> s
     )
 
 
-def _run_claude(prompt: str, model: str) -> str | None:
+def _run_claude(prompt: str, model: str, timeout: int = _DESCRIBE_TIMEOUT_SECONDS) -> str | None:
     """Invoke `claude -p --model <model>` and return its stdout, or None on failure."""
     try:
         proc = subprocess.run(
             ["claude", "-p", "--model", model, prompt],
             capture_output=True,
             text=True,
-            timeout=_DESCRIBE_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
@@ -252,14 +258,14 @@ def _run_claude(prompt: str, model: str) -> str | None:
     return proc.stdout
 
 
-def _run_codex(prompt: str, model: str) -> str | None:
+def _run_codex(prompt: str, model: str, timeout: int = _DESCRIBE_TIMEOUT_SECONDS) -> str | None:
     """Invoke `codex exec --model <model>` and return its stdout, or None on failure."""
     try:
         proc = subprocess.run(
             ["codex", "exec", "--model", model, prompt],
             capture_output=True,
             text=True,
-            timeout=_DESCRIBE_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
@@ -269,6 +275,26 @@ def _run_codex(prompt: str, model: str) -> str | None:
         _log.debug("description: codex exited %s: %s", proc.returncode, proc.stderr[:200])
         return None
     return proc.stdout
+
+
+def run_llm(prompt: str, *, timeout: int = _DESCRIBE_TIMEOUT_SECONDS) -> str | None:
+    """Run `prompt` through the configured cheap model, returning raw stdout.
+
+    Returns None on every failure — `description_agent = "off"`, a missing
+    binary, a non-zero exit, a timeout. Callers treat None as "no answer this
+    time" and carry on; nothing gw does with a cheap model is important enough
+    to fail a command over.
+
+    The output is *raw*: agent CLIs prepend banners and wrap answers in fences,
+    so each caller cleans it for its own shape (`_clean` for a one-line
+    description, JSON extraction for a classification).
+    """
+    _, agent_name, model, _ = _settings()
+    if agent_name == "off":
+        return None
+    if agent_name == "codex":
+        return _run_codex(prompt, model, timeout)
+    return _run_claude(prompt, model, timeout)
 
 
 def _clean(raw: str | None) -> str | None:
@@ -302,7 +328,9 @@ def _clean(raw: str | None) -> str | None:
 
 def _invoke_llm(session: SessionRecord, task: Task) -> str | None:
     """Build the description prompt (full-transcript when available) and call the LLM."""
-    _, agent_name, model, max_chars = _settings()
+    # The model id is read back inside `run_llm`; only the "off" switch and the
+    # transcript cap are decided here.
+    _, agent_name, _model, max_chars = _settings()
     if agent_name == "off":
         return None
     full = _render_full_transcript(session, task)
@@ -311,9 +339,7 @@ def _invoke_llm(session: SessionRecord, task: Task) -> str | None:
     else:
         parsed = _read_transcript(session, task)
         prompt = _build_prompt(session, parsed)
-    if agent_name == "codex":
-        return _clean(_run_codex(prompt, model))
-    return _clean(_run_claude(prompt, model))
+    return _clean(run_llm(prompt))
 
 
 def _read_transcript(session: SessionRecord, task: Task) -> TranscriptSummary | None:
@@ -452,6 +478,7 @@ def transcript_mtime(session: SessionRecord) -> datetime | None:
 __all__ = [
     "apply",
     "display_text",
+    "run_llm",
     "schedule_if_stale",
     "should_refresh",
     "transcript_mtime",
