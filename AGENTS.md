@@ -11,7 +11,7 @@ Onboarding for AI coding agents (Claude Code, Codex, Gemini) and humans.
 - `gw run [PATH|TASK-ID]` — open a session picker for an existing task.
 - `gw scratch [NAME]` — a scratch space: a plain directory (no git repo, no project) at `~/goblin/scratch/<name>` with tracked, resumable sessions. Backed by the reserved `scratch` project (`Project.kind/Task.kind = "scratch"`); git/PR-flavored commands skip or reject scratch tasks. Clean up idle spaces with `gw task prune --scratch-older-than <days>`.
 
-Plus `gw sync` — a short-lived, idempotent background pass (Linear + session refresh, PR/CI state, cached git indicators, safe prune, edge-triggered notifications), scheduled via launchd by `gw sync install`. Not a daemon. `gw sync watch` follows it live; `gw sync status` reports installation and component health. See ADR 0005 and `docs/designs/background-sync.md`.
+Plus `gw sync` — a short-lived, idempotent background pass (Linear + session refresh, PR/CI state, cached git indicators, safe prune, edge-triggered notifications, and optionally *acting* on those edges via `[sync.on]`), scheduled via launchd by `gw sync install`. Not a daemon. `gw sync watch` follows it live; `gw sync status` reports installation and component health. See ADR 0005, ADR 0011, and `docs/designs/background-sync.md`.
 
 Multiple sessions per task are allowed (e.g. two claude conversations on the same Linear ticket). Each session carries a rolling summary derived from the agent's transcript.
 
@@ -56,7 +56,7 @@ src/goblin_watcher/
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini/antigravity impls + launcher
 ├── windowing/             # Windower protocol + Inline + Tmux + Headless impls
-├── sync/                  # background sync: engine, journal, indicator cache, notify, launchd
+├── sync/                  # background sync: engine, journal, indicator cache, notify, actions, launchd
 ├── commands/              # Typer subcommand modules (project / task / session / pr / new / run / scratch / status / diff / sync / doctor / history / version)
 └── templates/spawn_prompt.md
 ```
@@ -183,6 +183,27 @@ Four things to keep true when touching this:
 - **`git.diff_range` is the single primitive** (`git diff [--stat] <range_spec>`, tolerant of unresolvable refs). `git.diffstat` and `git.commits_between` sit on top of it. Don't add another diff shell-out.
 
 Untracked files are listed separately (`git.untracked_files`) because `git diff` can't see them, and a brand-new file from an agent that hasn't committed is exactly the case you're looking for. See `docs/designs/inspecting-changes.md`.
+## Sync actions
+
+`[sync.on]` lets a sync pass *do* something about an edge, not just report it (ADR 0012). Opt-in, empty by default:
+
+```toml
+[sync.on]
+checks-failed = ["spawn-fix-session"]
+pr-merged     = ["prune"]
+```
+
+Three actions, in `sync/actions.py`: `spawn-fix-session` (a fresh headless agent session, briefed on the event), `prune` (the edge-triggered form of step 7), `archive`. To add a fourth: add a handler, register it in `REGISTRY`, extend `config.SyncAction`, and test it in `tests/test_sync_actions.py`.
+
+Five things to keep true when touching this:
+
+- **`[sync.on]` names an action; it never supplies one.** No `command` action, no argv from config. A scheduled launchd job holding an arbitrary `execve` is the plugin system this file forbids, wearing a different hat. An action that needs a data-gathering step (the way `--address-review` needs a review feed) belongs in gw.
+- **Actions ride `_fire`, and nothing else.** That is the one function every event routes through, and the callers have already applied `_edge` — so an action inherits once-per-transition without any machinery of its own. Never add a second trigger path.
+- **`sync.on` is not gated on `notify_events`.** They are independent switches: acting on a red branch without also wanting a desktop banner is ordinary.
+- **A spawn is always headless.** `HeadlessWindower()` unconditionally, never `defaults.windowing`. Nobody is at the terminal when launchd fires.
+- **Declining is free, acting is rate-limited.** A handler returns `ActionResult(ran=False, …)` to decline; that journals `action-skipped`, starts no cooldown, and spends none of `max_actions_per_pass`. Only work that actually happened is charged. Guards can therefore be conservative without ever wedging a rule.
+
+`prune` calls `engine.prune_blocker` and `merge_detection` rather than reimplementing the safety checks, so the configured prune can't be weaker than the automatic one. Keep it that way.
 
 ## Adding an agent
 

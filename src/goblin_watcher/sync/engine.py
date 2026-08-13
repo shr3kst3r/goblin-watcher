@@ -28,7 +28,7 @@ from goblin_watcher.commands.task import (
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.linear_state import LinearStateFetcher
 from goblin_watcher.models import Project, SessionRecord, Task, TaskRepo
-from goblin_watcher.sync import journal, store
+from goblin_watcher.sync import actions, journal, store
 from goblin_watcher.sync.models import (
     DescriptionBackoff,
     IndicatorCache,
@@ -181,6 +181,13 @@ def _execute(
     cache = store.load_cache()
     notifier = resolve(cfg.sync)
     linear = LinearStateFetcher()
+    # Filled by `_fire` as edges trip; drained once the walk is over (ADR 0012).
+    # Deferred rather than immediate so an action that deletes a task cannot
+    # pull the record out from under the loop still iterating it.
+    queued = actions.ActionQueue()
+    # Every PR this pass looked up, so the prune action can answer "is it
+    # merged?" without a round-trip the batch already paid for.
+    snapshots_seen: dict[str, gh.PrSnapshot] = {}
     # Degradations worth journaling once per pass rather than once per task
     # (a missing `gh` would otherwise emit a line for every PR-bearing task).
     warned: set[str] = set()
@@ -213,6 +220,7 @@ def _execute(
             #     One batched query per repo replaces two `gh pr view` calls per
             #     task, so the pass's API cost stops scaling with task count.
             snapshots = _collect_pr_snapshots(tasks, emit, warned)
+            snapshots_seen.update(snapshots)
 
             for task in tasks:
                 report.tasks += 1
@@ -231,6 +239,7 @@ def _execute(
                         steps=steps,
                         emit=emit,
                         report=report,
+                        queued=queued,
                     )
                 except Exception as e:
                     # Per-step `GoblinError`s are already handled inside
@@ -247,6 +256,22 @@ def _execute(
                         task=task.id,
                         detail=f"{type(e).__name__}: {e}",
                     )
+
+        # Actions run after the whole walk, never inside it. A `prune` action
+        # deletes the record the loop above is iterating, and re-reading each
+        # task here means an action always sees what the pass just wrote rather
+        # than the snapshot that tripped its edge.
+        if len(queued):
+            _run_actions(
+                queued,
+                cfg=cfg,
+                st=st,
+                cache=cache,
+                snapshots=snapshots_seen,
+                steps=steps,
+                emit=emit,
+                report=report,
+            )
 
         # Full-scope passes own the whole keyspace, so anything not visited
         # above belongs to a task that no longer exists. Sweeping here is what
@@ -271,6 +296,7 @@ def _execute(
         latest = store.load_state()
         latest.last_seen = st.last_seen
         latest.description_backoff = st.description_backoff
+        latest.action_runs = st.action_runs
         store.save_state(latest)
 
 
@@ -299,17 +325,24 @@ def _sweep_dead_state(
     for key in dead_signals:
         del st.last_seen[key]
 
+    # Same key prefix, same reasoning: a recreated task must not inherit a dead
+    # one's cooldown and sit out its first action.
+    dead_runs = [k for k in st.action_runs if k.split(":", 1)[0] not in live_tasks]
+    for key in dead_runs:
+        del st.action_runs[key]
+
     dead_backoff = [k for k in st.description_backoff if k not in live_sessions]
     for key in dead_backoff:
         del st.description_backoff[key]
 
-    total = len(dead_entries) + len(dead_signals) + len(dead_backoff)
+    total = len(dead_entries) + len(dead_signals) + len(dead_runs) + len(dead_backoff)
     if total:
         emit(
             "info",
             "swept-dead-state",
             detail=f"dropped {len(dead_entries)} cached indicator(s), "
-            f"{len(dead_signals)} edge-trigger key(s), {len(dead_backoff)} backoff entry(ies)",
+            f"{len(dead_signals)} edge-trigger key(s), {len(dead_runs)} action cooldown(s), "
+            f"{len(dead_backoff)} backoff entry(ies)",
         )
 
 
@@ -411,6 +444,7 @@ def _sync_task(
     steps: _Steps,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
     def guard(step: StepName, fn: Callable[[], None]) -> None:
         """Run one step; journal a failure and carry on."""
@@ -471,16 +505,21 @@ def _sync_task(
             cfg=cfg,
             emit=emit,
             report=report,
+            queued=queued,
         )
 
     guard("indicators", _indicators)
 
     # 7. Prune, and 8. idle notification.
-    guard("notify", lambda: _notify_activity(proj, current, st, notifier, cfg, emit, report))
+    guard(
+        "notify", lambda: _notify_activity(proj, current, st, notifier, cfg, emit, report, queued)
+    )
     if cfg.sync.prune:
         guard(
             "prune",
-            lambda: _maybe_prune(proj, current, snapshot, cfg, st, cache, notifier, emit, report),
+            lambda: _maybe_prune(
+                proj, current, snapshot, cfg, st, cache, notifier, emit, report, queued
+            ),
         )
 
 
@@ -555,6 +594,7 @@ def _refresh_pr_and_indicators(
     cfg: config.Config,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> Task:
     """Recompute this task's derived indicators and cache them.
 
@@ -600,7 +640,7 @@ def _refresh_pr_and_indicators(
         pr_state = snapshot.state
         if pr_state is not None:
             indicators.pr_state = pr_state
-            _fire_pr_transition(proj, task, pr_state, st, notifier, cfg, emit, report)
+            _fire_pr_transition(proj, task, pr_state, st, notifier, cfg, emit, report, queued)
             new_status = _status_from_pr_state(pr_state, task.status)
             if new_status != task.status:
                 with contextlib.suppress(GoblinError):
@@ -618,7 +658,9 @@ def _refresh_pr_and_indicators(
                 )
         if snapshot.checks is not None:
             indicators.checks = snapshot.checks
-            _fire_checks_transition(proj, task, snapshot.checks, st, notifier, cfg, emit, report)
+            _fire_checks_transition(
+                proj, task, snapshot.checks, st, notifier, cfg, emit, report, queued
+            )
 
     cache.entries[store.cache_key(proj.name, task.id)] = indicators
     return updated
@@ -683,12 +725,25 @@ def _fire(
     task: Task,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
-    if not event_enabled(cfg, event):
-        return
-    report.notifications.append(f"{event}: {task.id}")
-    emit("notify", event, project=proj.name, task=task.id, detail=body)
-    notifier.send(title, body)
+    """Announce one edge, and queue whatever `[sync.on]` says to do about it.
+
+    The two halves are independent switches. `notify_events` decides whether a
+    human hears about it; `sync.on` decides whether the pass acts. Wanting a
+    failing branch fixed without also getting a desktop banner about it is a
+    perfectly ordinary setup, so the action is queued even when the
+    notification is off.
+
+    Every event in the system routes through here, which is what makes this the
+    one place actions need to hook: the callers have already applied `_edge`, so
+    an action inherits once-per-transition without any machinery of its own.
+    """
+    if event_enabled(cfg, event):
+        report.notifications.append(f"{event}: {task.id}")
+        emit("notify", event, project=proj.name, task=task.id, detail=body)
+        notifier.send(title, body)
+    queued.enqueue(cfg=cfg, proj=proj, task=task, event=event, body=body)
 
 
 def _fire_pr_transition(
@@ -700,6 +755,7 @@ def _fire_pr_transition(
     cfg: config.Config,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
     if not _edge(st, proj, task, _SIG_PR_STATE, pr_state):
         return
@@ -715,8 +771,9 @@ def _fire_pr_transition(
         task=task,
         emit=emit,
         report=report,
+        queued=queued,
     )
-    _fire_parent_merged(proj, task, notifier, cfg, emit, report)
+    _fire_parent_merged(proj, task, notifier, cfg, emit, report, queued)
 
 
 def _fire_parent_merged(
@@ -726,6 +783,7 @@ def _fire_parent_merged(
     cfg: config.Config,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
     """Tell every task stacked on `parent` that the branch under it has landed.
 
@@ -734,11 +792,12 @@ def _fire_parent_merged(
     parent record they point at still exists. The notification names the *child*:
     it is the branch that now needs rebasing (gh-20).
 
-    Checking `notify_events` up front rather than leaving it to `_fire` keeps a
-    merge from costing a full task-directory scan when nobody asked for the
-    event.
+    Checking up front rather than leaving it to `_fire` keeps a merge from
+    costing a full task-directory scan when nobody asked for the event — and it
+    has to ask about *both* switches, since `sync.on` can want the restack acted
+    on with the notification itself turned off.
     """
-    if not event_enabled(cfg, "parent-merged"):
+    if not (event_enabled(cfg, "parent-merged") or actions.actions_for(cfg, "parent-merged")):
         return
     for child in state.list_tasks(proj):
         if child.kind == "scratch" or child.parent_task != parent.id:
@@ -756,6 +815,7 @@ def _fire_parent_merged(
             task=child,
             emit=emit,
             report=report,
+            queued=queued,
         )
 
 
@@ -768,6 +828,7 @@ def _fire_checks_transition(
     cfg: config.Config,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
     if not _edge(st, proj, task, _SIG_CHECKS, checks):
         return
@@ -782,6 +843,7 @@ def _fire_checks_transition(
             task=task,
             emit=emit,
             report=report,
+            queued=queued,
         )
     elif checks == "passing":
         _fire(
@@ -794,6 +856,7 @@ def _fire_checks_transition(
             task=task,
             emit=emit,
             report=report,
+            queued=queued,
         )
 
 
@@ -810,6 +873,7 @@ def _notify_activity(
     cfg: config.Config,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
     """Notify when an agent stops, saying *why* it stopped (ADR 0010).
 
@@ -857,6 +921,7 @@ def _notify_activity(
             task=task,
             emit=emit,
             report=report,
+            queued=queued,
         )
 
 
@@ -896,6 +961,150 @@ def _question_body(detail: str | None) -> str | None:
     return "…" + text[-(_QUESTION_BODY_CHARS - 1) :]
 
 
+def _run_actions(
+    queued: actions.ActionQueue,
+    *,
+    cfg: config.Config,
+    st: SyncState,
+    cache: IndicatorCache,
+    snapshots: dict[str, gh.PrSnapshot],
+    steps: _Steps,
+    emit: Callable[..., None],
+    report: PassReport,
+) -> None:
+    """Drain the action queue: decide *whether* each queued action runs (ADR 0012).
+
+    `sync.actions` says what an action means; this says how often it is allowed
+    to happen and what a failure costs. Three bounds, outermost first:
+
+    * `max_actions_per_pass` — a global cap. Twenty branches going red at once
+      is one CI outage, and spawning twenty agents for it is not a response.
+      Overflow is journaled, so a capped pass never reads as a complete one.
+    * `action_rate_limit_seconds` — a per task+event+action cooldown, behind the
+      edge trigger rather than instead of it. The edge already stops a *steady*
+      signal from re-firing; this is what catches one that genuinely flaps.
+    * Isolation — a `GoblinError` fails one action and the pass continues, the
+      same contract every other step has. Anything else is a bug and flips the
+      pass to `error` so it is loud in the launchd log.
+
+    A *declined* action (the task is gone, its agent is still working, its
+    branch isn't merged) costs nothing: no cooldown starts and no budget is
+    spent, so the next pass reconsiders it freely. Only work that actually
+    happened is rate-limited.
+    """
+    now = _now()
+    cap = cfg.sync.max_actions_per_pass
+    window = cfg.sync.action_rate_limit_seconds
+    ran = 0
+    pending = queued.pending
+
+    for index, item in enumerate(pending):
+        if cap > 0 and ran >= cap:
+            emit(
+                "info",
+                "actions-capped",
+                detail=f"ran {ran} action(s) this pass (max_actions_per_pass={cap}); "
+                f"{len(pending) - index} deferred to the next pass",
+            )
+            break
+
+        if window > 0 and _in_cooldown(st, item.key, now, window):
+            emit(
+                "info",
+                "action-rate-limited",
+                project=item.project,
+                task=item.task_id,
+                detail=f"{item.action} on {item.event}: ran less than {window}s ago",
+            )
+            continue
+
+        # Re-read rather than trusting the record that tripped the edge: steps 5
+        # and 7 have run since, and the task may not exist at all any more.
+        try:
+            proj = state.get_project(item.project)
+            task = state.load_task(proj, item.task_id)
+        except GoblinError:
+            emit(
+                "info",
+                "action-skipped",
+                project=item.project,
+                task=item.task_id,
+                detail=f"{item.action}: the task no longer exists",
+            )
+            continue
+
+        ctx = actions.ActionContext(
+            proj=proj,
+            task=task,
+            pending=item,
+            cfg=cfg,
+            snapshot=snapshots.get(task.pr_url or ""),
+            now=now,
+        )
+        try:
+            result = actions.dispatch(item.action, ctx)
+        except GoblinError as e:
+            steps.failed("actions")
+            report.errors.append(f"{item.project}/{item.task_id}: {item.action}: {e.message}")
+            emit(
+                "error",
+                "action-failed",
+                project=item.project,
+                task=item.task_id,
+                detail=f"{item.action}: {e.message}",
+            )
+            continue
+        except Exception as e:
+            report.status = "error"
+            report.errors.append(
+                f"{item.project}/{item.task_id}: {item.action}: {type(e).__name__}: {e}"
+            )
+            emit(
+                "error",
+                "action-crashed",
+                project=item.project,
+                task=item.task_id,
+                detail=f"{item.action}: {type(e).__name__}: {e}",
+            )
+            continue
+
+        if not result.ran:
+            emit(
+                "info",
+                "action-skipped",
+                project=item.project,
+                task=item.task_id,
+                detail=f"{item.action}: {result.detail}",
+            )
+            continue
+
+        ran += 1
+        steps.ok("actions")
+        st.action_runs[item.key] = now
+        report.actions.append(f"{item.action}: {item.task_id} ({item.event})")
+        emit(
+            "action",
+            "action-ran",
+            project=item.project,
+            task=item.task_id,
+            detail=f"{item.action} on {item.event} — {result.detail}",
+        )
+        if result.removed_task:
+            report.pruned.append(f"{proj.name}/{task.id}")
+            # Including the cooldown key just written: the task it addressed is
+            # gone, and a future task reusing the id must start clean.
+            _forget_task(cache, st, proj, task)
+
+
+def _in_cooldown(st: SyncState, key: str, now: datetime, window: int) -> bool:
+    last = st.action_runs.get(key)
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return (now - last).total_seconds() < window
+
+
 def _maybe_prune(
     proj: Project,
     task: Task,
@@ -906,6 +1115,7 @@ def _maybe_prune(
     notifier: Notifier,
     emit: Callable[..., None],
     report: PassReport,
+    queued: actions.ActionQueue,
 ) -> None:
     """Prune a task only when it is unambiguously safe (ADR 0005).
 
@@ -930,7 +1140,7 @@ def _maybe_prune(
         if detected is None:
             return
         reason = detected
-        blocker = _prune_blocker(proj, task)
+        blocker = prune_blocker(proj, task)
         if blocker is not None:
             kind, detail = blocker
             if _edge(st, proj, task, _SIG_PRUNABLE, f"{kind}:{detail}"):
@@ -944,6 +1154,7 @@ def _maybe_prune(
                     task=task,
                     emit=emit,
                     report=report,
+                    queued=queued,
                 )
             emit("info", "prune-skipped", project=proj.name, task=task.id, detail=detail)
             return
@@ -954,7 +1165,7 @@ def _maybe_prune(
     emit("action", "task-pruned", project=proj.name, task=task.id, detail=reason)
 
 
-def _prune_blocker(proj: Project, task: Task) -> tuple[str, str] | None:
+def prune_blocker(proj: Project, task: Task) -> tuple[str, str] | None:
     """Why this merged task must not be auto-pruned, or None when it is safe.
 
     `merge_detection` only inspects the primary repo, but `destroy_task`
@@ -962,6 +1173,10 @@ def _prune_blocker(proj: Project, task: Task) -> tuple[str, str] | None:
     therefore has to check the secondaries itself: a branch carrying commits its
     base does not have is unmerged work, and losing it is not recoverable from
     the worktree deletion alone.
+
+    Public because `sync.actions.prune` calls it too: the `[sync.on]` prune must
+    not be able to be weaker than the periodic one, and sharing this is what
+    guarantees that rather than hoping two copies stay in step.
     """
     dirty = dirty_worktrees(task)
     if dirty:
@@ -998,5 +1213,7 @@ def _forget_task(cache: IndicatorCache, st: SyncState, proj: Project, task: Task
     prefix = f"{proj.name}/{task.id}:"
     for key in [k for k in st.last_seen if k.startswith(prefix)]:
         del st.last_seen[key]
+    for key in [k for k in st.action_runs if k.startswith(prefix)]:
+        del st.action_runs[key]
     for s in task.sessions:
         st.description_backoff.pop(s.session_id, None)

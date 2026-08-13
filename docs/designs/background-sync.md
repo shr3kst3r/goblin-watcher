@@ -52,6 +52,12 @@ Per project, then per task (iterating `task.all_repos()` for multi-repo tasks):
 | 7 | Prune | Merged **and** clean only; never `--force` |
 | 8 | Notifications | Edge-triggered; see below |
 
+Then once, after the whole walk:
+
+| # | Step | Notes |
+|---|---|---|
+| 9 | Actions | `[sync.on]`; opt-in, empty by default; rate-limited and capped |
+
 An unexpected (non-`GoblinError`) exception is *not* isolated: it is journaled as
 `pass-crashed`, recorded as the last pass with `status: error`, and re-raised, so
 a bug exits 1 into the launchd log instead of quietly halving a pass. Skipped
@@ -229,6 +235,66 @@ never shell-interpolated), or `off`. `auto` resolves to `macos` on darwin. Every
 notification is journaled regardless of transport, so `gw sync watch` shows what
 happened even when delivery is disabled.
 
+### Acting on the edges, not just reporting them
+
+Detection was always the hard half. `[sync.on]` maps an event to actions a pass
+may take about it, which turns sync from a reporter into a supervisor (ADR 0012).
+Opt-in and empty by default — a config that never mentions it behaves exactly as
+before.
+
+```toml
+[sync.on]
+checks-failed = ["spawn-fix-session"]
+pr-merged     = ["prune"]
+```
+
+Three actions, and the set is closed: `[sync.on]` *names* an action, it never
+supplies one. Both sides of the arrow are `Literal`-typed, so a typo is a
+validation error rather than a rule that silently never fires.
+
+| action | what it does | declines when |
+| --- | --- | --- |
+| `spawn-fix-session` | Starts a fresh **headless** agent session on the task, seeded with the ordinary task brief plus a per-event instruction and the notification body | the task is archived, its worktree is gone, or one of its sessions is still `working` |
+| `prune` | The edge-triggered form of step 7: `destroy_task` behind the same `merge_detection` + `prune_blocker` checks | the branch isn't merged, a worktree is dirty, or a secondary repo holds unmerged commits |
+| `archive` | Drops the worktree, keeping record, branch, and sessions (gh-23) | already archived, scratch, a worktree is dirty, or a session is still `working` |
+
+Windowing for a spawn is `headless` unconditionally, never `defaults.windowing`:
+nobody is at the terminal when launchd fires a pass, so `inline` would block the
+pass on the agent and `tmux` would hijack the user's session. Completion of the
+spawned run rides the same `agent-done` edge everything else does.
+
+**Why this can't run away.** Four independent bounds, outermost first:
+
+- **The edge trigger.** Actions are queued from `_fire`, the one function every
+  event already routes through, so `_edge`/`last_seen` gives once-per-transition
+  for free. A branch that stays red does not re-spawn a fixer every five minutes.
+- **`action_rate_limit_seconds`** (default 3600) — a per task+event+action
+  cooldown recorded in `SyncState.action_runs`. This is what catches a signal
+  that genuinely *flaps*, which the edge trigger by itself does not: red, green,
+  red inside the window is one action, not two.
+- **`max_actions_per_pass`** (default 4) — a cap on the whole pass. Twenty
+  branches going red at once is one CI outage. Overflow is journaled as
+  `actions-capped`, so a capped pass never reads as a complete one.
+- **Handler guards.** A declined action is journaled as `action-skipped`, starts
+  no cooldown, and spends no budget — so a conservative guard can never wedge a
+  rule permanently; the next pass reconsiders it freely.
+
+Two ordering facts worth knowing:
+
+- Actions run **after** the whole project/task walk, never inside it. A `prune`
+  action deletes the record the loop is iterating, and re-reading each task at
+  execution time is what makes "step 7 already pruned this" a clean skip rather
+  than an action against a deleted checkout.
+- `sync.on` is **not** gated on `notify_events`. Acting on an edge and being
+  told about it are separate switches; wanting a red branch fixed without a
+  desktop banner about it is ordinary. Nor does `sync.on` inherit
+  `notify_events`' legacy reading of a lone `agent-idle` as all three agent
+  states — it is new config, with nothing to stay compatible with.
+
+`gw sync status` says which mode sync is in, and `gw sync` narrates each action
+it ran. Journal events: `action-ran`, `action-skipped`, `action-rate-limited`,
+`action-failed`, `action-crashed`, `actions-capped`.
+
 ### Self-healing sweep
 
 Derived state is keyed `<project>/<task_id>`, but sync only clears it for tasks
@@ -312,14 +378,23 @@ scratch_prune_days = 0     # 0 disables; scratch has no merge signal, only idlen
 notify = "auto"            # auto | macos | command | off
 notify_command = []        # argv; title and body appended
 notify_events = ["agent-needs-you", "agent-done", "agent-idle", "pr-merged", "parent-merged", "checks-failed", "checks-passed", "prunable"]
+action_rate_limit_seconds = 3600   # per task+event+action cooldown; 0 disables
+max_actions_per_pass = 4           # whole-pass fan-out cap; 0 uncaps
+
+[sync.on]                          # empty by default: sync reports, it doesn't act
+# checks-failed = ["spawn-fix-session"]
+# pr-merged     = ["prune"]
 ```
+
+`sync.on` is dict-valued, so `gw config set` can't reach it — use
+`gw config edit`.
 
 ## Files
 
 ```
 $XDG_DATA_HOME/goblin-watcher/
   sync/
-    state.json        ← last pass, edge-trigger memory, description backoff
+    state.json        ← last pass, edge-trigger memory, action cooldowns, description backoff
     indicators.json   ← derived per-task git/PR facts
     pass.lock         ← single-instance guard
   logs/
@@ -339,6 +414,10 @@ $XDG_DATA_HOME/goblin-watcher/
   the multi-repo guard), backoff, crash and skip bookkeeping, and the batched PR
   lookup — one query per repo, no second fetch inside prune, no fetch at all for
   an already-merged task.
+- `tests/test_sync_actions.py` — `[sync.on]`: off by default, config validation
+  on both sides of the arrow, the headless spawn and its brief, the three
+  handler guard sets, once-per-transition, the cooldown and the per-pass cap,
+  and failure isolation. The launcher is patched, so no agent is ever spawned.
 - `tests/test_sync_cache.py` — `gw status` preferring, ageing out, and bypassing
   the indicator cache.
 - `tests/test_cli_status_watch.py` — what `--active` counts as in flight (grace
