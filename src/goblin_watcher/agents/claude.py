@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
 from goblin_watcher.agents.base import RawSession, TranscriptSummary
 
 # Claude Code's cwd encoding replaces any character that isn't an ASCII letter,
@@ -181,6 +182,7 @@ def _parse_transcript(path: Path) -> TranscriptSummary:
       * `first_user_snippet` + the trailing `_RECENT_KEEP` user/assistant
         messages at ~400 char each: longer excerpts the LLM description
         path uses to characterize the session.
+      * `usage`: per-(model, day) token counts, deduplicated by message id.
     """
     summary = TranscriptSummary(transcript_path=path)
     last_user: str | None = None
@@ -188,7 +190,10 @@ def _parse_transcript(path: Path) -> TranscriptSummary:
     first_user_long: str | None = None
     recent_users: list[str] = []
     recent_assistants: list[str] = []
+    usage = BucketAccumulator()
+    counted_messages: set[str] = set()
     for msg in _iter_messages(path):
+        _accumulate_usage(msg, usage, counted_messages)
         role = (msg.get("type") or msg.get("role") or "").lower()
         if role in {"user", "human"}:
             if not _is_real_user_turn(msg):
@@ -218,7 +223,56 @@ def _parse_transcript(path: Path) -> TranscriptSummary:
     summary.first_user_snippet = first_user_long
     summary.recent_user_snippets = recent_users
     summary.recent_assistant_snippets = recent_assistants
+    summary.usage = usage.buckets()
     return summary
+
+
+def _accumulate_usage(msg: dict, usage: BucketAccumulator, counted_messages: set[str]) -> None:
+    """Fold one record's `message.usage` into `usage`, skipping duplicates.
+
+    A single assistant turn is written to the JSONL once per content block, and
+    every one of those records repeats the *same* cumulative `usage` object.
+    Summing them naively double- or triple-counts a session (measured 2.1x on
+    real transcripts), so dedupe on `message.id` — the API's id for the one
+    request those blocks came from.
+    """
+    inner = msg.get("message")
+    if not isinstance(inner, dict):
+        return
+    raw = inner.get("usage")
+    if not isinstance(raw, dict):
+        return
+    message_id = inner.get("id") or msg.get("requestId")
+    if isinstance(message_id, str) and message_id:
+        if message_id in counted_messages:
+            return
+        counted_messages.add(message_id)
+    model = inner.get("model")
+    usage.add(
+        model=model if isinstance(model, str) and model else None,
+        day=local_day(msg.get("timestamp")),
+        input_tokens=as_int(raw.get("input_tokens")),
+        output_tokens=as_int(raw.get("output_tokens")),
+        cache_read_tokens=as_int(raw.get("cache_read_input_tokens")),
+        **_cache_writes(raw),
+    )
+
+
+def _cache_writes(raw: dict) -> dict[str, int]:
+    """Split cache-creation tokens by TTL — they're billed at different rates.
+
+    Newer transcripts carry a `cache_creation` breakdown; older ones only have
+    the `cache_creation_input_tokens` total, which we attribute to the 5-minute
+    cache (the API default).
+    """
+    total = as_int(raw.get("cache_creation_input_tokens"))
+    breakdown = raw.get("cache_creation")
+    if isinstance(breakdown, dict):
+        five_min = as_int(breakdown.get("ephemeral_5m_input_tokens"))
+        one_hour = as_int(breakdown.get("ephemeral_1h_input_tokens"))
+        if five_min or one_hour:
+            return {"cache_write_tokens": five_min, "cache_write_1h_tokens": one_hour}
+    return {"cache_write_tokens": total, "cache_write_1h_tokens": 0}
 
 
 def _coerce_text_long(msg: dict) -> str | None:

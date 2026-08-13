@@ -161,3 +161,99 @@ def test_history_tail_zero_shows_nothing(isolated_xdg: Path) -> None:
     assert res.returncode == 0, res.stderr
     assert "task ls" not in res.stdout
     assert "No entries selected" in res.stdout
+
+
+def _bootstrap_usage(tmp_path: Path, buckets: list) -> None:
+    """One project, one task, one session carrying `buckets`."""
+    from datetime import UTC, datetime
+
+    from typer.testing import CliRunner
+
+    from goblin_watcher import state
+    from goblin_watcher.cli import app
+    from goblin_watcher.models import SessionRecord
+
+    repo = tmp_path / "alpha"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "tester"], check=True)
+    (repo / "README.md").write_text("hi")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    now = datetime.now(UTC)
+    record = SessionRecord(
+        agent="claude",
+        session_id="s1",
+        created_at=now,
+        last_used_at=now,
+        summary="working",
+        summary_updated_at=now,
+        usage=buckets,
+    )
+    state.save_task(proj, task.model_copy(update={"sessions": [record]}))
+
+
+def test_history_cost_rolls_up_by_day(isolated_xdg: Path, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from goblin_watcher.cli import app
+    from goblin_watcher.models import UsageBucket
+
+    today = datetime.now(UTC).astimezone().date()
+    yesterday = today - timedelta(days=1)
+    _bootstrap_usage(
+        tmp_path,
+        [
+            UsageBucket(model="claude-opus-5", day=today, output_tokens=1_000_000),
+            UsageBucket(model="claude-opus-5", day=yesterday, output_tokens=2_000_000),
+        ],
+    )
+    res = CliRunner(env={"COLUMNS": "400"}).invoke(app, ["history", "--cost"])
+    assert res.exit_code == 0, res.output
+    assert today.isoformat() in res.output
+    assert yesterday.isoformat() in res.output
+    # $25/M output: 25 yesterday, 50 today, 75 total.
+    assert "~$25.00" in res.output and "~$50.00" in res.output and "~$75.00" in res.output
+
+
+def test_history_cost_window_excludes_older_days(isolated_xdg: Path, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from goblin_watcher.cli import app
+    from goblin_watcher.models import UsageBucket
+
+    today = datetime.now(UTC).astimezone().date()
+    old = today - timedelta(days=40)
+    _bootstrap_usage(
+        tmp_path,
+        [
+            UsageBucket(model="claude-opus-5", day=today, output_tokens=1_000_000),
+            UsageBucket(model="claude-opus-5", day=old, output_tokens=4_000_000),
+        ],
+    )
+    runner = CliRunner(env={"COLUMNS": "400"})
+    windowed = runner.invoke(app, ["history", "--cost"])
+    assert windowed.exit_code == 0, windowed.output
+    assert old.isoformat() not in windowed.output
+    assert "~$25.00" in windowed.output
+
+    everything = runner.invoke(app, ["history", "--cost", "--days", "0"])
+    assert everything.exit_code == 0, everything.output
+    assert old.isoformat() in everything.output
+    assert "~$125.00" in everything.output
+
+
+def test_history_cost_reports_nothing_recorded(isolated_xdg: Path) -> None:
+    from typer.testing import CliRunner
+
+    from goblin_watcher.cli import app
+
+    res = CliRunner().invoke(app, ["history", "--cost"])
+    assert res.exit_code == 0, res.output
+    assert "No token usage recorded" in res.output

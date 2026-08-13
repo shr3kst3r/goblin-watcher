@@ -106,3 +106,39 @@ def test_session_refresh_all_counts_each_session_once(isolated_xdg: Path, tmp_pa
     assert res.exit_code == 0, res.output
     assert "Refreshed 3 session(s)" in res.output
     assert len(refreshed_tasks) == 1
+
+
+def test_session_show_reports_tokens_and_cost(isolated_xdg: Path, tmp_path: Path) -> None:
+    from goblin_watcher.models import UsageBucket
+
+    _bootstrap_task_with_sessions(tmp_path, ["s1"])
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    [record] = task.sessions
+    record = record.model_copy(
+        update={
+            "usage": [
+                UsageBucket(
+                    model="claude-opus-5",
+                    input_tokens=2_000_000,
+                    output_tokens=1_000_000,
+                    cache_read_tokens=10_000_000,
+                )
+            ]
+        }
+    )
+    state.save_task(proj, task.model_copy(update={"sessions": [record]}))
+
+    res = runner.invoke(app, ["session", "show", "s1"], env={"COLUMNS": "400"})
+    assert res.exit_code == 0, res.output
+    assert "2.0M in · 1.0M out · 10.0M cache read" in res.output
+    # $10 input + $25 output + $5 cache read.
+    assert "~$40.00" in res.output
+    assert "claude-opus-5" in res.output
+
+
+def test_session_show_says_none_recorded_without_usage(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_task_with_sessions(tmp_path, ["s1"])
+    res = runner.invoke(app, ["session", "show", "s1"])
+    assert res.exit_code == 0, res.output
+    assert "none recorded" in res.output

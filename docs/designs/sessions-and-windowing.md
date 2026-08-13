@@ -10,7 +10,7 @@ Project ──< Task ──< SessionRecord
 
 - **Project** (`models.Project`) — a registered git repository. Stored as `~/.local/share/goblin-watcher/state.json` (registry) plus `<repo>/.goblin/project.json` (per-project record). Carries `name`, `root`, `repo_url`, `default_branch`, `branch_prefix`, optional `linear_team_key`.
 - **Task** (`models.Task`) — a branch + worktree + optional Linear issue + a list of sessions. Stored at `<repo>/.goblin/tasks/<task_id>.json`. Worktrees live at `<repo>/.worktrees/<branch>/`.
-- **SessionRecord** (`models.SessionRecord`) — one agent conversation. Many per Task: a user can keep two parallel claude sessions plus one codex session on the same ticket. Carries `agent`, `session_id`, timestamps, `summary`, `turn_count`, `transcript_path`.
+- **SessionRecord** (`models.SessionRecord`) — one agent conversation. Many per Task: a user can keep two parallel claude sessions plus one codex session on the same ticket. Carries `agent`, `session_id`, timestamps, `summary`, `turn_count`, `transcript_path`, and `usage` (per-model, per-day token counts — see [token-usage-and-cost.md](token-usage-and-cost.md)).
 
 The list-of-sessions shape is the load-bearing piece. It enables the headline UX (interactive picker when multiple conversations exist) without forcing a special-case "primary session" concept.
 

@@ -153,6 +153,126 @@ def test_read_transcript_counts_user_turns_via_event_msg(tmp_path: Path) -> None
     assert summary.recent_assistant_snippets == ["Reviewing now.", "One scheduling issue."]
 
 
+def _turn_context_line(model: str, timestamp: str = "2026-05-20T00:38:00Z") -> str:
+    return json.dumps(
+        {"timestamp": timestamp, "type": "turn_context", "payload": {"model": model, "cwd": "/x"}}
+    )
+
+
+def _token_count_line(
+    *,
+    input_tokens: int,
+    cached: int,
+    output_tokens: int,
+    timestamp: str = "2026-05-20T12:00:00Z",
+) -> str:
+    """A codex `token_count` event, whose totals are cumulative for the session."""
+    totals = {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": totals, "last_token_usage": totals},
+            },
+        }
+    )
+
+
+def _usage_of(a: CodexAgent, tmp_path: Path, lines: list[str]) -> list:
+    cwd = tmp_path / "wt"
+    cwd.mkdir(exist_ok=True)
+    fake_sessions = tmp_path / "codex" / "sessions"
+    _write_rollout(
+        fake_sessions / "2026" / "05" / "20" / "r.jsonl", [_meta_line("uuid-1", cwd), *lines]
+    )
+    with patch.object(CodexAgent, "sessions_root", return_value=fake_sessions):
+        return a.read_transcript("uuid-1", cwd).usage
+
+
+def test_usage_differences_cumulative_totals(tmp_path: Path) -> None:
+    """Codex reports session totals on every event, so buckets must sum back to
+    the *last* event's totals — not to the sum of every event."""
+    a = CodexAgent()
+    buckets = _usage_of(
+        a,
+        tmp_path,
+        [
+            _turn_context_line("gpt-5-codex"),
+            _token_count_line(input_tokens=1_000, cached=400, output_tokens=50),
+            _token_count_line(input_tokens=3_000, cached=1_400, output_tokens=120),
+        ],
+    )
+    [bucket] = buckets
+    assert bucket.model == "gpt-5-codex"
+    # Cached input is a subset of input_tokens; only the remainder is full price.
+    assert bucket.cache_read_tokens == 1_400
+    assert bucket.input_tokens == 3_000 - 1_400
+    assert bucket.output_tokens == 120
+
+
+def test_usage_attributes_each_turn_to_its_own_model(tmp_path: Path) -> None:
+    a = CodexAgent()
+    buckets = _usage_of(
+        a,
+        tmp_path,
+        [
+            _turn_context_line("gpt-5-codex"),
+            _token_count_line(input_tokens=1_000, cached=0, output_tokens=100),
+            _turn_context_line("gpt-5.5"),
+            _token_count_line(input_tokens=1_500, cached=0, output_tokens=250),
+        ],
+    )
+    by_model = {b.model: b for b in buckets}
+    assert by_model["gpt-5-codex"].output_tokens == 100
+    assert by_model["gpt-5.5"].output_tokens == 150
+    assert by_model["gpt-5.5"].input_tokens == 500
+
+
+def test_usage_treats_a_backwards_counter_as_a_fresh_baseline(tmp_path: Path) -> None:
+    """A resumed rollout can restart its counters; differencing across the reset
+    would otherwise produce a negative turn."""
+    a = CodexAgent()
+    buckets = _usage_of(
+        a,
+        tmp_path,
+        [
+            _turn_context_line("gpt-5-codex"),
+            _token_count_line(input_tokens=9_000, cached=0, output_tokens=900),
+            _token_count_line(input_tokens=100, cached=0, output_tokens=10),
+        ],
+    )
+    [bucket] = buckets
+    assert bucket.input_tokens == 9_100
+    assert bucket.output_tokens == 910
+
+
+def test_usage_ignores_events_without_totals(tmp_path: Path) -> None:
+    a = CodexAgent()
+    buckets = _usage_of(
+        a,
+        tmp_path,
+        [
+            _turn_context_line("gpt-5-codex"),
+            json.dumps(
+                {
+                    "timestamp": "2026-05-20T12:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": None}},
+                }
+            ),
+            _user_msg_line("hello"),
+        ],
+    )
+    assert buckets == []
+
+
 def test_read_transcript_falls_back_to_newest_for_synthetic_id(tmp_path: Path) -> None:
     a = CodexAgent()
     cwd = tmp_path / "wt"

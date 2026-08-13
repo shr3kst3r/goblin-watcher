@@ -38,6 +38,7 @@ def upsert(task: Task, session: SessionRecord) -> Task:
                     "turn_count": session.turn_count or existing.turn_count,
                     "summary_updated_at": session.summary_updated_at or existing.summary_updated_at,
                     "transcript_path": session.transcript_path or existing.transcript_path,
+                    "usage": session.usage or existing.usage,
                 }
             )
             return task.model_copy(
@@ -82,6 +83,7 @@ def refresh_summary(task: Task, session: SessionRecord) -> SessionRecord:
             "turn_count": parsed.turn_count or session.turn_count,
             "summary_updated_at": _now(),
             "transcript_path": parsed.transcript_path or session.transcript_path,
+            "usage": parsed.usage or session.usage,
         }
     )
 
@@ -328,7 +330,7 @@ def apply_reconciliation(task: Task, plan: ReconcilePlan) -> Task:
 
 # Fields owned by snippet-summary refresh. Anything else on the session record
 # belongs to another writer and must not be carried over from a stale snapshot.
-_SUMMARY_FIELDS = ("summary", "turn_count", "summary_updated_at", "transcript_path")
+_SUMMARY_FIELDS = ("summary", "turn_count", "summary_updated_at", "transcript_path", "usage")
 
 
 def persist_refresh(project: Project, task: Task, plan: ReconcilePlan | None = None) -> Task:

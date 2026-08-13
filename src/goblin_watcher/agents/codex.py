@@ -21,7 +21,9 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
 from goblin_watcher.agents.base import RawSession, TranscriptSummary
+from goblin_watcher.models import UsageBucket
 
 _SHORT_SNIPPET_LEN = 120
 _LONG_SNIPPET_LEN = 400
@@ -218,26 +220,36 @@ def _cap(text: str, max_len: int) -> str:
     return text
 
 
-def _iter_messages(path: Path) -> Iterator[tuple[str, str]]:
-    """Yield (role, text) for each user/assistant message in `path`.
+def _payload(obj: dict) -> dict:
+    payload = obj.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _message_of(obj: dict) -> tuple[str, str] | None:
+    """(role, text) for one rollout record, or None if it isn't a message.
 
     Driven by `event_msg.user_message` / `event_msg.agent_message` so the
     auto-injected AGENTS.md preamble and `<environment_context>` wrapper
     don't pollute the output.
     """
+    if obj.get("type") != "event_msg":
+        return None
+    payload = _payload(obj)
+    kind = payload.get("type")
+    if kind not in {"user_message", "agent_message"}:
+        return None
+    text = payload.get("message")
+    if not isinstance(text, str) or not text:
+        return None
+    return ("user" if kind == "user_message" else "assistant"), text
+
+
+def _iter_messages(path: Path) -> Iterator[tuple[str, str]]:
+    """Yield (role, text) for each user/assistant message in `path`."""
     for obj in _iter_lines(path):
-        if obj.get("type") != "event_msg":
-            continue
-        payload = obj.get("payload") or {}
-        kind = payload.get("type")
-        if kind == "user_message":
-            text = payload.get("message")
-            if isinstance(text, str) and text:
-                yield "user", text
-        elif kind == "agent_message":
-            text = payload.get("message")
-            if isinstance(text, str) and text:
-                yield "assistant", text
+        message = _message_of(obj)
+        if message is not None:
+            yield message
 
 
 def _parse_transcript(path: Path) -> TranscriptSummary:
@@ -247,7 +259,15 @@ def _parse_transcript(path: Path) -> TranscriptSummary:
     first_user_long: str | None = None
     recent_users: list[str] = []
     recent_assistants: list[str] = []
-    for role, text in _iter_messages(path):
+    # Usage rides along on the same walk — a codex rollout can be megabytes, so
+    # reading it twice for the sake of token counts isn't worth it.
+    usage = _UsageReader()
+    for obj in _iter_lines(path):
+        usage.feed(obj)
+        message = _message_of(obj)
+        if message is None:
+            continue
+        role, text = message
         if role == "user":
             summary.turn_count += 1
             last_user = _truncate(text, _SHORT_SNIPPET_LEN)
@@ -267,7 +287,64 @@ def _parse_transcript(path: Path) -> TranscriptSummary:
     summary.first_user_snippet = first_user_long
     summary.recent_user_snippets = recent_users
     summary.recent_assistant_snippets = recent_assistants
+    summary.usage = usage.buckets()
     return summary
+
+
+class _UsageReader:
+    """Accumulates token usage from a rollout's `token_count` events.
+
+    Codex reports *cumulative* session totals on every `token_count` event, so
+    a turn's own usage is the delta against the previous event. Differencing
+    (rather than summing `last_token_usage`, which repeats across events within
+    a turn) means the buckets add back up to exactly the final totals. Totals
+    that go backwards — a resumed or re-based rollout — are treated as a fresh
+    baseline rather than a negative turn.
+
+    The model isn't on the usage event; it comes from the most recent
+    `turn_context`, which codex emits before each turn. That's what attributes
+    a rollout that switched models mid-session to the right rates.
+    """
+
+    _FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens")
+
+    def __init__(self) -> None:
+        self._usage = BucketAccumulator()
+        self._model: str | None = None
+        self._previous: dict[str, int] = dict.fromkeys(self._FIELDS, 0)
+
+    def feed(self, obj: dict) -> None:
+        payload = _payload(obj)
+        if obj.get("type") == "turn_context":
+            model = payload.get("model")
+            if isinstance(model, str) and model:
+                self._model = model
+            return
+        if payload.get("type") != "token_count":
+            return
+        info = payload.get("info")
+        totals = info.get("total_token_usage") if isinstance(info, dict) else None
+        if not isinstance(totals, dict):
+            return
+        current = {name: as_int(totals.get(name)) for name in self._FIELDS}
+        if any(current[name] < self._previous[name] for name in self._FIELDS):
+            delta = dict(current)  # counter restarted; don't difference across it
+        else:
+            delta = {name: current[name] - self._previous[name] for name in self._FIELDS}
+        self._previous = current
+        # `input_tokens` includes the cached portion; only the remainder is
+        # billed at the full input rate.
+        cached = delta["cached_input_tokens"]
+        self._usage.add(
+            model=self._model,
+            day=local_day(obj.get("timestamp")),
+            input_tokens=max(0, delta["input_tokens"] - cached),
+            output_tokens=delta["output_tokens"],
+            cache_read_tokens=cached,
+        )
+
+    def buckets(self) -> list[UsageBucket]:
+        return self._usage.buckets()
 
 
 def _render_transcript(path: Path) -> str | None:
