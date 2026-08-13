@@ -122,6 +122,29 @@ sync interval and otherwise recomputes live, so behaviour is unchanged when sync
 was never installed. A cached reading always renders with its age (`↑2 unpushed
 (3m)`); `gw status --no-cache` forces a live recompute.
 
+### The live dashboard reads it, and nothing else
+
+`gw status --watch` redraws the tree every `--interval` seconds (default 2). What
+makes that affordable is that a tick is confined to local reads: task JSON, the
+indicator cache, transcript mtimes, and headless pid files. Everything a
+one-shot `gw status` does that costs a round-trip or a subprocess is off —
+Linear and GitHub issue refresh, LLM description spawns, session reconciliation
+— and a summary refresh only takes the task lock when it actually changed
+something, since otherwise a 2-second poll would rewrite identical JSON forever.
+That's the division of labour the cache was built for: sync pays the network
+cost on its own schedule, and the dashboard renders what sync left behind.
+
+The consequence to know about: a session started outside `gw` is adopted by a
+sync pass or by a plain `gw status`, never by a watch tick.
+
+`gw status --active` narrows the tree to tasks with work in flight — a session
+whose transcript moved within `defaults.activity_grace_seconds` (default 900),
+or a live headless pid. The grace window is much wider than the 120s behind the
+`● active` badge on purpose: an agent that stops to ask a question goes quiet
+within two minutes, which is precisely when it most needs to stay on screen. The
+filter runs *before* the ticket refresh, so `--active` is faster than a full
+status, not just shorter.
+
 ### Edge-triggered notifications
 
 The pass compares each signal against the last value recorded in
@@ -249,6 +272,11 @@ $XDG_DATA_HOME/goblin-watcher/
   an already-merged task.
 - `tests/test_sync_cache.py` — `gw status` preferring, ageing out, and bypassing
   the indicator cache.
+- `tests/test_cli_status_watch.py` — what `--active` counts as in flight (grace
+  window, live headless pid, configured override), and that a `--watch` tick
+  makes no network call, schedules no description, and writes no state when
+  nothing moved. The loop is driven by patching `time.sleep` to raise
+  `KeyboardInterrupt`, so the real Ctrl-C exit path is what's under test.
 - `tests/test_sync_store.py`, `test_sync_journal.py`, `test_sync_notify.py`,
   `test_sync_launchd.py`, `test_cli_sync.py`, `test_gh_pr_checks.py`,
   `test_gh_pr_snapshots.py`.

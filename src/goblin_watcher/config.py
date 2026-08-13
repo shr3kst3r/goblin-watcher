@@ -61,6 +61,11 @@ class DefaultsConfig(BaseModel):
     # A session whose transcript was modified within this window shows as
     # `● active` in `gw status`; older activity shows as `idle <age>`.
     activity_active_seconds: int = 120
+    # How long a session keeps counting as "in flight" for `gw status --active`.
+    # Deliberately much wider than `activity_active_seconds`: an agent that
+    # stopped to ask a question goes quiet within two minutes, and that is
+    # exactly the moment you most want it still on the dashboard.
+    activity_grace_seconds: int = 900
 
 
 # Which notification transport `gw sync` uses. "auto" resolves to "macos" on
