@@ -345,6 +345,10 @@ def _build_tree(
                 + _stack_suffix(refreshed, by_id)
                 + (usage.badge(task_total) if cost else "")
             )
+            # Archived: worktree dropped, record and branch kept (gh-23). Dimmed
+            # so it reads as parked rather than live.
+            if refreshed.archived:
+                task_label = f"[dim]{task_label}  (archived)[/]"
             # Task ids are non-empty slugs, so "" can never match one. Under
             # `--active` a filtered-out parent leaves no node, so its child
             # falls back to the project and renders flat.

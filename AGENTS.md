@@ -99,7 +99,7 @@ There is no CI in this repo — no GitHub Actions workflow, no external checks o
 ## Safety boundaries
 
 - Never `git push --force` on `main` / default branches. For feature branches, only `--force-with-lease` — and only at user request.
-- Never delete a worktree with uncommitted changes unless `--force` is passed (`gw task rm` enforces this).
+- Never delete a worktree with uncommitted changes unless `--force` is passed (`gw task rm` and `gw task archive` both enforce this).
 - Never write outside: `<project>/.goblin/`, `<project>/.worktrees/`, the user's XDG dirs, or the project's working tree itself.
 - **Linear API is read-only by default.** Posting a comment requires the explicit `--notify-linear` flag on `gw pr open`.
 - 1Password `op` references resolve lazily; only fetched when actually needed.
@@ -111,7 +111,13 @@ A new worktree is a bare checkout, so `worktree_setup.py` applies a declared boo
 Two invariants when touching this:
 
 - `copy`/`link` entries go through `worktree_setup.resolve_inside`, which refuses absolute paths, `..` components, and symlinks resolving outside the project root. Don't add a code path that joins a config-supplied path without it.
-- Setup runs where a worktree is *materialized* — that's what `commands/new.Created.materialized` tracks. Sources that adopt an existing checkout (`--dir`) don't run it.
+- Setup runs where a worktree is *materialized* — that's what `commands/new.Created.materialized` tracks. Sources that adopt an existing checkout (`--dir`) don't run it. `commands/task.rematerialize_task` is the other materializing path, so it runs setup too.
+
+## Archiving
+
+`gw task archive <task-id>` drops a task's worktree and keeps everything else — record, branch, session history — because the checkout is the expensive part when many tasks run in parallel. `Task.archived` / `Task.archived_at` carry the flag; it is orthogonal to `Task.status`, which goes on tracking the PR.
+
+`gw run` on an archived task calls `commands/task.rematerialize_task` first: `git worktree prune`, `git worktree add <path> <branch>` per repo, then the project's setup steps. Two consumers read the flag — `gw status` dims the row, and `gw sync` skips the per-repo git facts (PR state still refreshes, since the branch outlives the worktree). Scratch tasks are refused: the directory is the only copy of the work. See `docs/designs/storage-and-state.md`.
 
 ## Adding an agent
 

@@ -148,6 +148,13 @@ class Task(_Frozen):
     # agent's cwd and is set iff the task spans more than one repo.
     secondary_repos: list[TaskRepo] = Field(default_factory=list)
     workspace_path: Path | None = None
+    # Archived: the worktree(s) were dropped but the record, the branch, and the
+    # session history were kept (`gw task archive`). `gw run` rematerializes the
+    # checkout from the branch and clears both fields. Deliberately not a
+    # `TaskStatus` — a task can be archived at any point in the PR lifecycle, so
+    # the two are orthogonal, and status must keep tracking the PR.
+    archived: bool = False
+    archived_at: datetime | None = None
     # When the cached `linear.state` was last fetched from the API. Lets
     # `gw status` skip per-task Linear round-trips inside a TTL window.
     linear_state_updated_at: datetime | None = None

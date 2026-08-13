@@ -440,6 +440,8 @@ When the picker shows (2+ existing sessions for the agent), pick the `[ New sess
 gw session rm <session-id>                  # forget a session from gw's record; agent transcript untouched
 gw session prune --older-than 30            # forget every session whose last_used_at is >30d ago
 gw session prune --older-than 7 --agent codex --dry-run
+gw task archive <task-id>                   # drop the worktree; keep the branch, the record, and the sessions
+gw task archive <task-id> --force           # archive anyway when the worktree is dirty or a headless run is live
 gw task rm <task-id>                        # delete worktree + branch + record (confirms; --force to skip)
 gw task rm <task-id> --project my-repo      # scope the lookup when the id exists in multiple projects
 gw task prune                               # remove every task whose branch is merged (all projects)
@@ -450,6 +452,8 @@ gw project rm <name>                        # unregister a project (does NOT del
 ```
 
 `gw task prune` checks each task's PR state via `gh pr view` when a PR URL is recorded, and falls back to `git merge-base --is-ancestor` against the base branch. Squash- and rebase-merged branches without a recorded PR URL won't be detected by the ancestry check alone.
+
+`gw task archive` is the middle ground between `gw task rm` and keeping everything. Worktrees are the expensive part — a full checkout per task adds up fast when you run many in parallel — while the branch, the task record, and the session history cost almost nothing. Archiving removes only the checkout; `gw run <task-id>` recreates it from the branch and re-applies the project's `[setup]` steps, so a parked task picks straight back up. Archived tasks render dimmed in `gw status` and are skipped by `gw sync`'s git-indicator step (there's no working tree left to read). It refuses a dirty worktree or a live headless run unless you pass `--force`, and it refuses scratch spaces outright — a scratch directory has no branch to come back from.
 
 `gw session prune` operates only on `gw`'s record of `task.sessions`. The underlying agent transcript files (e.g. `~/.claude/projects/<encoded-cwd>/*.jsonl`) are untouched, so you can still resume a forgotten session by id if you re-add it.
 
@@ -691,8 +695,9 @@ gw history --cost [--days N]                # day-by-day token + cost rollup acr
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
 gw project new|ls|info|rm
-gw task ls|show|rename|setup|add-repo|rm|prune   # all accept --project to scope to one project
+gw task ls|show|rename|setup|add-repo|archive|rm|prune   # all accept --project to scope to one project
                                         # `setup` re-runs the [setup] steps (also: --repo NAME)
+                                        # `archive` drops the worktree, keeps branch + record (also: --force)
                                         # `prune` also: --dry-run/--force/--no-fetch/--scratch-older-than
 gw session ls|show|send|refresh|rm|prune  # `send` types into a live pane (tmux); `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
 gw pr open|status|checks                # all accept --project to disambiguate a task id shared across projects
