@@ -8,13 +8,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from goblin_watcher.agents.base import RawSession, TranscriptSummary
+from goblin_watcher.agents.base import RawSession, TranscriptCapability, TranscriptSummary
 
 
 class GeminiAgent:
     name = "gemini"
     binary = "gemini"
     unsafe_flags: tuple[str, ...] = ("--yolo",)
+    transcripts: TranscriptCapability = TranscriptCapability(
+        parseable=False,
+        reason="the CLI keeps cwd-scoped checkpoints with no stable session ids",
+    )
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]

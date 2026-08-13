@@ -15,7 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
-from goblin_watcher.agents.base import RawSession, TranscriptSummary
+from goblin_watcher.agents.base import (
+    PARSEABLE_TRANSCRIPTS,
+    RawSession,
+    TranscriptCapability,
+    TranscriptSummary,
+)
 
 # Claude Code's cwd encoding replaces any character that isn't an ASCII letter,
 # digit, or dash with a literal `-`. That's stricter than just slashes — dots
@@ -28,6 +33,7 @@ class ClaudeAgent:
     name = "claude"
     binary = "claude"
     unsafe_flags: tuple[str, ...] = ("--dangerously-skip-permissions",)
+    transcripts: TranscriptCapability = PARSEABLE_TRANSCRIPTS
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]

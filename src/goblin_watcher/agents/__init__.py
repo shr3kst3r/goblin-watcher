@@ -1,4 +1,10 @@
-from goblin_watcher.agents.base import Agent, RawSession, TranscriptSummary
+from goblin_watcher.agents.base import (
+    PARSEABLE_TRANSCRIPTS,
+    Agent,
+    RawSession,
+    TranscriptCapability,
+    TranscriptSummary,
+)
 from goblin_watcher.agents.registry import (
     AGENT_NAMES,
     get_agent,
@@ -8,8 +14,10 @@ from goblin_watcher.agents.registry import (
 
 __all__ = [
     "AGENT_NAMES",
+    "PARSEABLE_TRANSCRIPTS",
     "Agent",
     "RawSession",
+    "TranscriptCapability",
     "TranscriptSummary",
     "get_agent",
     "registry",

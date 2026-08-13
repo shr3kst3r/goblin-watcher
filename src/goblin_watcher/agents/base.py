@@ -45,12 +45,41 @@ class TranscriptSummary:
     usage: list[UsageBucket] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class TranscriptCapability:
+    """Whether `gw` can parse this agent's transcripts, and why not if it can't.
+
+    Declared per agent so the degradation is visible instead of silent. When
+    transcripts can't be parsed, `read_transcript` returns an empty
+    `TranscriptSummary` and `render_transcript` returns None, which quietly
+    empties out half the product: rolling summaries, LLM-refreshed
+    descriptions, turn counts, the `● active` badge, and — because sync's
+    activity edge keys off `transcript_mtime` — the `agent-idle` notification.
+
+    `reason` is a short lowercase fragment naming the obstacle (e.g. "the CLI
+    keeps conversations in an internal SQLite store"); `gw doctor` composes it
+    into the user-facing warning, so the consequence wording lives in one
+    place. It is required when `parseable` is False.
+    """
+
+    parseable: bool
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.parseable and not self.reason:
+            raise ValueError("TranscriptCapability(parseable=False) needs a reason")
+
+
+PARSEABLE_TRANSCRIPTS = TranscriptCapability(parseable=True)
+
+
 @runtime_checkable
 class Agent(Protocol):
     """One concrete agent (claude / codex / gemini / antigravity)."""
 
     name: str
     binary: str
+    transcripts: TranscriptCapability
 
     def spawn_command(
         self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None

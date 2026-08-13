@@ -22,7 +22,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
-from goblin_watcher.agents.base import RawSession, TranscriptSummary
+from goblin_watcher.agents.base import (
+    PARSEABLE_TRANSCRIPTS,
+    RawSession,
+    TranscriptCapability,
+    TranscriptSummary,
+)
 from goblin_watcher.models import UsageBucket
 
 _SHORT_SNIPPET_LEN = 120
@@ -39,6 +44,7 @@ class CodexAgent:
     name = "codex"
     binary = "codex"
     unsafe_flags: tuple[str, ...] = ("--dangerously-bypass-approvals-and-sandbox",)
+    transcripts: TranscriptCapability = PARSEABLE_TRANSCRIPTS
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]

@@ -651,7 +651,7 @@ For unattended runs (`--windowing headless`) each agent is launched in its print
 
 Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
-`gw doctor` checks which binaries are on PATH and resolves the Linear key.
+`gw doctor` checks which binaries are on PATH and resolves the Linear key. It also warns, per agent, when `gw` can't parse that agent's transcripts — gemini and antigravity keep their history somewhere `gw` doesn't read, so their sessions have no rolling summary, no LLM description, no turn count, and never fire an `agent-idle` notification.
 
 ### Unsafe mode (skip permission prompts)
 

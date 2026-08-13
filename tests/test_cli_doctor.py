@@ -43,6 +43,34 @@ def test_doctor_reports_managed_agent_scaffold(
     assert "scaffold only" in res.output
 
 
+def test_doctor_warns_about_unparseable_transcripts(
+    isolated_xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_test")
+    runner = CliRunner()
+    res = runner.invoke(app, ["doctor"])
+    # Rich wraps the detail cell, so collapse whitespace and assert on
+    # fragments short enough not to span a wrap boundary.
+    flat = " ".join(res.output.split())
+    for agent in ("gemini", "antigravity", "managed"):
+        assert f"{agent} transcripts" in flat
+    assert "not parseable" in flat
+    assert "idle notifications will be blank" in flat
+    # Agents that do parse their transcripts get no row.
+    assert "claude transcripts" not in flat
+    assert "codex transcripts" not in flat
+
+
+def test_transcript_warning_does_not_fail_doctor(
+    isolated_xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stubbed transcript reader is a known limitation, not a broken install:
+    # the rows are advisory and must not push doctor's exit code non-zero.
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_test")
+    res = CliRunner().invoke(app, ["doctor"])
+    assert res.exit_code == 0, res.output
+
+
 def test_omz_check_na_for_inline_windowing(
     isolated_xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -69,7 +97,10 @@ def test_omz_check_warns_when_tmux_and_default_prompt(
     flat = " ".join(res.output.split())
     assert "omz update prompt" in flat
     assert "can eat the" in flat
-    assert "mode reminder" in flat
+    # Single words only: how the hint wraps depends on the width of the Check
+    # column, which grows whenever a longer check name is added.
+    assert "zstyle" in flat
+    assert "reminder" in flat
 
 
 def test_omz_check_quiet_when_safe_zstyle_set(

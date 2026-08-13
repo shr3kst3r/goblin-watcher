@@ -10,6 +10,7 @@ import typer
 from rich.table import Table
 
 from goblin_watcher import config, secrets
+from goblin_watcher.agents import AGENT_NAMES, get_agent
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError
 from goblin_watcher.windowing import WINDOWING_MODES
@@ -118,6 +119,36 @@ def _managed_agent_check() -> Check:
     )
 
 
+# What the user loses when gw can't parse an agent's transcripts. Kept in one
+# place so every agent's row says the same thing about the consequence and
+# differs only in the reason.
+_TRANSCRIPT_CONSEQUENCE = (
+    "session summaries, descriptions, turn counts and idle notifications will be blank"
+)
+
+
+def _transcript_checks() -> list[Check]:
+    """One advisory row per agent whose transcripts gw can't parse.
+
+    Reports `ok` — a stubbed transcript reader is a known limitation of the
+    agent's session store, not a broken install, and doctor exits non-zero on
+    any failed check. The point is that the degradation stops being silent.
+    """
+    checks: list[Check] = []
+    for name in AGENT_NAMES:
+        capability = get_agent(name).transcripts
+        if capability.parseable:
+            continue
+        checks.append(
+            Check(
+                name=f"{name} transcripts",
+                ok=True,
+                detail=f"not parseable ({capability.reason}) — {_TRANSCRIPT_CONSEQUENCE}",
+            )
+        )
+    return checks
+
+
 def _sync_check() -> Check:
     """Whether background sync is scheduled, and when it last ran (ADR 0005).
 
@@ -166,6 +197,7 @@ def doctor() -> None:
         # Google Antigravity's CLI installs as `agy`, not `antigravity`.
         _binary_check("agy", required=False),
         _managed_agent_check(),
+        *_transcript_checks(),
         _windowing_check(cfg),
         _omz_update_prompt_check(cfg),
         _linear_key_check(),

@@ -23,7 +23,7 @@ import json
 import re
 from pathlib import Path
 
-from goblin_watcher.agents.base import RawSession, TranscriptSummary
+from goblin_watcher.agents.base import RawSession, TranscriptCapability, TranscriptSummary
 
 # Conversation ids are UUIDs. The launcher synthesizes a 24-char hex placeholder
 # for agents that can't preassign an id (see `agents/launcher.py`), and in tmux
@@ -38,6 +38,10 @@ class AntigravityAgent:
     name = "antigravity"
     binary = "agy"
     unsafe_flags: tuple[str, ...] = ("--dangerously-skip-permissions",)
+    transcripts: TranscriptCapability = TranscriptCapability(
+        parseable=False,
+        reason="conversations live in the CLI's internal SQLite store",
+    )
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
