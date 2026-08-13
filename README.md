@@ -320,6 +320,7 @@ gw status --project my-repo            # limit to one project
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
+gw session send eng-123 "also fix the tests"  # type into a running agent's tmux pane
 gw doctor                                   # which agent CLIs are on PATH + Linear key status
 gw config show                              # resolved config (file merged over defaults)
 gw sync status                              # is background sync scheduled? when did it last run?
@@ -489,14 +490,30 @@ Set `windowing = "tmux"` in `config.toml`, or pass `--windowing tmux` on any spa
 
 Inline mode (default) just blocks on the agent process and returns when it exits.
 
+### Talk to a running agent
+
+```bash
+gw session send eng-123 "also fix the tests"
+gw session send eng-123 "..." --session <id>   # when the task has several live panes
+gw session send eng-123 "" --no-enter          # type without submitting (--no-enter), or Enter alone ("")
+```
+
+The text is typed into the agent's pane and submitted, exactly as if you had attached and typed it — so you can steer six agents from one terminal instead of six.
+
+`gw` labels each pane with its session id when it opens it, so `--session` addresses one conversation on a task running several. With a single live pane the session is unambiguous and `--session` is optional. Panes that predate this labelling (or an agent spawned by hand) still take input as long as they're the only pane on the task.
+
+Inline windowing has no pane to address — the agent owns the terminal it was launched from — so `gw session send` says so rather than failing obscurely.
+
 ## Agent support
 
 | Agent | Spawn | Resume | Session discovery |
 |---|---|---|---|
-| **claude** (Claude Code) | `claude "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
-| **codex** | `codex "<prompt>"` | `codex resume <id>` | Partial — synthesizes a UUID; transcript parsing stubbed |
-| **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | Partial — cwd-scoped checkpoints, no stable id |
+| **claude** (Claude Code) | `claude --session-id <uuid> "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
+| **codex** | `codex "<prompt>"` | `codex resume` (codex's own picker) | Full — walks `~/.codex/sessions/**/rollout-*.jsonl`, matches tasks on `session_meta.cwd`, parses ids, summaries, turn counts |
+| **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | None — cwd-scoped checkpoints, no stable id; `list_sessions` / `read_transcript` are stubs, so sessions carry no summary |
 | **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Partial — conversation id recovered from `~/.gemini/antigravity-cli/cache/last_conversations.json`; transcripts live in SQLite and aren't parsed |
+
+Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
 `gw doctor` checks which binaries are on PATH and resolves the Linear key.
 
@@ -538,7 +555,7 @@ gw project new|ls|info|rm
 gw task ls|show|rename|setup|add-repo|rm|prune   # all accept --project to scope to one project
                                         # `setup` re-runs the [setup] steps (also: --repo NAME)
                                         # `prune` also: --dry-run/--force/--no-fetch/--scratch-older-than
-gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
+gw session ls|show|send|refresh|rm|prune  # `send` types into a live pane (tmux); `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
 gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
 gw sync run|watch|status|install|uninstall|prune-journal   # background refresh; `run` is what the scheduler calls
 gw prompt show|set|edit|clear           # text appended to every fresh-spawn prompt

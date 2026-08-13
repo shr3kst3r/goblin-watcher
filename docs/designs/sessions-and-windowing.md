@@ -24,12 +24,28 @@ The list-of-sessions shape is the load-bearing piece. It enables the headline UX
 
 ## Windowing
 
-The `Windower` protocol decides *where* the agent process runs.
+The `Windower` protocol decides *where* the agent process runs, and — since it owns that placement — how to reach the process afterwards.
 
 - **`InlineWindower`** (default): `subprocess.run(cmd, cwd=worktree, env=...)` — blocking, stdio passes through. Terminal is the agent's terminal.
 - **`TmuxWindower`** (opt-in via `windowing = "tmux"`): one tmux session named `goblin`, one window per task (`task.id`), one pane per session. Additional sessions on the same task `tmux split-window` — orientation is set by `tmux.split` ("vertical" → top/bottom, the default; "horizontal" → side-by-side). Attach behavior depends on `$TMUX` — `select-window` if already inside the goblin session, `os.execvp` into `tmux attach` from outside.
 
 Both ship in MVP. Config switches; CLI flag `--windowing` overrides per invocation.
+
+### Sending input to a running session
+
+`Windower.send(task=…, text=…, session_id=…, enter=…)` types into a live agent, backing `gw session send <task-id> "also fix the tests"`. Supervising several agents shouldn't require attaching to each pane in turn.
+
+Resolution is by **pane label, held in tmux itself**. `launch` passes the `SessionRecord.session_id` down to `Windower.run`; `TmuxWindower` creates the pane with `-P -F '#{pane_id}'` and stamps `@gw_session <id>` on it, then `send` reads the mapping back with `list-panes -F '#{pane_id}\t#{@gw_session}'`. Nothing is persisted in gw's state: the mapping's natural lifetime is the pane's, and the tmux spawn path may `execvp` away before any post-launch write could land (the same constraint that forces the pre-dispatch `SessionRecord` write).
+
+Fallbacks and refusals, in order:
+
+- One live pane → that's the target, `--session` optional.
+- `--session <id>` matching a labelled pane → that pane; the *last* match wins, because resuming a session opens a second pane carrying the same label and the newer one is the live conversation.
+- `--session <id>` with no matching label but a single pane → still that pane (panes from before labelling, or spawned by hand, carry no label).
+- Several panes and no way to choose → `GoblinError` listing the live sessions.
+- `InlineWindower.send` always raises: the agent owns the terminal `gw` was launched from, and that `gw` process is long gone. The error says exactly that instead of failing obscurely.
+
+Text and Enter are two `send-keys` calls: `-l --` sends the message literally (so a message reading `Enter` or `C-c`, or one starting with `-`, is typed rather than interpreted), while Enter has to go as a key name to submit. `--no-enter` leaves the text sitting in the agent's input box.
 
 ## Agent abstraction
 
@@ -43,7 +59,9 @@ Both ship in MVP. Config switches; CLI flag `--windowing` overrides per invocati
 
 Four concrete impls in `agents/{claude,codex,gemini,antigravity}.py`. Static registry in `agents/registry.py`. **No plugin system.** Adding another agent is a small documented checklist in root `AGENTS.md`.
 
-Claude has the most thorough implementation today (`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` is well-documented). Codex and Gemini fall back to cwd-scoped resume and stub `list_sessions`/`read_transcript` until their session-store layouts are confirmed.
+Claude and Codex both implement the full surface. Claude reads `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, and because `claude --session-id` accepts a caller-chosen UUID, the id `gw` records at spawn is already the id on disk. Codex walks the rollout JSONL under `~/.codex/sessions/<YYYY>/<MM>/<DD>/`, reads the leading `session_meta` envelope for the session id and cwd, and associates a rollout with a task by matching that cwd against the worktree; messages come from the `event_msg` records (`user_message` / `agent_message`) rather than the `response_item` ones, so codex's auto-injected AGENTS.md preamble and `<environment_context>` wrapper stay out of the summary. Codex can't preassign an id, so its resume always drops into codex's own picker (`codex resume`) and the transcript lookup falls back to the newest rollout for the cwd when the recorded id is a synthesized placeholder.
+
+Gemini is the only fully stubbed implementation: no stable session ids at all, `--continue` for resume, and `list_sessions` / `read_transcript` / `render_transcript` return empty until its session-store layout is confirmed.
 
 Antigravity (`agy`) sits in between: its conversations live in an internal SQLite store we don't parse, so transcripts are stubbed, but its documented workspace cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`, a map of absolute workspace path → most recent conversation id) lets `capture_session_id` recover the real id after an inline run and resume it by id later. Note that `agy -p` is *headless* print mode — spawning an interactive session uses `--prompt-interactive`.
 

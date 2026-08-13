@@ -17,6 +17,7 @@ class Windower(Protocol):
         cmd: list[str],
         cwd: Path,
         env: dict[str, str],
+        session_id: str | None = None,
     ) -> int:
         """Run `cmd` for `task` in `cwd`. Returns process exit code.
 
@@ -24,9 +25,34 @@ class Windower(Protocol):
         a full environment. Each windower decides how to deliver them: inline
         merges them over `os.environ`; tmux injects them into the pane command
         (a tmux pane can't inherit this process's environment).
+
+        `session_id` is the `SessionRecord.session_id` this launch belongs to.
+        Windowers that host many sessions side by side (tmux) label the
+        window/pane with it so `send` can find its way back; the ones that
+        don't ignore it.
         """
         ...
 
     def is_live(self, task: Task) -> bool:
         """True if a runtime window/pane currently hosts this task."""
+        ...
+
+    def send(
+        self,
+        *,
+        task: Task,
+        text: str,
+        session_id: str | None = None,
+        enter: bool = True,
+    ) -> str:
+        """Type `text` into the live agent hosting `task`, as if at its keyboard.
+
+        `session_id` selects among several live sessions on the same task;
+        `None` means "the only one there is". `enter` submits the text.
+
+        Returns a human-readable description of where the text landed. Raises
+        `GoblinError` when there is nothing to send to — no live window, or an
+        ambiguous choice of them — and for windowers with no addressable input
+        at all (inline).
+        """
         ...
