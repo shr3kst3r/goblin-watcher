@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from goblin_watcher import paths
 
@@ -105,11 +105,47 @@ class SyncConfig(BaseModel):
     notify_events: list[SyncEvent] = Field(default_factory=lambda: list(_DEFAULT_SYNC_EVENTS))
 
 
+# One `setup.run` step: either a shell command line, executed via `sh -c` so
+# `&&`, pipes, and `$VARS` behave as typed, or an argv list exec'd directly with
+# no shell in between.
+SetupCommand = str | list[str]
+
+
+class SetupConfig(BaseModel):
+    """Bootstrap applied to a freshly materialized worktree.
+
+    A worktree is a bare checkout: everything gitignored (`.env`, `.venv`,
+    `node_modules`) is missing, so the first thing an agent does is rediscover
+    the project's bootstrap. These three lists close that gap.
+
+    `copy` and `link` entries are paths *relative to the project root*, and are
+    reproduced at the same relative path inside the worktree. They are refused
+    if they resolve outside the root (see `worktree_setup.resolve_inside`).
+
+    The Python names carry a `_paths` suffix because `copy` alone shadows
+    `BaseModel.copy`; the TOML keys are the plain `copy` / `link` aliases.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    copy_paths: list[str] = Field(default_factory=list, alias="copy", serialization_alias="copy")
+    link_paths: list[str] = Field(default_factory=list, alias="link", serialization_alias="link")
+    run: list[SetupCommand] = Field(default_factory=list)
+    # Per-`run`-step wall-clock cap. A hung bootstrap otherwise blocks the spawn
+    # forever with no output.
+    timeout_seconds: int = 600
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.copy_paths or self.link_paths or self.run)
+
+
 class Config(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     linear: LinearConfig = Field(default_factory=LinearConfig)
     tmux: TmuxConfig = Field(default_factory=TmuxConfig)
     sync: SyncConfig = Field(default_factory=SyncConfig)
+    setup: SetupConfig = Field(default_factory=SetupConfig)
 
 
 def load() -> Config:
@@ -120,11 +156,20 @@ def load() -> Config:
     return Config.model_validate(raw)
 
 
+def dump_toml_dict(cfg: Config) -> dict[str, Any]:
+    """The config as TOML-shaped data: aliases applied, `None`s dropped.
+
+    `by_alias` is what turns `setup.copy_paths` back into the `copy` key users
+    actually write; every other field aliases to itself.
+    """
+    return cfg.model_dump(exclude_none=True, by_alias=True)
+
+
 def save(cfg: Config) -> None:
     f = paths.config_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     # TOML doesn't accept None; emit only the keys the user has set.
-    f.write_bytes(tomli_w.dumps(cfg.model_dump(exclude_none=True)).encode())
+    f.write_bytes(tomli_w.dumps(dump_toml_dict(cfg)).encode())
 
 
 def config_path() -> Path:
