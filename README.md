@@ -367,6 +367,8 @@ gw pr open eng-123 --draft --notify-linear  # draft PR; also post the URL back t
 gw status                                   # tree: projects → tasks → sessions
 gw status --project my-repo            # limit to one project
 gw status --cost                            # same tree, annotated with tokens + estimated cost
+gw status --active                          # only tasks with work actually in flight
+gw status --watch --active                  # ...redrawn continuously. The dashboard.
 gw pr checks eng-123                        # one row per CI check: state, name, details URL
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
@@ -382,6 +384,25 @@ gw sync status                              # is background sync scheduled? when
 Each session row in `gw status` carries an activity hint derived from the transcript's mtime: `● active` while the agent is producing output, `idle <age>` once it has gone quiet (done, or waiting on you). Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
 
 `gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
+
+#### The dashboard: `--active` and `--watch`
+
+Once you have thirty tracked tasks, the full tree is three hundred lines and the two agents actually working are somewhere in the middle of it. `--active` keeps only the tasks with something in flight:
+
+- a session whose transcript has been written within `defaults.activity_grace_seconds` (default 900 — fifteen minutes), or
+- a live headless run, detected from its pid file.
+
+The grace window is deliberately much wider than the two minutes behind the `● active` badge. An agent that stops to ask you a question goes quiet almost immediately, and that is exactly when you want it still on screen — so `● active` and `idle 6m` both stay, `idle 2h` doesn't. A live headless run is a second, independent signal: it has no terminal and can go a long time between transcript writes, so it earns a `⚡ headless` badge and stays regardless of mtime. Projects with nothing in flight drop out entirely rather than rendering an empty heading.
+
+`--watch` (`-w`) redraws in place every `--interval` seconds (default 2) until you Ctrl-C. Together they're the thing you leave open on a second monitor:
+
+```bash
+gw status --watch --active
+```
+
+Watch mode is deliberately cheaper than a snapshot: it reads task state, transcript mtimes, headless pid files, and the `gw sync` indicator cache — no Linear or GitHub round-trips, no LLM description refresh, no session reconciliation, and no state write unless a summary actually moved. That is what the indicator cache is for; keep `gw sync` scheduled and the dashboard stays current for free. The tradeoff: a session started outside `gw` is adopted by `gw sync` or by a plain `gw status`, not by a watch tick.
+
+`--active` works on its own too, and skips the ticket refresh for tasks it filters out — so it's faster than a full `gw status`, not just shorter.
 
 ### What did today cost?
 
@@ -527,6 +548,8 @@ agent = "claude"                  # "claude" | "codex" | "gemini" | "antigravity
 windowing = "inline"              # "inline" | "tmux" | "headless" (see Headless windowing below)
 summary_ttl_seconds = 30          # how long a session summary is considered fresh
 unsafe = true                     # spawn agents with their bypass-permission flag (see below)
+activity_active_seconds = 120     # transcript touched within this → `● active`; older → `idle <age>`
+activity_grace_seconds = 900      # how long a session stays on the `gw status --active` dashboard
 
 [linear]
 # Literal key, or an `op://vault/item/field` reference resolved via the 1Password CLI.
@@ -659,7 +682,8 @@ gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
 gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
            [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
-gw status [--project NAME] [--no-linear] [--no-cache] [--cost]   # tree view of projects → tasks → sessions
+gw status [--project NAME] [--no-linear] [--no-cache] [--cost]
+          [--active] [--watch|-w] [--interval SECONDS]      # tree view of projects → tasks → sessions
 gw sync                                     # run one background-sync pass now, verbosely
 gw doctor                                   # binary + key resolution checks
 gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation (`gw history prune` trims it)

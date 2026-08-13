@@ -91,7 +91,7 @@ class HeadlessWindower:
 
     def is_live(self, task: Task) -> bool:
         """True while any detached run for this task still has a live process."""
-        return any(_alive(_read_pid(p)) for p in _own_files(task, ".pid"))
+        return has_live_run(task)
 
     def send(
         self,
@@ -153,6 +153,17 @@ def _own_files(task: Task, suffix: str) -> list[Path]:
     if not d.is_dir():
         return []
     return sorted([*d.glob(f"{task.id}-*{suffix}"), *d.glob(f"{task.id}{suffix}")])
+
+
+def has_live_run(task: Task) -> bool:
+    """True while any detached run for this task still has a live process.
+
+    Module-level so readers that aren't launching anything — `gw status`, which
+    flags a task as in-flight without caring which windower produced it — can
+    ask without constructing a windower. `HeadlessWindower.is_live` delegates
+    here; this is the one implementation.
+    """
+    return any(_alive(_read_pid(p)) for p in _own_files(task, ".pid"))
 
 
 def remove_run_files(task: Task) -> None:
