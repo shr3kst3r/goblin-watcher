@@ -402,6 +402,27 @@ def test_prune_action_refuses_a_dirty_worktree(demo, notifier) -> None:  # type:
     assert any("uncommitted" in str(e.get("detail")) for e in _events("action-skipped"))
 
 
+def test_prune_action_refuses_while_the_agent_is_still_running(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """`pr-merged = ["prune"]` fires the instant an agent merges its own PR — the
+    one moment that agent is guaranteed to still be in the worktree (#56)."""
+    import os
+
+    from goblin_watcher import paths
+
+    task = _task(demo, "demo-1")
+    logs = paths.project_logs_dir(demo.root)
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "demo-1-sess-1.pid").write_text(f"{os.getpid()}\n")
+    cfg = _cfg({"pr-merged": ["prune"]}, prune=False)
+
+    report = _pass(notifier, cfg, pr_state="MERGED")
+
+    assert report.actions == []
+    assert state.load_task(demo, task.id).id == "demo-1"
+    assert task.worktree_path.exists()
+    assert any("still alive" in str(e.get("detail")) for e in _events("action-skipped"))
+
+
 # ---------------------------------------------------------------------------
 # archive.
 

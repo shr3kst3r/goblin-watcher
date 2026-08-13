@@ -109,14 +109,63 @@ the return code and lets unresolvable PRs fall out as absent entries.
 unattended prune has to be stricter than the interactive one. A merged task is
 left alone, and reported via the `prunable` notification, when:
 
+- an agent still looks to be running in the worktree (`busy_reasons` — see
+  below), or
 - any worktree has uncommitted changes, or
 - on a multi-repo task (ADR 0003), a secondary repo's branch still carries
   commits its base branch does not have — `merge_detection` only inspects the
   primary. A secondary sitting on its base has nothing unique to lose and does
   not block the prune.
 
+All three live in `prune_blocker`, not at the call sites, which is what keeps the
+periodic prune (step 7) and the `[sync.on]` `prune` action from diverging.
+
 Pruning also drops the task's cache row, edge-trigger keys, and description
 backoff, so derived state does not outlive the record it describes.
+
+### Why "merged and clean" was not enough
+
+An agent that opens and merges its own PR keeps running for a while after the
+merge — it still has to write its final output. It has also committed everything
+on the way, so the worktree is *clean* by definition. The dirty check is
+therefore at its weakest at exactly the moment the merge fires, and a pass that
+woke on `MERGED` deleted the directory out from under a live agent. Across one
+run of eleven headless agents that was the outcome for four of them (#56). This
+is not #46: those branches were genuinely merged, and the bug is a timing race
+rather than a detection error.
+
+`commands/task.busy_reasons` is the second guard, sitting beside
+`dirty_worktrees` as the other reason a destructive step must stand down. Three
+independent signals, cheapest first, any one of which is enough:
+
+- **a live pid from a detached headless run** (`os.kill(pid, 0)` on the
+  `<task>-<session>.pid` sidecar). The crisp one, and the only one that stays
+  honest for an agent that writes nothing to its transcript for minutes at a
+  stretch. `live_run_pids` **deletes a sidecar whose process is gone** on the way
+  past: nothing else would ever clean it, and now that prune consults these, a
+  pid file outliving its process would mean a task that never gets pruned again.
+- **a session the transcript classifies as `working`** — mid tool call, or the
+  turn handed over unanswered (ADR 0010).
+- **a session whose transcript was touched inside
+  `defaults.activity_grace_seconds`.** This is what covers the windowing modes
+  that record no pid at all — tmux panes and inline runs, which are the common
+  case, not an afterthought. Whatever is hosting it, an agent that just merged
+  its PR wrote to its transcript seconds ago.
+
+The last two are the signals `gw status --active` already uses to call a task in
+flight, so the dashboard and a prune cannot disagree about who is busy.
+
+Every signal self-heals, and for a guard on a scheduled job that is the property
+that matters: a pid is reaped when its process exits, and both transcript signals
+expire as the session goes quiet. Nothing here can wedge a task as unprunable
+forever. Deliberately *not* a signal: a tmux window named after the task. A
+window routinely outlives the agent that was in it, so it would do exactly that.
+
+It is not a proof of absence either — an inline agent parked at a prompt for an
+hour leaves nothing to find — and it isn't meant to be. Every way it can be
+wrong costs a worktree that survives too long instead of one deleted too early,
+which is the only direction a destructive step is allowed to err in. `--force`
+(or `gw task rm --force`) is the override for anyone who knows better.
 
 ### Why ancestry needs a recorded fork point
 
@@ -228,7 +277,9 @@ once and a quiet day produces zero notifications:
   parent record still exists (step 5 runs before the prune in step 7). The
   notification names the *child* — that's the branch with work to do.
 - `checks-failed` / `checks-passed` — CI rollup flipped
-- `prunable` — a merged branch that can't be auto-pruned because it's dirty
+- `prunable` — a merged branch that can't be auto-pruned: an agent is still
+  running in the worktree ("merged but still busy"), or it's dirty / a secondary
+  repo is unmerged ("merged but not clean")
 
 Transports: `macos` (osascript), `command` (user argv, title and body appended,
 never shell-interpolated), or `off`. `auto` resolves to `macos` on darwin. Every
@@ -255,7 +306,7 @@ validation error rather than a rule that silently never fires.
 | action | what it does | declines when |
 | --- | --- | --- |
 | `spawn-fix-session` | Starts a fresh **headless** agent session on the task, seeded with the ordinary task brief plus a per-event instruction and the notification body | the task is archived, its worktree is gone, or one of its sessions is still `working` |
-| `prune` | The edge-triggered form of step 7: `destroy_task` behind the same `merge_detection` + `prune_blocker` checks | the branch isn't merged, a worktree is dirty, or a secondary repo holds unmerged commits |
+| `prune` | The edge-triggered form of step 7: `destroy_task` behind the same `merge_detection` + `prune_blocker` checks | the branch isn't merged, an agent is still running in the worktree, a worktree is dirty, or a secondary repo holds unmerged commits |
 | `archive` | Drops the worktree, keeping record, branch, and sessions (gh-23) | already archived, scratch, a worktree is dirty, or a session is still `working` |
 
 Windowing for a spawn is `headless` unconditionally, never `defaults.windowing`:
@@ -411,9 +462,11 @@ $XDG_DATA_HOME/goblin-watcher/
   re-reading, interleaved narrow patches.
 - `tests/test_sync_engine.py` — full passes over real git repos with `gh` and the
   notifier faked: PR transitions, edge-trigger once-only, prune safety (including
-  the multi-repo guard), backoff, crash and skip bookkeeping, and the batched PR
-  lookup — one query per repo, no second fetch inside prune, no fetch at all for
-  an already-merged task.
+  the multi-repo guard and the live-agent guard, both directions — a live pid
+  blocks, a reaped one doesn't), backoff, crash and skip bookkeeping, and the
+  batched PR lookup — one query per repo, no second fetch inside prune, no fetch
+  at all for an already-merged task. Liveness fixtures write a sidecar holding
+  the *test's own* pid, so nothing spawns a real process.
 - `tests/test_sync_actions.py` — `[sync.on]`: off by default, config validation
   on both sides of the arrow, the headless spawn and its brief, the three
   handler guard sets, once-per-transition, the cooldown and the per-pass cap,

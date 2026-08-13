@@ -155,15 +155,35 @@ def _own_files(task: Task, suffix: str) -> list[Path]:
     return sorted([*d.glob(f"{task.id}-*{suffix}"), *d.glob(f"{task.id}{suffix}")])
 
 
-def has_live_run(task: Task) -> bool:
-    """True while any detached run for this task still has a live process.
+def live_run_pids(task: Task) -> list[int]:
+    """Pids of `task`'s detached runs that are still running, reaping the rest.
 
     Module-level so readers that aren't launching anything — `gw status`, which
-    flags a task as in-flight without caring which windower produced it — can
-    ask without constructing a windower. `HeadlessWindower.is_live` delegates
-    here; this is the one implementation.
+    flags a task as in-flight, and the prune guards, which refuse to delete a
+    worktree an agent is still sitting in — can ask without constructing a
+    windower. `HeadlessWindower.is_live` and `has_live_run` both delegate here;
+    this is the one implementation.
+
+    A sidecar whose process is gone is **deleted on the way past**. Nothing else
+    would ever clean it, and now that prune consults this, a pid file that
+    outlives its process is a task that never gets pruned again. Reaping bounds
+    that to the run's actual lifetime — best-effort, since failing to unlink a
+    file is not worth failing a liveness question over.
     """
-    return any(_alive(_read_pid(p)) for p in _own_files(task, ".pid"))
+    alive: list[int] = []
+    for path in _own_files(task, ".pid"):
+        pid = _read_pid(path)
+        if pid is not None and _alive(pid):
+            alive.append(pid)
+            continue
+        with contextlib.suppress(OSError):
+            path.unlink()
+    return alive
+
+
+def has_live_run(task: Task) -> bool:
+    """True while any detached run for this task still has a live process."""
+    return bool(live_run_pids(task))
 
 
 def remove_run_files(task: Task) -> None:
@@ -199,9 +219,14 @@ def _alive(pid: int | None) -> bool:
 
     Signal 0 checks for existence without delivering anything. `EPERM` means
     the process exists but belongs to someone else, which still counts as
-    alive. Pid reuse can in principle make a stale sidecar read as live; the
-    consequence is a cosmetically wrong liveness answer, so it doesn't earn a
-    heavier mechanism.
+    alive.
+
+    Both error paths lean the same way on purpose: this now gates a destructive
+    step, and every way it can be wrong has to cost a worktree that survives too
+    long rather than one deleted too early. Pid reuse is the residual — a stale
+    sidecar whose number a new process has taken reads as live — and it costs an
+    unpruned task until that process exits, at which point `live_run_pids` reaps
+    the file. `--force` is the override for anyone who knows better.
     """
     if pid is None or pid <= 0:
         return False

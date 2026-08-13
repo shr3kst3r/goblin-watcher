@@ -8,14 +8,14 @@ from pathlib import Path
 import typer
 from rich.table import Table
 
-from goblin_watcher import gh, git, paths, state, workspace, worktree_setup
+from goblin_watcher import activity, config, gh, git, paths, state, workspace, worktree_setup
 from goblin_watcher.completion_enumerators import complete_projects, complete_tasks
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.models import Project, Task, TaskRepo, TaskStatus
 from goblin_watcher.slug import slugify
 from goblin_watcher.task_resolver import resolve_project
-from goblin_watcher.windowing.headless import has_live_run, remove_run_files
+from goblin_watcher.windowing.headless import has_live_run, live_run_pids, remove_run_files
 from goblin_watcher.windowing.tmux import TmuxWindower
 
 app = typer.Typer()
@@ -590,6 +590,73 @@ def dirty_worktrees(task: Task) -> list[Path]:
     return dirty
 
 
+def busy_reasons(
+    task: Task,
+    *,
+    cfg: config.Config | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Signs that an agent is still running inside `task`'s worktree.
+
+    The companion to `dirty_worktrees`, covering the other way a destructive step
+    takes work with it. A headless agent that opens and merges its own PR keeps
+    running afterwards — it still has to write its final output — and it has
+    committed everything by then, so the uncommitted-changes guard is at its
+    weakest at exactly the moment the merge fires. Prune woke on its own
+    schedule, saw MERGED, and deleted the directory out from under a live agent
+    (#56). That is the normal shape of a headless run, not an edge case.
+
+    Three independent signals, cheapest first; any one of them is enough:
+
+    * a live pid from a detached headless run (`os.kill(pid, 0)`). The crisp one,
+      and the only one that stays honest for an agent that writes nothing to its
+      transcript for minutes at a stretch.
+    * a session the transcript classifies as `working` — mid tool call, or the
+      turn handed over unanswered (ADR 0010).
+    * a session whose transcript was touched within
+      `defaults.activity_grace_seconds`. This is what covers the windowing modes
+      that record no pid at all (tmux panes, inline runs): whatever is hosting
+      it, an agent that just merged its PR wrote to its transcript seconds ago.
+
+    The last two are the signals `gw status --active` already uses to call a task
+    in flight, so the dashboard and a prune cannot disagree about who is busy.
+
+    Every signal self-heals, which is the property that matters for a guard on a
+    scheduled job: a pid is reaped when its process exits, and both transcript
+    signals expire as the session goes quiet. Nothing here can wedge a task as
+    unprunable forever. Deliberately *not* a signal: a tmux window named after
+    the task, which routinely outlives the agent that was in it and would do
+    exactly that.
+
+    Not a proof of absence either — an inline agent parked at a prompt for an
+    hour leaves nothing to find. Callers treat a hit as "skip and say why" and
+    keep `--force` as the override, the same posture as the dirty-worktree guard.
+    """
+    reasons: list[str] = []
+    with contextlib.suppress(GoblinError):
+        pids = live_run_pids(task)
+        if pids:
+            joined = ", ".join(str(p) for p in pids)
+            reasons.append(f"a headless run is still alive (pid {joined})")
+
+    if cfg is None:
+        cfg = config.load()
+    now = now or datetime.now(UTC)
+    grace = float(cfg.defaults.activity_grace_seconds)
+    for session in task.sessions:
+        act = activity.classify(
+            session,
+            now=now,
+            active_seconds=int(cfg.defaults.activity_active_seconds),
+            stalled_after=int(cfg.defaults.activity_grace_seconds),
+        )
+        if act.state == "working":
+            reasons.append(f"session {session.session_id} is mid-turn")
+        elif act.since is not None and (now - act.since).total_seconds() <= grace:
+            reasons.append(f"session {session.session_id} was active moments ago")
+    return reasons
+
+
 def _repo_root(primary: Project, project_name: str) -> Path | None:
     """Project root for a repo on a task, or None if the project is unregistered."""
     if project_name == primary.name:
@@ -622,6 +689,13 @@ def rm(
             raise GoblinError(
                 f"Worktree {dirty[0]} has uncommitted changes.",
                 hint="Commit/stash first, or re-run with --force.",
+            )
+        busy = busy_reasons(task)
+        if busy:
+            raise GoblinError(
+                f"Task {task.id!r} still looks busy: {busy[0]}.",
+                hint="Wait for the agent to finish, or re-run with --force to delete the "
+                "worktree out from under it.",
             )
         n = len(task.all_repos())
         scope = f"{n} worktrees" if task.is_multi_repo else f"worktree {task.worktree_path}"
@@ -780,7 +854,8 @@ def prune(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Skip the confirmation prompt; also remove tasks with uncommitted changes.",
+        help="Skip the confirmation prompt; also remove tasks with uncommitted changes "
+        "or a still-running agent.",
     ),
     fetch: bool = typer.Option(True, "--fetch/--no-fetch", help="Run `git fetch` before checking."),
     scratch_older_than: int | None = typer.Option(
@@ -802,6 +877,10 @@ def prune(
     Scratch spaces have no branch, so "merged" never applies; pass
     `--scratch-older-than N` to prune the ones idle for more than N days
     (deleting their directories permanently).
+
+    A merged task is still skipped, with a reason, when an agent looks to be
+    running in its worktree (`busy_reasons`) or the worktree is dirty. `--force`
+    overrides both.
     """
     if scratch_older_than is not None and scratch_older_than < 0:
         raise GoblinError("--scratch-older-than must be non-negative.")
@@ -870,10 +949,18 @@ def prune(
 
     removed = 0
     skipped: list[tuple[Project, Task, str]] = []
+    # Loaded once, not per task: the activity thresholds are the same for all of
+    # them and `config.load()` re-reads the file on every call.
+    cfg = config.load()
     for proj, task, _detected in merged:
-        if not force and dirty_worktrees(task):
-            skipped.append((proj, task, "uncommitted changes"))
-            continue
+        if not force:
+            busy = busy_reasons(task, cfg=cfg)
+            if busy:
+                skipped.append((proj, task, busy[0]))
+                continue
+            if dirty_worktrees(task):
+                skipped.append((proj, task, "uncommitted changes"))
+                continue
         destroy_task(proj, task, force=force)
         removed += 1
 
