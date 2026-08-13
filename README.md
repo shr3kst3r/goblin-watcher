@@ -479,24 +479,31 @@ The agents will execute everything they decide to do without asking. If you'd ra
 ## Commands reference
 
 ```text
-gw <LINEAR-ID> [--project NAME] [--repo URL] [--agent ...]
-               [--windowing inline|tmux] [--unsafe|--no-unsafe]
-gw new --linear|--branch|--branch-name|--branch-auto|--dir [--title ...] [--from ...]
-       [--project NAME] [--agent ...] [--research]
-       [--no-launch] [--windowing ...] [--unsafe|--no-unsafe]
-gw run [PATH|TASK-ID] [--agent ...] [--session [ID]] [--new] [--research]
+gw <LINEAR-ID> [...any `gw new` flag]       # sugar for `gw new --linear <ID>`
+gw gh-<N>      [...any `gw new` flag]       # sugar for `gw new --issue <N>`
+gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
+       [--title ...] [--from ...] [--project NAME] [--with-project NAME]
+       [--repo URL] [--agent ...] [--prompt ...] [--research] [--adversarial-review]
+       [--rm|--rm-force] [--no-launch] [--windowing inline|tmux] [--unsafe|--no-unsafe]
+gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
+       [--research] [--adversarial-review]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
+gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch]
+           [--windowing ...] [--unsafe|--no-unsafe]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
 gw status [--project NAME] [--no-linear] [--no-cache]   # tree view of projects → tasks → sessions
 gw sync                                     # run one background-sync pass now, verbosely
 gw doctor                                   # binary + key resolution checks
+gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation (`gw history prune` trims it)
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
 
 gw project new|ls|info|rm
-gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch)
+gw task ls|show|rm|prune                # all accept --project to scope to one project (`prune` also: --dry-run/--force/--no-fetch/--scratch-older-than)
 gw session ls|show|refresh|rm|prune     # `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
 gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
 gw sync run|watch|status|install|uninstall|prune-journal   # background refresh; `run` is what the scheduler calls
+gw prompt show|set|edit|clear           # text appended to every fresh-spawn prompt
+gw config show|get|set|unset|edit|path  # user config under ~/.config/goblin-watcher/
 gw version
 ```
 
