@@ -236,6 +236,16 @@ Pushes the branch via `git push -u origin`, then shells out to `gh pr create`. T
 
 Re-running is idempotent: if an open PR already exists for the branch, the push still happens but `gh pr create` is skipped. `--notify-linear` posts a comment with the PR URL(s) on the task's Linear issue — the only write `gw` ever performs against Linear.
 
+### `gw pr checks` — which check broke
+
+```bash
+gw pr checks eng-123 [--project NAME]
+```
+
+`gw status` flags a task with `✗ checks` but not *which* check. This lists them, one row per check: state glyph, name (`workflow / job` for a GitHub Actions run), GitHub's own word for the outcome, and the details URL to open.
+
+Failing checks sort first, then still-running, then the ones that passed. A PR with no CI configured at all says so rather than rendering an empty list. Exits non-zero only when the task has no PR to look at; a red check is still a successful report.
+
 ## Worked examples
 
 ### Start a new Linear ticket against a checkout you already have
@@ -317,6 +327,7 @@ gw pr open eng-123 --draft --notify-linear  # draft PR; also post the URL back t
 ```bash
 gw status                                   # tree: projects → tasks → sessions
 gw status --project my-repo            # limit to one project
+gw pr checks eng-123                        # one row per CI check: state, name, details URL
 gw task show eng-123                        # task detail with rolling session summaries (--project to disambiguate)
 gw session ls                               # sessions for the current task
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
@@ -556,7 +567,7 @@ gw task ls|show|rename|setup|add-repo|rm|prune   # all accept --project to scope
                                         # `setup` re-runs the [setup] steps (also: --repo NAME)
                                         # `prune` also: --dry-run/--force/--no-fetch/--scratch-older-than
 gw session ls|show|send|refresh|rm|prune  # `send` types into a live pane (tmux); `prune` accepts --older-than/--agent/--task/--project/--dry-run/--force
-gw pr open|status                       # both accept --project to disambiguate a task id shared across projects
+gw pr open|status|checks                # all accept --project to disambiguate a task id shared across projects
 gw sync run|watch|status|install|uninstall|prune-journal   # background refresh; `run` is what the scheduler calls
 gw prompt show|set|edit|clear           # text appended to every fresh-spawn prompt
 gw config show|get|set|unset|edit|path  # user config under ~/.config/goblin-watcher/
