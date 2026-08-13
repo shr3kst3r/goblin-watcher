@@ -570,7 +570,10 @@ def _refresh_pr_and_indicators(
     # to each repo's *own* project root — a secondary repo's branch does not
     # exist in the primary's object store (ADR 0003).
     for repo in task.all_repos():
-        if not repo.worktree_path.exists():
+        # An archived task has no checkout to read git facts from (gh-23); PR
+        # state below still refreshes, since the branch and PR outlive the
+        # worktree.
+        if task.archived or not repo.worktree_path.exists():
             continue
         with contextlib.suppress(GoblinError):
             if git.has_uncommitted_changes(repo.worktree_path):

@@ -166,6 +166,24 @@ files (the sync tier) and want the same guarantee.
 - `status` transitions: `open` → `pushed` (planned) → `pr-open` → `merged` | `closed` | `abandoned`. Today only `open` and `pr-open` are set automatically. For a multi-repo task it is a roll-up across repos.
 - `secondary_repos` (default `[]`) and `workspace_path` (default `null`) support multi-repo tasks (ADR 0003). The scalar `project`/`branch`/`worktree_path`/`base_branch`/`pr_url` fields describe the **primary** repo; each additional repo is a `TaskRepo` (same five fields) in `secondary_repos`. `Task.all_repos()` yields primary-first. Single-repo task JSON is unchanged — the new fields default empty, so older records validate without migration.
 - When `secondary_repos` is non-empty, `workspace_path` points at the workspace directory (below) that holds each repo's worktree as a subdir, and is the agent's cwd.
+- `archived` (default `false`) and `archived_at` (default `null`) record that the task's worktree was dropped but everything else kept — see "Archived tasks" below. Deliberately separate from `status`: a task can be archived at any point in the PR lifecycle, and `status` must go on tracking the PR.
+
+## Archived tasks
+
+A worktree is the expensive part of a task — a full checkout each, which adds up fast across many parallel tasks — while the branch, the record, and the session history cost almost nothing. `gw task archive <task-id>` removes only the checkout:
+
+- every repo's worktree goes through `git.worktree_remove` (falling back to `shutil.rmtree` only under `--force`, the same guard `destroy_task` uses so untracked work isn't silently lost);
+- a multi-repo task's `workspace_path` is `rmdir`'d, and only if it came out empty — anything the user parked next to the checkouts survives;
+- the record is patched to `archived = true` with an `archived_at` stamp, under the task lock like every other write.
+
+`gw run` is the inverse. When it resolves an archived task it calls `rematerialize_task` before anything else touches the filesystem: `git worktree prune` (a checkout deleted behind git's back leaves the path registered, which would make `worktree add` refuse), then `git worktree add <path> <branch>` per repo, then the project's `[setup]` steps against the restored checkouts, since a fresh worktree is a bare one again (ADR 0007). The record's `archived` flag is cleared on the way through. If the branch is gone by then, it raises rather than checking out the base branch — that would hand back an empty worktree wearing the task's name.
+
+Two consumers know about the flag:
+
+- `gw status` renders an archived task dimmed with an `(archived)` tag. Its git-indicator helper already returns nothing for a missing worktree, so no separate check is needed there.
+- `gw sync` skips the per-repo git facts (uncommitted, ahead counts) for an archived task. PR state and checks still refresh: the branch and the PR outlive the worktree, so a task parked mid-review keeps reporting.
+
+Scratch tasks are refused — a scratch directory *is* the work, with no branch to come back from — and `gw task rm` is unaffected: it already skips worktrees that aren't on disk and deletes the branch and record as usual.
 
 ## Configuration (config.toml)
 

@@ -1100,3 +1100,23 @@ def test_sync_skips_the_issue_step_without_an_issue(demo, notifier) -> None:  # 
 
     lookup.assert_not_called()
     assert not any(s.step == "github-issue" for s in report.steps)
+
+
+def test_sync_skips_git_indicators_for_an_archived_task(demo, notifier) -> None:  # type: ignore[no-untyped-def]
+    """An archived task has no checkout to read git facts from (gh-23). The
+    branch is still ahead of main, so a non-archived task would report `ahead`."""
+    project, task = demo
+    (task.worktree_path / "feature.txt").write_text("work\n")
+    _git(task.worktree_path, "add", "-A")
+    _git(task.worktree_path, "commit", "-qm", "feat")
+    state.update_task(project, task.id, lambda t: t.model_copy(update={"archived": True}))
+
+    with _run(notifier)[1], patch("goblin_watcher.sync.engine.git.rev_list_count") as counted:
+        report = engine.run_pass()
+
+    assert report.status == "ok"
+    counted.assert_not_called()
+    entry = store.get_indicators("demo", "demo-1", max_age_seconds=3600)
+    assert entry is not None
+    assert entry.ahead == 0
+    assert entry.uncommitted is False

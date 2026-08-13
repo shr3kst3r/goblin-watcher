@@ -350,6 +350,18 @@ def worktree_remove(repo: Path, dest: Path, force: bool = False) -> None:
     _run(args)
 
 
+def worktree_prune(repo: Path) -> None:
+    """Forget git's metadata for worktrees whose directory is no longer there.
+
+    `git worktree add` refuses a path git still has registered, even when
+    nothing is on disk — which is exactly the state left behind when a checkout
+    was deleted outside git (the `shutil.rmtree` fallback both `gw task rm` and
+    `gw task archive` fall back to). Pruning first is what lets `gw run`
+    rematerialize an archived task's worktree at its original path.
+    """
+    _run(["-C", str(repo), "worktree", "prune"])
+
+
 def worktree_list(repo: Path) -> list[dict[str, str]]:
     """Parse `git worktree list --porcelain` into [{path, branch, head, bare?}, ...]."""
     out = _run(["-C", str(repo), "worktree", "list", "--porcelain"])

@@ -12,10 +12,10 @@ from goblin_watcher import gh, git, paths, state, workspace, worktree_setup
 from goblin_watcher.completion_enumerators import complete_projects, complete_tasks
 from goblin_watcher.console import console, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
-from goblin_watcher.models import Project, Task, TaskStatus
+from goblin_watcher.models import Project, Task, TaskRepo, TaskStatus
 from goblin_watcher.slug import slugify
 from goblin_watcher.task_resolver import resolve_project
-from goblin_watcher.windowing.headless import remove_run_files
+from goblin_watcher.windowing.headless import has_live_run, remove_run_files
 from goblin_watcher.windowing.tmux import TmuxWindower
 
 app = typer.Typer()
@@ -103,7 +103,7 @@ def ls(
             t.id,
             t.branch,
             t.status,
-            str(t.worktree_path),
+            str(t.worktree_path) + ("  (archived)" if t.archived else ""),
             t.pr_url or "",
         )
     console.print(table)
@@ -202,6 +202,9 @@ def show(
         where = f"branch {parent.branch}" if parent is not None else "no longer tracked"
         console.print(f"  stacked on    {task.parent_task} ({where})")
     console.print(f"  status        {task.status}")
+    if task.archived:
+        when = task.archived_at.isoformat() if task.archived_at else "unknown"
+        console.print(f"  archived      yes ({when}) — `gw run` restores the worktree")
     console.print(f"  pr_url        {task.pr_url or '(none)'}")
     console.print(f"  linear        {task.linear.identifier if task.linear else '(none)'}")
     if task.github_issue is not None:
@@ -467,6 +470,115 @@ def destroy_task(
     state.delete_task_record(proj, task.id)
 
 
+def archive_task(proj: Project, task: Task, *, force: bool) -> list[Path]:
+    """Drop every worktree on `task`, keeping the record, branch, and sessions.
+
+    The inverse of `rematerialize_task`. No prompts and no dirty check; the
+    caller owns both. As in `destroy_task`, the `shutil.rmtree` fallback only
+    kicks in under `force` — without that guard a non-force run could silently
+    nuke untracked work after `git worktree remove` (sans `--force`) refused.
+
+    Returns the worktree paths actually removed.
+    """
+    removed: list[Path] = []
+    for repo in task.all_repos():
+        if not repo.worktree_path.exists():
+            continue
+        repo_root = _repo_root(proj, repo.project)
+        if repo_root is None:
+            if not force:
+                raise GoblinError(
+                    f"Project {repo.project!r} is not registered, so git can't remove its "
+                    f"worktree at {repo.worktree_path}.",
+                    hint="Re-register the project (`gw project new`), or re-run with --force "
+                    "to delete the directory outright.",
+                )
+            shutil.rmtree(repo.worktree_path, ignore_errors=True)
+        else:
+            try:
+                git.worktree_remove(repo_root, repo.worktree_path, force=force)
+            except GoblinError:
+                if not force:
+                    raise
+                shutil.rmtree(repo.worktree_path, ignore_errors=True)
+                # git still has the path registered after an rmtree behind its
+                # back, which would make rematerializing it fail.
+                with contextlib.suppress(GoblinError):
+                    git.worktree_prune(repo_root)
+        removed.append(repo.worktree_path)
+
+    # The workspace dir is only a container for the per-repo checkouts. Once
+    # they're gone, drop it if — and only if — it is empty, so anything the user
+    # parked alongside them survives the archive.
+    if task.workspace_path is not None and task.workspace_path.exists():
+        with contextlib.suppress(OSError):
+            task.workspace_path.rmdir()
+
+    state.update_task(
+        proj,
+        task.id,
+        lambda latest: latest.model_copy(
+            update={"archived": True, "archived_at": datetime.now(UTC)}
+        ),
+    )
+    return removed
+
+
+def rematerialize_task(proj: Project, task: Task, *, run_setup: bool = True) -> Task:
+    """Recreate an archived task's worktree(s) from its branch and un-archive it.
+
+    Idempotent per repo: a checkout still on disk is left alone, so this is safe
+    to call on a task that was only partly archived. A restored worktree is a
+    bare checkout again, so the project's `[setup]` steps are re-applied to it —
+    the same rule `gw new` follows for anything it materializes (ADR 0007).
+
+    Raises rather than guessing when the branch is gone: rematerializing off the
+    base branch would hand back an empty worktree wearing the task's name.
+    """
+    restored: list[TaskRepo] = []
+    for repo in task.all_repos():
+        if repo.worktree_path.exists():
+            continue
+        repo_root = _repo_root(proj, repo.project)
+        if repo_root is None:
+            raise GoblinError(
+                f"Project {repo.project!r} is not registered, so task {task.id!r} can't be "
+                f"rematerialized.",
+                hint="Re-register it with `gw project new`, then try again.",
+            )
+        if not git.branch_exists(repo_root, repo.branch):
+            raise GoblinError(
+                f"Branch {repo.branch!r} no longer exists in project {repo.project!r}, so "
+                f"there is nothing to rematerialize task {task.id!r} from.",
+                hint=f"The branch was deleted after the task was archived. Remove the record "
+                f"with `gw task rm {task.id}`, or recreate the branch first.",
+            )
+        # Clears any stale registration left by an rmtree; `worktree add` would
+        # otherwise refuse a path git still believes it owns.
+        with contextlib.suppress(GoblinError):
+            git.worktree_prune(repo_root)
+        git.worktree_add(repo_root, repo.worktree_path, repo.branch)
+        restored.append(repo)
+
+    updated = state.update_task(
+        proj,
+        task.id,
+        lambda latest: latest.model_copy(update={"archived": False, "archived_at": None}),
+    )
+    if not restored:
+        return updated
+
+    for repo in restored:
+        console.print(f"[muted]Restored worktree {repo.worktree_path} from {repo.branch}.[/]")
+    if run_setup:
+        # A failed step leaves the worktree in place and un-archived: the user
+        # fixes the cause and re-runs `gw task setup`, exactly as after `gw new`.
+        result = worktree_setup.setup_task_repos(updated, restored)
+        if not result.ok:
+            raise worktree_setup.setup_failure(updated.id, result)
+    return updated
+
+
 def dirty_worktrees(task: Task) -> list[Path]:
     """Worktree paths on `task` that have uncommitted changes (across all repos)."""
     dirty: list[Path] = []
@@ -529,6 +641,77 @@ def rm(
 
     destroy_task(proj, task, force=force)
     print_success(f"Removed task {task.id!r}")
+
+
+@app.command("archive")
+def archive(
+    task_id: str = typer.Argument(..., help="Task id.", autocompletion=complete_tasks),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="Limit the search to one project (disambiguates a task id shared across projects).",
+        autocompletion=complete_projects,
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Archive anyway when the worktree is dirty or a headless run is still alive "
+        "(discards uncommitted changes).",
+    ),
+) -> None:
+    """Drop a task's worktree, keeping the record, the branch, and the sessions.
+
+    The middle ground between `gw task rm` and keeping everything: a checkout
+    per task is the expensive part, and the branch already holds the committed
+    work. `gw run <task-id>` rematerializes the worktree from the branch and
+    re-applies the project's setup steps.
+
+    Not prompted, unlike `gw task rm` — nothing committed is lost, so it's
+    reversible. The uncommitted-changes guard is what `--force` overrides.
+    """
+    proj, task = _find_task(task_id, project)
+
+    if task.kind == "scratch":
+        raise GoblinError(
+            f"Task {task.id!r} is a scratch space, and its directory is the only copy of "
+            f"the work — there's no branch to rematerialize it from.",
+            hint=f"Remove it outright with `gw task rm {task.id}` if you're done with it.",
+        )
+
+    live = [r.worktree_path for r in task.all_repos() if r.worktree_path.exists()]
+    if not live:
+        if not task.archived:
+            # Nothing on disk but the record says otherwise: mark it, so the
+            # record matches reality and `gw run` knows to rematerialize.
+            archive_task(proj, task, force=force)
+            print_success(f"Marked task {task.id!r} archived (its worktree was already gone)")
+        else:
+            console.print(f"[muted]Task {task.id!r} is already archived.[/]")
+        return
+
+    if not force:
+        dirty = dirty_worktrees(task)
+        if dirty:
+            raise GoblinError(
+                f"Worktree {dirty[0]} has uncommitted changes.",
+                hint="Archiving keeps the branch, not the working tree — commit/stash first, "
+                "or re-run with --force to discard them.",
+            )
+        if has_live_run(task):
+            raise GoblinError(
+                f"A headless run for task {task.id!r} is still alive.",
+                hint="Wait for it to finish, or re-run with --force to pull the worktree out "
+                "from under it.",
+            )
+
+    removed = archive_task(proj, task, force=force)
+    print_success(f"Archived task {task.id!r}")
+    for path in removed:
+        console.print(f"  [muted]removed[/] {path}")
+    console.print(
+        f"[muted]Branch ({task.branch}), record, and {len(task.sessions)} session(s) kept. "
+        f"`gw run {task.id}` brings the worktree back.[/]"
+    )
 
 
 def merge_detection(

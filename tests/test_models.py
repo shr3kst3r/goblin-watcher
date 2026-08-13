@@ -98,3 +98,13 @@ def test_task_agent_cwd_multi_repo_is_workspace(tmp_path: Path) -> None:
         ],
     )
     assert task.agent_cwd == tmp_path / "ws"
+
+
+def test_task_json_without_archive_fields_still_validates() -> None:
+    """Records written before `gw task archive` existed must load unmigrated."""
+    task = Task.model_validate_json(
+        '{"id": "t1", "project": "p", "branch": "b", "worktree_path": "/tmp/wt", '
+        '"base_branch": "main", "created_at": "2026-05-18T13:05:00+00:00"}'
+    )
+    assert task.archived is False
+    assert task.archived_at is None

@@ -489,3 +489,20 @@ def test_status_cost_says_so_when_nothing_recorded(isolated_xdg: Path, tmp_path:
     res = runner.invoke(app, ["status", "--cost", "--no-linear"])
     assert res.exit_code == 0, res.output
     assert "No token usage recorded" in res.output
+
+
+def test_status_dims_an_archived_task(isolated_xdg: Path, tmp_path: Path) -> None:
+    """An archived task (worktree dropped, record kept) reads as parked (gh-23)."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    runner = CliRunner()
+    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
+    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert runner.invoke(app, ["task", "archive", task.id]).exit_code == 0
+
+    res = runner.invoke(app, ["status", "--no-linear"])
+    assert res.exit_code == 0, res.output
+    assert "(archived)" in res.output
+    assert task.id in res.output

@@ -7,6 +7,7 @@ from goblin_watcher import config, review_feed, sessions, state
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
 from goblin_watcher.agents.launcher import Fresh, Resume, build_seed_prompt
 from goblin_watcher.agents.launcher import launch as launch_agent
+from goblin_watcher.commands.task import rematerialize_task
 from goblin_watcher.completion_enumerators import (
     complete_projects,
     complete_sessions,
@@ -166,6 +167,12 @@ def run(
             hint="--research needs a task created from --linear or --issue.",
         )
     proj = state.get_project(task.project)
+    # An archived task kept its branch and its session history but gave up its
+    # checkout (`gw task archive`). Bring the worktree back before anything —
+    # session reconciliation, the picker, the launcher — goes looking for it.
+    if task.archived:
+        console.print(f"[muted]Task {task.id!r} is archived — restoring its worktree…[/]")
+        task = rematerialize_task(proj, task)
     cfg = config.load()
     agent_name = agent or cfg.defaults.agent or "claude"
     validate_agent_for_project(agent_name, proj)
