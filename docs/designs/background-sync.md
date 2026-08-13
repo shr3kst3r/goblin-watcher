@@ -112,6 +112,30 @@ left alone, and reported via the `prunable` notification, when:
 Pruning also drops the task's cache row, edge-trigger keys, and description
 backoff, so derived state does not outlive the record it describes.
 
+### Why ancestry needs a recorded fork point
+
+`merge_detection` prefers PR state and falls back to ancestry — but the fallback
+is gated on `Task.fork_sha`, and that gate is load-bearing. A branch that has
+never had a commit is an ancestor of its base and holds nothing unique, which is
+exactly the shape of a merged branch. The `is_branch_merged` guard that used to
+cover this compared the branch tip against the *current* base tip, so it only
+held while the base stood still. In practice it didn't: two PRs landed, `main`
+moved off the fork point, and three seconds later an untouched minutes-old task
+had its worktree deleted (#46).
+
+The commit graph does not carry the fact that separates "merged" from "never
+started" — after a real merge the branch tip is the merge-base too. The fork
+point does, and gw knows it because gw cut the branch. So ancestry now requires
+a recorded `fork_sha` *and* a branch tip that has moved off it. **No recorded
+fork point means no ancestry prune**, because a `null` there means "we don't
+know", and the records that predate the field are precisely the ones a wrong
+guess destroys. The dirty-worktree check is not a substitute: a worktree where
+the agent has only run `uv sync` is gitignored-clean.
+
+On a squash-merge repo this leaves ancestry with no true positives at all — a
+squash-merged branch is not an ancestor of the base — so PR state carries merge
+detection there on its own, which it already did.
+
 ### Why the indicator cache is a sidecar
 
 Derived git/PR facts live in `sync/indicators.json`, keyed `<project>/<task_id>`

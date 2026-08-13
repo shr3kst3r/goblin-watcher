@@ -736,9 +736,28 @@ def merge_detection(
         if pr in {"OPEN", "CLOSED"}:
             return None
         # pr is None: gh missing or PR unreadable; fall through to ancestry.
-    if git.is_branch_merged(proj.root, task.branch, task.base_branch):
+    if _ancestry_says_merged(proj, task):
         return "ancestry"
     return None
+
+
+def _ancestry_says_merged(proj: Project, task: Task) -> bool:
+    """The ancestry fallback, gated on knowing where the branch started.
+
+    A branch that has never had a commit is an ancestor of its base and holds
+    nothing unique — the same shape a merged branch has. The commit graph does
+    not carry the fact that separates them, so ancestry on its own deleted
+    minutes-old tasks the moment anyone else landed on the base branch (#46).
+
+    The one thing that does separate them is the fork point, which gw knows
+    because gw cut the branch. So: require a recorded fork point, and refuse to
+    call the branch merged while its tip is still sitting on it. **A missing
+    fork point reads as "unknown", never as "no commits yet"** — task records
+    written before the field existed have none, and pruning is destructive.
+    """
+    if task.fork_sha is None:
+        return False
+    return git.is_branch_merged(proj.root, task.branch, task.base_branch, fork_sha=task.fork_sha)
 
 
 def scratch_last_activity(task: Task) -> datetime:
@@ -775,8 +794,10 @@ def prune(
     """Remove tasks whose branch is merged into the base branch.
 
     Detection: if the task has a PR URL, `gh pr view` decides. Otherwise, falls
-    back to `git merge-base --is-ancestor <branch> origin/<base>`. Squash- and
-    rebase-merged branches without a recorded PR may go undetected.
+    back to `git merge-base --is-ancestor <branch> origin/<base>` — but only for
+    a task whose recorded fork point says the branch has actually moved since it
+    was cut. A task with no recorded fork point is never pruned by ancestry.
+    Squash- and rebase-merged branches without a recorded PR go undetected.
 
     Scratch spaces have no branch, so "merged" never applies; pass
     `--scratch-older-than N` to prune the ones idle for more than N days

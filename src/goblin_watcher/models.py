@@ -117,6 +117,12 @@ class TaskRepo(_Frozen):
     worktree_path: Path
     base_branch: str
     pr_url: str | None = None
+    # The base-branch commit this branch was cut from, recorded when gw created
+    # it. `None` means "we don't know" — records written before the field
+    # existed, and branches gw adopted rather than created. Readers must never
+    # read a missing value as "the branch has no commits": that inversion is
+    # what let ancestry-based prune delete brand-new tasks.
+    fork_sha: str | None = None
 
 
 class Task(_Frozen):
@@ -139,6 +145,10 @@ class Task(_Frozen):
     # dangling id as "no longer tracked" rather than an error.
     parent_task: str | None = None
     pr_url: str | None = None
+    # Where the primary branch started — see `TaskRepo.fork_sha`. Ancestry-based
+    # merge detection is gated on it, because a branch still sitting on its fork
+    # point is indistinguishable from a merged one in the commit graph.
+    fork_sha: str | None = None
     created_at: datetime
     status: TaskStatus = "open"
     sessions: list[SessionRecord] = Field(default_factory=list)
@@ -203,6 +213,7 @@ class Task(_Frozen):
             worktree_path=self.worktree_path,
             base_branch=self.base_branch,
             pr_url=self.pr_url,
+            fork_sha=self.fork_sha,
         )
 
     def all_repos(self) -> list[TaskRepo]:

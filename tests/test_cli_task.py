@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from goblin_watcher import git, state
 from goblin_watcher.cli import app
+from goblin_watcher.models import Project
 
 
 def _init_repo(path: Path) -> None:
@@ -140,10 +141,22 @@ def _commit_on_branch(worktree: Path, message: str = "branch work") -> None:
     subprocess.run(["git", "-C", str(worktree), "commit", "-qm", message], check=True)
 
 
+def _stamp_fork_point(proj: Project, task_id: str, repo: Path) -> None:
+    """Record where the branch was cut, as task creation will.
+
+    Ancestry detection is gated on this: without it a task is never pruned by
+    ancestry, so any test exercising that path has to supply it.
+    """
+    state.update_task(
+        proj, task_id, lambda t: t.model_copy(update={"fork_sha": git.head_sha(repo)})
+    )
+
+
 def test_task_prune_removes_merged_branch(isolated_xdg: Path, tmp_path: Path) -> None:
     repo = _bootstrap(tmp_path)
     proj = state.get_project("alpha")
     [task] = state.list_tasks(proj)
+    _stamp_fork_point(proj, task.id, repo)
 
     # Make a real commit on the branch, then merge it into main.
     _commit_on_branch(task.worktree_path)
@@ -163,6 +176,7 @@ def test_task_prune_dry_run_lists_but_doesnt_remove(isolated_xdg: Path, tmp_path
     repo = _bootstrap(tmp_path)
     proj = state.get_project("alpha")
     [task] = state.list_tasks(proj)
+    _stamp_fork_point(proj, task.id, repo)
     _commit_on_branch(task.worktree_path)
     subprocess.run(
         ["git", "-C", str(repo), "merge", "--no-ff", task.branch, "-m", "merge"],
@@ -541,3 +555,91 @@ def test_first_pr_for_task_matches_a_github_issue_branch() -> None:
     # No issue and no exact branch → no match, rather than a wrong one.
     plain = task.model_copy(update={"github_issue": None})
     assert _first_pr_for_task(prs, plain) is None
+
+
+def _land_on_base(repo: Path, name: str = "other.txt") -> None:
+    """Land a commit on main, the way another agent's PR merging would."""
+    (repo / name).write_text("someone else landed\n")
+    subprocess.run(["git", "-C", str(repo), "add", name], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "other work"], check=True)
+
+
+def test_merge_detection_ignores_a_task_whose_branch_never_moved(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The #46 sequence: fresh task, zero commits, then the base branch advances.
+
+    Two PRs landing seconds after `gw new` moved `main` off the fork point, and
+    the ancestry check called the untouched branch merged. With the fork point
+    recorded, it stays put.
+    """
+    from goblin_watcher.commands.task import merge_detection
+
+    repo = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    fork = git.head_sha(repo)
+    task = state.update_task(proj, task.id, lambda t: t.model_copy(update={"fork_sha": fork}))
+
+    _land_on_base(repo)
+
+    assert merge_detection(proj, task) is None
+
+
+def test_merge_detection_ignores_a_task_with_no_recorded_fork_point(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A record written before `fork_sha` existed must read as "unknown", not "merged"."""
+    from goblin_watcher.commands.task import merge_detection
+
+    repo = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    assert task.fork_sha is None
+
+    _land_on_base(repo)
+
+    assert merge_detection(proj, task) is None
+
+
+def test_merge_detection_still_reports_a_genuinely_merged_branch(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """Gating ancestry on the fork point must not cost it its true positives."""
+    from goblin_watcher.commands.task import merge_detection
+
+    repo = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    fork = git.head_sha(repo)
+    task = state.update_task(proj, task.id, lambda t: t.model_copy(update={"fork_sha": fork}))
+
+    wt = task.worktree_path
+    (wt / "x.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(wt), "add", "x.txt"], check=True)
+    subprocess.run(["git", "-C", str(wt), "commit", "-qm", "the work"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "merge", "-q", "--no-ff", "-m", "merge", task.branch],
+        check=True,
+    )
+
+    assert merge_detection(proj, task) == "ancestry"
+
+
+def test_task_prune_keeps_a_brand_new_task_when_the_base_advances(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """End to end through the command that did the deleting."""
+    repo = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    [task] = state.list_tasks(proj)
+    fork = git.head_sha(repo)
+    state.update_task(proj, task.id, lambda t: t.model_copy(update={"fork_sha": fork}))
+
+    _land_on_base(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(app, ["task", "prune", "--no-fetch", "--force"])
+    assert res.exit_code == 0, res.output
+    assert len(state.list_tasks(proj)) == 1
+    assert task.worktree_path.exists()
