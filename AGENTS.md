@@ -46,6 +46,7 @@ src/goblin_watcher/
 ├── secrets.py             # Linear API key resolution (env → config → `op://...`)
 ├── sessions.py            # SessionRecord rolling-summary refresh + upsert
 ├── review_feed.py         # PR review threads + failing-check logs for `gw run --address-review`
+├── drift.py               # state-drift detection + the safe repairs behind `gw doctor --repair`
 ├── usage.py               # token rollups + list-price cost estimates (docs/designs/token-usage-and-cost.md)
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── worktree_setup.py      # [setup] copy/link/run bootstrap applied to new worktrees (ADR 0007)
@@ -103,6 +104,15 @@ There is no CI in this repo — no GitHub Actions workflow, no external checks o
 - Never write outside: `<project>/.goblin/`, `<project>/.worktrees/`, the user's XDG dirs, or the project's working tree itself.
 - **Linear API is read-only by default.** Posting a comment requires the explicit `--notify-linear` flag on `gw pr open`.
 - 1Password `op` references resolve lazily; only fetched when actually needed.
+
+## State drift (`gw doctor --repair`)
+
+`drift.py` detects the ways gw's records diverge from git and the filesystem — an untracked worktree under `<project>/.worktrees/`, a task whose worktree or branch vanished, `.git/info/exclude` missing gw's patterns, indicator-cache rows for dead tasks — and `commands/doctor.py` renders them as one summary check plus a detail table. Any drift makes `gw doctor` exit non-zero. See `docs/designs/storage-and-state.md`.
+
+Two rules when extending it:
+
+- **Repair is only for fixes that cannot lose work.** `drift.REPAIRABLE_KINDS` is the whitelist and `Finding.__post_init__` enforces it, so a new kind cannot quietly opt itself into being auto-fixed. Anything holding commits or files (an untracked worktree, a task whose branch survived its worktree) stays a report — the same posture as sync's prune, which refuses to force-delete a branch it can't prove is safe.
+- **Detection is read-only and must not raise.** A project whose root or repo is unreadable is skipped, not crashed on: a drift report that dies on the first broken project is worse than one that skips it.
 
 ## Worktree setup
 

@@ -376,7 +376,7 @@ gw session show <session-id>                # one session in full, including its
 gw session transcript <session-id>          # full transcript as [user]/[assistant] blocks (--raw: file path)
 gw session send eng-123 "also fix the tests"  # type into a running agent's tmux pane
 gw history --cost                           # day-by-day token + cost rollup across every session
-gw doctor                                   # which agent CLIs are on PATH + Linear key status
+gw doctor [--repair]                        # binaries + Linear key + state drift (`--repair` fixes the safe subset)
 gw config show                              # resolved config (file merged over defaults)
 gw sync status                              # is background sync scheduled? when did it last run?
 ```
@@ -653,6 +653,21 @@ Only claude can be handed its session id at spawn time; for the others `gw` reco
 
 `gw doctor` checks which binaries are on PATH and resolves the Linear key. It also warns, per agent, when `gw` can't parse that agent's transcripts — gemini and antigravity keep their history somewhere `gw` doesn't read, so their sessions have no rolling summary, no LLM description, no turn count, and never fire an `agent-idle` notification.
 
+### State drift (`gw doctor --repair`)
+
+The failures that actually happen aren't missing binaries — they're gw's records disagreeing with git and the filesystem. `gw doctor` reports each kind, and `--repair` applies only the fixes that cannot lose work:
+
+| Drift | What it means | `--repair` |
+| --- | --- | --- |
+| untracked worktree | a worktree under `<project>/.worktrees/` that no task record claims | no — it may hold work gw never tracked |
+| worktree gone | the task's worktree directory is missing, but its branch still exists | no — the branch holds the commits; use `gw new --rm` or `gw task rm` |
+| branch gone | the branch was deleted from under a live worktree | no — the worktree may hold uncommitted work |
+| dead task record | worktree *and* branch are both gone (or a scratch directory is gone) | yes — drops the record; nothing is left for it to point at |
+| exclude entries | `.goblin/` / `.worktrees/` missing from `.git/info/exclude` | yes — re-appends them |
+| stale indicator cache | cached `gw status` indicators for tasks that no longer exist | yes — drops those rows; the cache is derived |
+
+Any drift makes `gw doctor` exit non-zero, so it works as a scripted health gate. The `background sync` row fails too when a launchd job is installed but never loaded, or when its last pass is more than three intervals old — an installed job that silently stopped firing looks exactly like "nothing to report" otherwise.
+
 ### Unsafe mode (skip permission prompts)
 
 **On by default.** `gw` spawns each agent with its "skip the confirmation prompts" flag, so the agent will execute tool calls without asking. Opt out globally with `defaults.unsafe = false` in `config.toml`, or per-invocation with `--no-unsafe` on `gw new`, `gw run`, and `gw <LINEAR-ID>`. The flag injected per agent:
@@ -685,7 +700,7 @@ gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with sp
 gw status [--project NAME] [--no-linear] [--no-cache] [--cost]
           [--active] [--watch|-w] [--interval SECONDS]      # tree view of projects → tasks → sessions
 gw sync                                     # run one background-sync pass now, verbosely
-gw doctor                                   # binary + key resolution checks
+gw doctor [--repair]                        # binary + key resolution + state-drift checks
 gw history [--tail N|--all] [--json]        # audit log of every `gw` invocation (`gw history prune` trims it)
 gw history --cost [--days N]                # day-by-day token + cost rollup across every session (0 = all time)
 gw completion zsh|bash|fish [--dynamic]     # emit tab-completion script (the gwcd/gwcode/gwobsidian/gwfinder wrappers live in spg.toml)
