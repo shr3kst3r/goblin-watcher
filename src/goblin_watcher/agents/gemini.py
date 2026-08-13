@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from goblin_watcher.agents.base import RawSession, TranscriptCapability, TranscriptSummary
+from goblin_watcher.agents.base import (
+    RawSession,
+    TranscriptCapability,
+    TranscriptSummary,
+    TranscriptTail,
+)
 
 
 class GeminiAgent:
@@ -64,4 +69,11 @@ class GeminiAgent:
 
     def render_transcript(self, session_id: str, cwd: Path) -> str | None:
         del session_id, cwd
+        return None
+
+    def read_tail(self, transcript_path: Path) -> TranscriptTail | None:
+        # Gemini keeps cwd-scoped checkpoints, not a transcript we can parse,
+        # so its sessions stay on the mtime heuristic: `working` while the
+        # checkpoint moves, `idle` once it stops.
+        del transcript_path
         return None

@@ -74,7 +74,7 @@ def _attach_session(
 
 
 def test_active_keeps_a_session_that_just_went_quiet(isolated_xdg: Path, tmp_path: Path) -> None:
-    """Four minutes idle is past `● active` but well inside the grace window.
+    """Four minutes idle is past the mtime active window but inside the grace.
 
     This is the case the filter exists for: an agent that stopped to ask a
     question is the thing you most need on screen, and it stops writing its

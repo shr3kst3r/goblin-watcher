@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from goblin_watcher import config, description, gh, git, github_state, sessions, state
+from goblin_watcher import activity, config, description, gh, git, github_state, sessions, state
 from goblin_watcher.commands.task import (
     destroy_task,
     dirty_worktrees,
@@ -27,7 +27,7 @@ from goblin_watcher.commands.task import (
 )
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.linear_state import LinearStateFetcher
-from goblin_watcher.models import Project, Task, TaskRepo
+from goblin_watcher.models import Project, SessionRecord, Task, TaskRepo
 from goblin_watcher.sync import journal, store
 from goblin_watcher.sync.models import (
     DescriptionBackoff,
@@ -658,6 +658,20 @@ def _edge(st: SyncState, proj: Project, task: Task, signal: str, value: str) -> 
     return previous != value
 
 
+# `agent-idle` was the one "the agent stopped" event before the transcript
+# classifier split it into finished-vs-blocked (ADR 0010). A config that asked
+# for it is asking to hear about both.
+_LEGACY_IDLE_ALIASES = frozenset({"agent-needs-you", "agent-done"})
+
+
+def event_enabled(cfg: config.Config, event: str) -> bool:
+    """Whether `event` is switched on in `sync.notify_events`."""
+    events = cfg.sync.notify_events
+    if event in events:
+        return True
+    return event in _LEGACY_IDLE_ALIASES and "agent-idle" in events
+
+
 def _fire(
     *,
     event: str,
@@ -670,7 +684,7 @@ def _fire(
     emit: Callable[..., None],
     report: PassReport,
 ) -> None:
-    if event not in cfg.sync.notify_events:
+    if not event_enabled(cfg, event):
         return
     report.notifications.append(f"{event}: {task.id}")
     emit("notify", event, project=proj.name, task=task.id, detail=body)
@@ -724,7 +738,7 @@ def _fire_parent_merged(
     merge from costing a full task-directory scan when nobody asked for the
     event.
     """
-    if "parent-merged" not in cfg.sync.notify_events:
+    if not event_enabled(cfg, "parent-merged"):
         return
     for child in state.list_tasks(proj):
         if child.kind == "scratch" or child.parent_task != parent.id:
@@ -783,6 +797,11 @@ def _fire_checks_transition(
         )
 
 
+# Longest notification body we'll build out of a blocking question. Enough for
+# the question itself; a macOS notification truncates well before this anyway.
+_QUESTION_BODY_CHARS = 240
+
+
 def _notify_activity(
     proj: Project,
     task: Task,
@@ -792,34 +811,89 @@ def _notify_activity(
     emit: Callable[..., None],
     report: PassReport,
 ) -> None:
-    """Notify when an agent that *was* producing output has gone quiet.
+    """Notify when an agent stops, saying *why* it stopped (ADR 0010).
 
-    Derived from transcript mtime, the same signal as the `● active` badge. Only
-    the active→idle edge fires: a session that has been idle for days is not
-    news, and a first sighting is recorded without notifying.
+    The state comes from the shape of the transcript's tail, the same call
+    `gw status` renders, so the dashboard and the notification never disagree:
+
+    * `agent-needs-you` — the last turn ended on a question. The one worth
+      interrupting for, and the body carries the question itself.
+    * `agent-done` — the turn finished with nothing pending.
+    * `agent-idle` — quiet, and the transcript can't say which of the two it
+      is. Agents gw can't parse (gemini, antigravity, managed) and sessions
+      abandoned mid-tool-call land here; this is the old event's behaviour,
+      kept for the cases that still can't do better.
+
+    Edge-triggered on `Activity.edge_token`, which folds the classifying
+    evidence in alongside the state name — so a *second* question fires a
+    second notification instead of being swallowed as "still needs-you". A
+    first sighting is recorded without notifying: an agent that has been
+    blocked since yesterday is not news, and announcing every session on the
+    first pass after an upgrade is precisely the fatigue this is meant to
+    avoid.
     """
-    threshold = cfg.defaults.activity_active_seconds
-    now = _now()
     for s in task.sessions:
-        mtime = description.transcript_mtime(s)
-        if mtime is None:
+        act = activity.classify(
+            s,
+            now=_now(),
+            active_seconds=int(cfg.defaults.activity_active_seconds),
+            stalled_after=int(cfg.defaults.activity_grace_seconds),
+        )
+        if act.state == "unknown":
             continue
-        state_now = "active" if (now - mtime).total_seconds() <= threshold else "idle"
         key = f"{proj.name}/{task.id}:{_SIG_ACTIVITY}:{s.session_id}"
         previous = st.last_seen.get(key)
-        st.last_seen[key] = state_now
-        if previous == "active" and state_now == "idle":
-            _fire(
-                event="agent-idle",
-                title=f"{task.id}: {s.agent} is idle",
-                body=(s.description or s.summary or "Agent went quiet — may be waiting for input."),
-                cfg=cfg,
-                notifier=notifier,
-                proj=proj,
-                task=task,
-                emit=emit,
-                report=report,
-            )
+        st.last_seen[key] = act.edge_token
+        if previous is None or previous == act.edge_token or not act.is_terminal:
+            continue
+        event, title, body = _activity_notification(task, s, act)
+        _fire(
+            event=event,
+            title=title,
+            body=body,
+            cfg=cfg,
+            notifier=notifier,
+            proj=proj,
+            task=task,
+            emit=emit,
+            report=report,
+        )
+
+
+def _activity_notification(
+    task: Task, session: SessionRecord, act: activity.Activity
+) -> tuple[str, str, str]:
+    """(event, title, body) for one terminal activity state."""
+    if act.state == "needs-you":
+        return (
+            "agent-needs-you",
+            f"{task.id}: {session.agent} needs you",
+            _question_body(act.detail) or "Agent ended its turn with a question.",
+        )
+    context = session.description or session.summary or ""
+    if act.state == "done":
+        return (
+            "agent-done",
+            f"{task.id}: {session.agent} finished",
+            context or "Turn complete, nothing pending.",
+        )
+    return (
+        "agent-idle",
+        f"{task.id}: {session.agent} is idle",
+        context or "Agent went quiet — may be waiting for input.",
+    )
+
+
+def _question_body(detail: str | None) -> str | None:
+    """The tail of a blocking turn, collapsed to one line for a notification."""
+    if not detail:
+        return None
+    text = " ".join(detail.split())
+    if not text:
+        return None
+    if len(text) <= _QUESTION_BODY_CHARS:
+        return text
+    return "…" + text[-(_QUESTION_BODY_CHARS - 1) :]
 
 
 def _maybe_prune(

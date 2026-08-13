@@ -49,10 +49,10 @@ The headless path exists because every registered CLI already has a print/exec m
 What the mode deliberately does *not* do:
 
 - **Resume.** Refused before anything is persisted. Print mode runs one prompt to completion, so there's no conversation to rejoin; a fresh headless run carrying the follow-up as its prompt is the honest equivalent.
-- **Report the agent's exit status.** `run` reports 0 for "the spawn succeeded". Waiting for the real status would need the resident process ADR 0005 declined. Completion rides on `gw sync`'s edge-triggered `agent-idle` notification, which works because `claude -p` / `codex exec` write the same transcripts their interactive modes do. Failure is diagnosed from the log.
+- **Report the agent's exit status.** `run` reports 0 for "the spawn succeeded". Waiting for the real status would need the resident process ADR 0005 declined. Completion rides on `gw sync`'s edge-triggered `agent-done` notification, which works because `claude -p` / `codex exec` write the same transcripts their interactive modes do. Failure is diagnosed from the log.
 - **Accept input.** `send` raises: stdin is `/dev/null`.
 
-Two caveats worth knowing before scheduling one. An unattended run wants `unsafe = true` (the default) — without it the agent stalls at its first permission prompt with nobody to answer, so `launch` prints a warning. And `agent-idle` only fires for agents whose transcripts gw can parse, so a gemini or antigravity run finishes silently and has to be checked by hand (`is_live`, or the log).
+Two caveats worth knowing before scheduling one. An unattended run wants `unsafe = true` (the default) — without it the agent stalls at its first permission prompt with nobody to answer, so `launch` prints a warning. And the transcript-derived events (`agent-done`, `agent-needs-you`) only fire for agents whose transcripts gw can parse; a gemini or antigravity run gets the blunter `agent-idle` off its file mtime, or has to be checked by hand (`is_live`, or the log). See ADR 0010.
 
 ### Sending input to a running session
 
@@ -90,7 +90,7 @@ Gemini is the only fully stubbed implementation: no stable session ids at all, `
 
 ### Declared transcript capability
 
-Stubbing the transcript methods costs more than an empty summary field: no rolling summary, no LLM-refreshed description, no turn count, no `● active` badge, and no `agent-idle` notification at all (sync's activity edge keys off `transcript_mtime`, which never moves). None of that announces itself — `gw status` just looks quieter.
+Stubbing the transcript methods costs more than an empty summary field: no rolling summary, no LLM-refreshed description, no turn count, and no transcript-derived activity state — such an agent falls back to mtime and can only ever report `working` or `idle`, never `needs-you` or `done` (ADR 0010). None of that announces itself — `gw status` just looks quieter.
 
 So each agent declares the fact up front, as a `TranscriptCapability` (`agents/base.py`) class attribute: `parseable`, plus a short `reason` naming the obstacle when it isn't. Parseable agents use the `PARSEABLE_TRANSCRIPTS` singleton; today that's claude and codex, while gemini, antigravity and managed each carry a reason.
 

@@ -1120,3 +1120,196 @@ def test_sync_skips_git_indicators_for_an_archived_task(demo, notifier) -> None:
     assert entry is not None
     assert entry.ahead == 0
     assert entry.uncommitted is False
+
+
+# ---------------------------------------------------------------------------
+# Activity notifications, classified from the transcript (ADR 0009).
+
+
+def _claude_transcript(task: Task, session_id: str, records: list[dict]) -> Path:
+    """Write a claude JSONL fixture where the agent itself would put it.
+
+    Placing it at claude's real per-cwd path (rather than an arbitrary temp
+    file) keeps the whole pass coherent: session discovery finds the same id,
+    and the summary refresh doesn't re-point `transcript_path` at a file that
+    isn't there. $HOME is sandboxed by `isolated_xdg`.
+    """
+    import json
+
+    from goblin_watcher.agents.claude import ClaudeAgent
+
+    directory = ClaudeAgent.projects_root() / ClaudeAgent._encode_cwd(task.agent_cwd)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+def _assistant_says(text: str) -> dict:
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+
+
+_PENDING_TOOL = {
+    "type": "assistant",
+    "message": {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}],
+    },
+}
+
+
+@pytest.fixture
+def session_task(demo):  # type: ignore[no-untyped-def]
+    """`demo`, with one claude session recorded on the task."""
+    project, task = demo
+    now = datetime.now(UTC)
+    record = SessionRecord(
+        agent="claude",
+        session_id="s1",
+        created_at=now - timedelta(hours=1),  # past the dangling grace
+        last_used_at=now,
+        summary="a session",
+        description="Wiring the classifier",
+    )
+    state.update_task(project, task.id, lambda t: t.model_copy(update={"sessions": [record]}))
+    return project, task
+
+
+def _activity_pass(notifier: _RecordingNotifier):  # type: ignore[no-untyped-def]
+    """One pass with `gh`, notifications, and the description LLM all stubbed."""
+    gh_patch, notify_patch = _run(notifier)
+    with (
+        gh_patch,
+        notify_patch,
+        patch("goblin_watcher.sync.engine.description.should_refresh", return_value=False),
+    ):
+        return engine.run_pass()
+
+
+def test_a_first_sighting_is_recorded_without_notifying(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    """An agent blocked since yesterday is not news."""
+    _project, task = session_task
+    _claude_transcript(task, "s1", [_assistant_says("Rebase or merge?")])
+
+    report = _activity_pass(notifier)
+
+    assert report.notifications == []
+    assert notifier.sent == []
+
+
+def test_a_turn_that_ends_on_a_question_fires_agent_needs_you(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    _project, task = session_task
+    _claude_transcript(task, "s1", [_PENDING_TOOL])
+    _activity_pass(notifier)  # records `working`
+    assert notifier.sent == []
+
+    _claude_transcript(
+        task, "s1", [_assistant_says("Two ways to do this.\n\nWhich would you rather?")]
+    )
+    report = _activity_pass(notifier)
+
+    assert report.notifications == ["agent-needs-you: demo-1"]
+    [(title, body)] = notifier.sent
+    assert "needs you" in title
+    # The body carries the question itself — that's what makes it worth reading.
+    assert "Which would you rather?" in body
+
+
+def test_a_finished_turn_fires_agent_done(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    _project, task = session_task
+    _claude_transcript(task, "s1", [_PENDING_TOOL])
+    _activity_pass(notifier)
+
+    _claude_transcript(task, "s1", [_assistant_says("Landed it; tests are green.")])
+    report = _activity_pass(notifier)
+
+    assert report.notifications == ["agent-done: demo-1"]
+    assert "finished" in notifier.sent[0][0]
+
+
+def test_an_unchanged_transcript_does_not_re_notify(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    _project, task = session_task
+    _claude_transcript(task, "s1", [_PENDING_TOOL])
+    _activity_pass(notifier)
+    _claude_transcript(task, "s1", [_assistant_says("All done here.")])
+    _activity_pass(notifier)
+    notifier.sent.clear()
+
+    report = _activity_pass(notifier)
+
+    assert report.notifications == []
+    assert notifier.sent == []
+
+
+def test_a_second_question_fires_a_second_time(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    """State alone would swallow this: needs-you → needs-you looks unchanged."""
+    _project, task = session_task
+    _claude_transcript(task, "s1", [_assistant_says("Rebase or merge?")])
+    _activity_pass(notifier)  # first sighting; recorded, not announced
+    _claude_transcript(task, "s1", [_assistant_says("Rebase or merge?")])
+    _activity_pass(notifier)
+    assert notifier.sent == []
+
+    _claude_transcript(task, "s1", [_assistant_says("Squash the fixups too?")])
+    report = _activity_pass(notifier)
+
+    assert report.notifications == ["agent-needs-you: demo-1"]
+    assert "Squash the fixups too?" in notifier.sent[0][1]
+
+
+def test_an_unreadable_transcript_still_fires_agent_idle(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    """The mtime fallback keeps working for what the classifier can't read."""
+    import os
+
+    _project, task = session_task
+    path = _claude_transcript(task, "s1", [{}])
+    _activity_pass(notifier)  # fresh mtime → `working`
+
+    stamp = datetime.now(UTC).timestamp() - 600
+    os.utime(path, (stamp, stamp))
+    report = _activity_pass(notifier)
+
+    assert report.notifications == ["agent-idle: demo-1"]
+    assert "is idle" in notifier.sent[0][0]
+
+
+def test_a_session_with_no_transcript_is_never_announced(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    _project, _task = session_task
+
+    report = _activity_pass(notifier)
+
+    assert report.notifications == []
+    assert store.load_state().last_seen == {}
+
+
+def test_legacy_agent_idle_config_still_gets_the_split_events(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    """`notify_events = ["agent-idle"]` predates the split; honour the intent."""
+    _project, task = session_task
+    cfg = config.Config()
+    cfg.sync.notify_events = ["agent-idle"]
+    _claude_transcript(task, "s1", [_PENDING_TOOL])
+
+    with patch("goblin_watcher.sync.engine.config.load", return_value=cfg):
+        _activity_pass(notifier)
+        _claude_transcript(task, "s1", [_assistant_says("Ready — should I open the PR?")])
+        report = _activity_pass(notifier)
+
+    assert report.notifications == ["agent-needs-you: demo-1"]
+
+
+def test_turning_the_activity_events_off_silences_them(session_task, notifier) -> None:  # type: ignore[no-untyped-def]
+    _project, task = session_task
+    cfg = config.Config()
+    cfg.sync.notify_events = ["pr-merged"]
+    _claude_transcript(task, "s1", [_PENDING_TOOL])
+
+    with patch("goblin_watcher.sync.engine.config.load", return_value=cfg):
+        _activity_pass(notifier)
+        _claude_transcript(task, "s1", [_assistant_says("Done.")])
+        report = _activity_pass(notifier)
+
+    assert report.notifications == []
+    assert notifier.sent == []

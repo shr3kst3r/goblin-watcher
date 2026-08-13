@@ -23,7 +23,12 @@ import json
 import re
 from pathlib import Path
 
-from goblin_watcher.agents.base import RawSession, TranscriptCapability, TranscriptSummary
+from goblin_watcher.agents.base import (
+    RawSession,
+    TranscriptCapability,
+    TranscriptSummary,
+    TranscriptTail,
+)
 
 # Conversation ids are UUIDs. The launcher synthesizes a 24-char hex placeholder
 # for agents that can't preassign an id (see `agents/launcher.py`), and in tmux
@@ -116,4 +121,10 @@ class AntigravityAgent:
 
     def render_transcript(self, session_id: str, cwd: Path) -> str | None:
         del session_id, cwd
+        return None
+
+    def read_tail(self, transcript_path: Path) -> TranscriptTail | None:
+        # Conversations live in an internal SQLite database we deliberately
+        # don't parse, so antigravity sessions stay on the mtime heuristic.
+        del transcript_path
         return None

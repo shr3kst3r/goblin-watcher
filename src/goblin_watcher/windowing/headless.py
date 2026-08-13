@@ -23,7 +23,7 @@ Mechanics:
   goes wrong.
 
 Completion is *not* observed here — nothing waits, so there is no exit status
-to report. `gw sync` already fires an edge-triggered `agent-idle` notification
+to report. `gw sync` already fires an edge-triggered `agent-done` notification
 when a session's transcript goes quiet, which is what "tell me when it's done"
 rides on. See ADR 0007.
 """

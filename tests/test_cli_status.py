@@ -363,38 +363,12 @@ def test_status_linear_ttl_expired_refetches_and_stamps(isolated_xdg: Path, tmp_
     assert persisted.linear_state_updated_at > stale
 
 
-def test_status_shows_active_badge_for_fresh_transcript(isolated_xdg: Path, tmp_path: Path) -> None:
-    from datetime import UTC, datetime
+def _status_with_transcript(tmp_path: Path, lines: str, *, age_seconds: float = 0.0) -> str:
+    """`gw status` output for a project with one claude session on `lines`.
 
-    from goblin_watcher.models import SessionRecord
-
-    repo = tmp_path / "alpha"
-    _init_repo(repo)
-    runner = CliRunner()
-    runner.invoke(app, ["project", "new", "alpha", "--dir", str(repo)])
-    runner.invoke(app, ["new", "--branch-name", "spike/foo", "--no-launch"])
-    proj = state.get_project("alpha")
-    [task] = state.list_tasks(proj)
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("{}\n")  # fresh mtime = now
-    now = datetime.now(UTC)
-    record = SessionRecord(
-        agent="claude",
-        session_id="s1",
-        created_at=now,
-        last_used_at=now,
-        summary="working away",
-        summary_updated_at=now,
-        transcript_path=transcript,
-    )
-    state.save_task(proj, task.model_copy(update={"sessions": [record]}))
-
-    res = runner.invoke(app, ["status"])
-    assert res.exit_code == 0, res.output
-    assert "● active" in res.output
-
-
-def test_status_shows_idle_for_old_transcript(isolated_xdg: Path, tmp_path: Path) -> None:
+    `age_seconds` back-dates the transcript's mtime, which is the only signal
+    left for records the classifier can't read.
+    """
     import os
     from datetime import UTC, datetime
 
@@ -408,16 +382,17 @@ def test_status_shows_idle_for_old_transcript(isolated_xdg: Path, tmp_path: Path
     proj = state.get_project("alpha")
     [task] = state.list_tasks(proj)
     transcript = tmp_path / "t.jsonl"
-    transcript.write_text("{}\n")
-    hour_ago = datetime.now(UTC).timestamp() - 3600
-    os.utime(transcript, (hour_ago, hour_ago))
+    transcript.write_text(lines)
+    if age_seconds:
+        stamp = datetime.now(UTC).timestamp() - age_seconds
+        os.utime(transcript, (stamp, stamp))
     now = datetime.now(UTC)
     record = SessionRecord(
         agent="claude",
         session_id="s1",
         created_at=now,
         last_used_at=now,
-        summary="paused",
+        summary="a session",
         summary_updated_at=now,
         transcript_path=transcript,
     )
@@ -425,8 +400,64 @@ def test_status_shows_idle_for_old_transcript(isolated_xdg: Path, tmp_path: Path
 
     res = runner.invoke(app, ["status"])
     assert res.exit_code == 0, res.output
-    assert "● active" not in res.output
-    assert "idle" in res.output
+    return res.output
+
+
+def _claude_assistant(text: str) -> str:
+    import json
+
+    return (
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+        + "\n"
+    )
+
+
+def test_status_shows_working_badge_for_a_pending_tool_call(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """An outstanding tool call is `working` however long ago the file moved."""
+    import json
+
+    lines = json.dumps(
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash"}]},
+        }
+    )
+    out = _status_with_transcript(tmp_path, lines + "\n", age_seconds=600)
+    assert "● working" in out
+
+
+def test_status_shows_needs_you_when_the_last_turn_ends_on_a_question(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    out = _status_with_transcript(
+        tmp_path, _claude_assistant("I found two options.\n\nWhich should I take?")
+    )
+    assert "needs you" in out
+    assert "● working" not in out
+
+
+def test_status_shows_done_when_the_last_turn_asks_nothing(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    out = _status_with_transcript(tmp_path, _claude_assistant("Landed the fix; tests are green."))
+    assert "✓ done" in out
+    assert "needs you" not in out
+
+
+def test_status_falls_back_to_mtime_when_the_transcript_says_nothing(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A record the classifier can't read keeps the old mtime reading."""
+    out = _status_with_transcript(tmp_path, "{}\n")  # fresh mtime = now
+    assert "● working" in out
+
+
+def test_status_shows_idle_for_old_transcript(isolated_xdg: Path, tmp_path: Path) -> None:
+    out = _status_with_transcript(tmp_path, "{}\n", age_seconds=3600)
+    assert "● working" not in out
+    assert "idle" in out
 
 
 def _bootstrap_task_with_usage(tmp_path: Path, usage: list) -> None:

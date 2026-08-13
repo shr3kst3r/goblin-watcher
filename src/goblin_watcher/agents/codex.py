@@ -21,12 +21,15 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goblin_watcher.agents._tail import tail_records, tail_text
 from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
 from goblin_watcher.agents.base import (
     PARSEABLE_TRANSCRIPTS,
+    LastRole,
     RawSession,
     TranscriptCapability,
     TranscriptSummary,
+    TranscriptTail,
 )
 from goblin_watcher.models import UsageBucket
 
@@ -120,6 +123,9 @@ class CodexAgent:
         if path is None:
             return None
         return _render_transcript(path)
+
+    def read_tail(self, transcript_path: Path) -> TranscriptTail | None:
+        return _read_tail(transcript_path)
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +369,80 @@ class _UsageReader:
 
     def buckets(self) -> list[UsageBucket]:
         return self._usage.buckets()
+
+
+# ---------------------------------------------------------------------------
+# Tail shape, for idle classification (see `goblin_watcher.activity`).
+
+# Rollout records that open a tool call, and the ones that close it. Codex has
+# grown several call flavours (plain function, custom tool, local shell); each
+# pairs its `*_output` by `call_id`.
+_CALL_TYPES = frozenset({"function_call", "custom_tool_call", "local_shell_call"})
+_CALL_OUTPUT_TYPES = frozenset(
+    {"function_call_output", "custom_tool_call_output", "local_shell_call_output"}
+)
+# Turn boundaries codex emits as `event_msg`s. A turn that opened and hasn't
+# closed is the agent working even when no tool call is outstanding — it may be
+# streaming prose at that moment.
+_TURN_OPEN = frozenset({"task_started"})
+_TURN_CLOSE = frozenset({"task_complete", "turn_aborted", "error"})
+
+
+def _read_tail(path: Path) -> TranscriptTail | None:
+    """Classify-able shape of the end of a codex rollout.
+
+    Two independent "still going" signals, because codex reports both: an
+    unmatched tool call (`function_call` with no `function_call_output`), and an
+    open turn (`task_started` with no `task_complete`). Either one means
+    working.
+
+    Returns None when the window held none of those markers *and* no message —
+    a rollout whose format has drifted past what this understands, where
+    falling back to mtime beats guessing. A turn whose `task_started` fell out
+    of the window reads as closed, and is then classified from its last
+    `agent_message`; an outstanding call still catches the common case.
+    """
+    records = tail_records(path)
+    if not records:
+        return None
+    pending: set[str] = set()
+    turn_open = False
+    saw_marker = False
+    last_role: LastRole | None = None
+    last_assistant: str | None = None
+    for obj in records:
+        payload = _payload(obj)
+        kind = payload.get("type")
+        record_type = obj.get("type")
+        if record_type == "event_msg":
+            if kind in _TURN_OPEN:
+                turn_open, saw_marker = True, True
+            elif kind in _TURN_CLOSE:
+                turn_open, saw_marker = False, True
+            elif kind == "user_message":
+                last_role = "user"
+                last_assistant = None
+            elif kind == "agent_message":
+                last_role = "assistant"
+                text = payload.get("message")
+                if isinstance(text, str) and text:
+                    last_assistant = tail_text(text)
+        elif record_type == "response_item":
+            call_id = payload.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            if kind in _CALL_TYPES:
+                pending.add(call_id)
+                saw_marker = True
+            elif kind in _CALL_OUTPUT_TYPES:
+                pending.discard(call_id)
+    if last_role is None and not saw_marker:
+        return None
+    return TranscriptTail(
+        pending_tool=bool(pending) or turn_open,
+        last_role=last_role,
+        last_assistant=last_assistant,
+    )
 
 
 def _render_transcript(path: Path) -> str | None:

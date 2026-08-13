@@ -8,7 +8,16 @@ from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.tree import Tree
 
-from goblin_watcher import config, description, git, github_state, sessions, state, usage
+from goblin_watcher import (
+    activity,
+    config,
+    description,
+    git,
+    github_state,
+    sessions,
+    state,
+    usage,
+)
 from goblin_watcher.completion_enumerators import complete_projects
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError
@@ -190,24 +199,36 @@ def _fmt_relative(ts: datetime) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _activity_badge(s: SessionRecord) -> str:
-    """Markup snippet showing whether a session's agent is producing output.
+def _activity_badge(s: SessionRecord, cfg: config.Config) -> str:
+    """Markup snippet naming what a session's agent is doing.
 
-    Derived from the transcript file's mtime: modified within
-    `defaults.activity_active_seconds` → `● active`; older → `idle <age>`;
-    no transcript on disk → '' (nothing to infer from).
+    Classified from the shape of the transcript's tail rather than its mtime
+    (ADR 0010), so the three states you'd act on differently are told apart:
+    `● working` while a tool call is outstanding, `◆ needs you` when the last
+    turn ended on a question, `✓ done` when it ended without one. Agents whose
+    transcripts gw can't parse fall back to the old mtime reading and show
+    `● working` / `idle <age>`. No transcript on disk → '' (nothing to infer).
     """
-    mtime = description.transcript_mtime(s)
-    if mtime is None:
+    act = _classify(s, cfg)
+    if act.state == "unknown":
         return ""
-    try:
-        threshold = int(config.load().defaults.activity_active_seconds)
-    except Exception:
-        threshold = 120
-    age = (datetime.now(UTC) - mtime).total_seconds()
-    if age <= threshold:
-        return " · [bold green]● active[/]"
-    return f" · idle {_fmt_relative(mtime).removesuffix(' ago')}"
+    age = _fmt_relative(act.since).removesuffix(" ago") if act.since else ""
+    if act.state == "working":
+        return " · [bold green]● working[/]"
+    if act.state == "needs-you":
+        return f" · [bold yellow]◆ needs you[/] [muted]{age}[/]"
+    if act.state == "done":
+        return f" · [bold cyan]✓ done[/] [muted]{age}[/]"
+    return f" · idle {age}"
+
+
+def _classify(s: SessionRecord, cfg: config.Config) -> activity.Activity:
+    """`activity.classify` with this render's thresholds, so it re-reads no config."""
+    return activity.classify(
+        s,
+        active_seconds=int(cfg.defaults.activity_active_seconds),
+        stalled_after=int(cfg.defaults.activity_grace_seconds),
+    )
 
 
 def _headless_live(task: Task) -> bool:
@@ -223,15 +244,23 @@ def _headless_live(task: Task) -> bool:
         return False
 
 
-def _in_flight(task: Task, *, grace_seconds: float, headless_live: bool) -> bool:
+def _in_flight(
+    task: Task, *, cfg: config.Config, grace_seconds: float, headless_live: bool
+) -> bool:
     """Whether `task` has work actually going on right now.
 
-    Two independent signals, either of which is enough:
+    Three independent signals, any one of which is enough:
 
-    * a session whose transcript was touched within `grace_seconds`. The window
-      is wider than the `● active` threshold on purpose — an agent that stops to
-      ask a question goes quiet in two minutes, and that's precisely when you
-      want it still on screen;
+    * a session the transcript classifies as `working` — mid tool call, or the
+      turn handed over and not yet answered. This is the signal mtime could
+      never give: an agent twenty minutes into one tool call writes nothing,
+      and used to drop off the dashboard while it was busiest. (`classify`
+      stops calling a session `working` once it has been silent past the same
+      grace window, so an agent killed mid-call doesn't linger here forever.)
+    * a session whose transcript was touched within `grace_seconds`. Wider than
+      the `● working` threshold on purpose — an agent that stops to ask a
+      question goes quiet in two minutes, and that's precisely when you want it
+      still on screen;
     * a live detached process from a headless run, which has no terminal and may
       go a long time between transcript writes.
 
@@ -240,11 +269,13 @@ def _in_flight(task: Task, *, grace_seconds: float, headless_live: bool) -> bool
     if headless_live:
         return True
     now = datetime.now(UTC)
-    return any(
-        (mtime := description.transcript_mtime(s)) is not None
-        and (now - mtime).total_seconds() <= grace_seconds
-        for s in task.sessions
-    )
+    for s in task.sessions:
+        act = _classify(s, cfg)
+        if act.state == "working":
+            return True
+        if act.since is not None and (now - act.since).total_seconds() <= grace_seconds:
+            return True
+    return False
 
 
 def _build_tree(
@@ -310,7 +341,7 @@ def _build_tree(
             # Filter before the network refresh, not after: skipping a quiet
             # task's Linear round-trip is most of what makes `--active` fast.
             if active_only and not _in_flight(
-                task, grace_seconds=grace, headless_live=headless_live
+                task, cfg=cfg, grace_seconds=grace, headless_live=headless_live
             ):
                 continue
             if not no_linear and linear is not None:
@@ -367,7 +398,9 @@ def _build_tree(
                 task_node.add(
                     f"[agent.{s.agent}]{s.agent}[/]  {summary}  "
                     f"[muted]{turns} · {_fmt_relative(s.last_used_at)}"
-                    f"{_activity_badge(s)}" + (f" · {cost_suffix}" if cost_suffix else "") + "[/]"
+                    f"{_activity_badge(s, cfg)}"
+                    + (f" · {cost_suffix}" if cost_suffix else "")
+                    + "[/]"
                 )
         if active_only and project_shown == 0:
             continue
@@ -407,8 +440,9 @@ def status(
     active: bool = typer.Option(
         False,
         "--active",
-        help="Only tasks with work in flight: a session whose transcript moved recently "
-        "(defaults.activity_grace_seconds, default 900) or a live headless run.",
+        help="Only tasks with work in flight: a session the transcript says is working, "
+        "one whose transcript moved recently (defaults.activity_grace_seconds, default 900), "
+        "or a live headless run.",
     ),
     watch: bool = typer.Option(
         False,
@@ -487,8 +521,9 @@ _MIN_WATCH_INTERVAL = 0.5
 def _nothing_in_flight(cfg: config.Config) -> str:
     minutes = max(1, int(cfg.defaults.activity_grace_seconds // 60))
     return (
-        f"[muted]Nothing in flight — no session has written a transcript in the last "
-        f"{minutes}m and no headless run is alive. Drop `--active` for the full tree.[/]"
+        f"[muted]Nothing in flight — no session is mid tool call, none has written a "
+        f"transcript in the last {minutes}m, and no headless run is alive. "
+        f"Drop `--active` for the full tree.[/]"
     )
 
 
