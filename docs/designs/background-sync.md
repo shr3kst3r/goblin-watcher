@@ -245,9 +245,9 @@ never disagree:
 `Agent.read_tail(path)` supplies the raw shape — pending tool call, who spoke
 last, the tail of the final assistant turn — and reads a bounded 256 KiB window
 from the *end* of the file, so a multi-megabyte transcript costs the same as a
-small one and `--watch` can call it every tick. `claude` and `codex` implement
-it; `gemini`, `antigravity`, and `managed` have no transcript gw can parse and
-fall back to the mtime reading (`working` while the file moves,
+small one and `--watch` can call it every tick. `claude`, `codex`, and
+`antigravity` implement it; `gemini` and `managed` have no transcript gw can
+parse and fall back to the mtime reading (`working` while the file moves,
 `defaults.activity_active_seconds`; `idle` once it stops). So does a session the
 transcript calls `working` that has been silent past
 `defaults.activity_grace_seconds` — an agent killed mid-call leaves its tool

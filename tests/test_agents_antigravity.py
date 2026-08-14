@@ -133,13 +133,247 @@ def test_capture_session_id_ignores_non_mapping_cache(
     assert a.capture_session_id(tmp_path) is None
 
 
-def test_read_only_protocol_methods_are_stubs() -> None:
+def test_capability_is_parseable() -> None:
+    assert AntigravityAgent.transcripts.parseable
+    assert AntigravityAgent.transcripts.reason == ""
+
+
+def _write_transcript(path: Path, records: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(r) for r in records]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_list_sessions_finds_recorded_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    a = _agent_with_cache(monkeypatch, tmp_path, {str(workspace.resolve()): _UUID})
+    monkeypatch.setattr(AntigravityAgent, "brain_root", classmethod(lambda cls: tmp_path / "brain"))
+
+    # Before transcript exists -> returns empty list
+    assert a.list_sessions(workspace) == []
+
+    # Write transcript
+    transcript_path = tmp_path / "brain" / _UUID / ".system_generated" / "logs" / "transcript.jsonl"
+    _write_transcript(
+        transcript_path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "hello world"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "hi there"},
+        ],
+    )
+
+    sessions = a.list_sessions(workspace)
+    assert len(sessions) == 1
+    assert sessions[0].session_id == _UUID
+    assert sessions[0].transcript_path == transcript_path
+    assert sessions[0].first_message_snippet == "hello world"
+
+
+def test_read_transcript_parses_turn_count_and_snippets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     a = AntigravityAgent()
-    cwd = Path("/tmp")
-    # Conversations live in an internal SQLite store we don't parse.
-    assert a.list_sessions(cwd) == []
-    assert a.read_transcript("sid", cwd).turn_count == 0
-    assert a.render_transcript("sid", cwd) is None
+    monkeypatch.setattr(AntigravityAgent, "brain_root", classmethod(lambda cls: tmp_path / "brain"))
+
+    transcript_path = tmp_path / "brain" / _UUID / ".system_generated" / "logs" / "transcript.jsonl"
+    _write_transcript(
+        transcript_path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "first prompt"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "first answer"},
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "second prompt"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "second answer"},
+        ],
+    )
+
+    summary = a.read_transcript(_UUID, tmp_path)
+    assert summary.turn_count == 2
+    assert summary.first_user_snippet == "first prompt"
+    assert summary.last_user_snippet == "second prompt"
+    assert summary.last_assistant_snippet == "second answer"
+    assert summary.transcript_path == transcript_path
+
+
+def test_read_transcript_fallback_by_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    a = _agent_with_cache(monkeypatch, tmp_path, {str(workspace.resolve()): _UUID})
+    monkeypatch.setattr(AntigravityAgent, "brain_root", classmethod(lambda cls: tmp_path / "brain"))
+
+    transcript_path = tmp_path / "brain" / _UUID / ".system_generated" / "logs" / "transcript.jsonl"
+    _write_transcript(
+        transcript_path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "fallback prompt"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "fallback answer"},
+        ],
+    )
+
+    # Calling with unknown/placeholder session_id falls back to cwd in cache
+    summary = a.read_transcript("placeholder-123", workspace)
+    assert summary.turn_count == 1
+    assert summary.last_user_snippet == "fallback prompt"
+    assert summary.transcript_path == transcript_path
+
+
+def test_read_transcript_accumulates_usage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    monkeypatch.setattr(AntigravityAgent, "brain_root", classmethod(lambda cls: tmp_path / "brain"))
+
+    transcript_path = tmp_path / "brain" / _UUID / ".system_generated" / "logs" / "transcript.jsonl"
+    _write_transcript(
+        transcript_path,
+        [
+            {
+                "step_index": 0,
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "content": "do work",
+            },
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "content": "working",
+                "model": "gemini-3.7-flash",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 20,
+                    "cache_write_tokens": 10,
+                },
+            },
+        ],
+    )
+
+    summary = a.read_transcript(_UUID, tmp_path)
+    assert len(summary.usage) == 1
+    assert summary.usage[0].model == "gemini-3.7-flash"
+    assert summary.usage[0].input_tokens == 100
+    assert summary.usage[0].output_tokens == 50
+    assert summary.usage[0].cache_read_tokens == 20
+    assert summary.usage[0].cache_write_tokens == 10
+
+
+def test_render_transcript(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    monkeypatch.setattr(AntigravityAgent, "brain_root", classmethod(lambda cls: tmp_path / "brain"))
+
+    transcript_path = tmp_path / "brain" / _UUID / ".system_generated" / "logs" / "transcript.jsonl"
+    _write_transcript(
+        transcript_path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "user question"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "assistant reply"},
+        ],
+    )
+
+    rendered = a.render_transcript(_UUID, tmp_path)
+    assert rendered == "[user]\nuser question\n\n[assistant]\nassistant reply"
+
+
+def test_read_tail_pending_tool_call(tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    path = tmp_path / "transcript.jsonl"
+    _write_transcript(
+        path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "run grep"},
+            {
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "content": "running grep...",
+                "tool_calls": [{"id": "call_1", "name": "grep_search", "args": {}}],
+            },
+        ],
+    )
+    tail = a.read_tail(path)
+    assert tail is not None
+    assert tail.pending_tool is True
+    assert tail.last_role == "assistant"
+    assert tail.last_assistant == "running grep..."
+
+
+def test_read_tail_completed_tool_call(tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    path = tmp_path / "transcript.jsonl"
+    _write_transcript(
+        path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "run grep"},
+            {
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "content": "running grep...",
+                "tool_calls": [{"id": "call_1", "name": "grep_search", "args": {}}],
+            },
+            {
+                "type": "TOOL_RESULT",
+                "source": "SYSTEM",
+                "tool_use_id": "call_1",
+                "content": "found matches",
+            },
+            {
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "content": "I finished the search.",
+            },
+        ],
+    )
+    tail = a.read_tail(path)
+    assert tail is not None
+    assert tail.pending_tool is False
+    assert tail.last_role == "assistant"
+    assert tail.last_assistant == "I finished the search."
+
+
+def test_read_tail_running_status(tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    path = tmp_path / "transcript.jsonl"
+    _write_transcript(
+        path,
+        [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "think"},
+            {
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "status": "RUNNING",
+                "content": "thinking...",
+            },
+        ],
+    )
+    tail = a.read_tail(path)
+    assert tail is not None
+    assert tail.pending_tool is True
+    assert tail.last_role == "assistant"
+
+
+def test_read_tail_user_last_role(tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    path = tmp_path / "transcript.jsonl"
+    _write_transcript(
+        path,
+        [
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "content": "ready"},
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "next task"},
+        ],
+    )
+    tail = a.read_tail(path)
+    assert tail is not None
+    assert tail.last_role == "user"
+    assert tail.last_assistant is None
+
+
+def test_read_tail_missing_or_empty(tmp_path: Path) -> None:
+    a = AntigravityAgent()
+    assert a.read_tail(tmp_path / "nonexistent.jsonl") is None
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    assert a.read_tail(empty) is None
     assert a.env() == {}
 
 

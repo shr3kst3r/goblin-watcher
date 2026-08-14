@@ -19,7 +19,7 @@ from goblin_watcher.agents import (
     get_agent,
 )
 
-_STUBBED = {"gemini", "antigravity", "managed"}
+_STUBBED = {"gemini", "managed"}
 
 
 def test_every_agent_declares_a_capability() -> None:

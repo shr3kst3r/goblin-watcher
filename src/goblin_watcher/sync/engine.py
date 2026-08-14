@@ -885,7 +885,7 @@ def _notify_activity(
       interrupting for, and the body carries the question itself.
     * `agent-done` — the turn finished with nothing pending.
     * `agent-idle` — quiet, and the transcript can't say which of the two it
-      is. Agents gw can't parse (gemini, antigravity, managed) and sessions
+      is. Agents gw can't parse (gemini, managed) and sessions
       abandoned mid-tool-call land here; this is the old event's behaviour,
       kept for the cases that still can't do better.
 

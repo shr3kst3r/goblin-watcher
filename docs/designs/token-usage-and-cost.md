@@ -21,8 +21,10 @@ transcript formats carry per-request usage:
 - **codex** — `event_msg.token_count` events carrying `info.total_token_usage`,
   with the model taken from the preceding `turn_context`.
 
-`gemini` and `antigravity` report nothing: gw can't read their transcripts, so
-their sessions carry no usage rather than a misleading zero.
+- **antigravity** — each step's `usage` or `metrics` object when emitted by the CLI.
+
+`gemini` reports nothing: gw can't read its transcripts, so its sessions carry
+no usage rather than a misleading zero.
 
 Two parsing hazards, both handled in the agent modules and covered by tests:
 

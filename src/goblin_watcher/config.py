@@ -93,7 +93,7 @@ class DefaultsConfig(BaseModel):
     # than the Linear round-trip but still a subprocess per issue-backed task.
     github_issue_state_ttl_seconds: int = 300
     # Fallback activity window for agents whose transcripts gw can't parse
-    # (gemini, antigravity, managed): modified within this many seconds shows
+    # (gemini, managed): modified within this many seconds shows
     # as `● working` in `gw status`, older shows as `idle <age>`. Agents with a
     # readable transcript are classified from its shape instead (ADR 0010) and
     # ignore this.
