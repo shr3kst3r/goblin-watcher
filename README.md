@@ -449,7 +449,7 @@ gw config show                              # resolved config (file merged over 
 gw sync status                              # is background sync scheduled? when did it last run?
 ```
 
-Each session row in `gw status` says what its agent is doing, read off the shape of the transcript rather than the file's mtime: `● working` while a tool call is outstanding, `◆ needs you` when the last turn ended on a question, `✓ done` when it finished without one. Agents whose transcripts gw can't parse (gemini, antigravity) keep the blunter mtime reading — `● working` while the file moves, `idle <age>` once it stops. Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
+Each session row in `gw status` says what its agent is doing, read off the shape of the transcript rather than the file's mtime: `● working` while a tool call is outstanding, `◆ needs you` when the last turn ended on a question, `✓ done` when it finished without one. Agents whose transcripts gw can't parse (gemini) keep the blunter mtime reading — `● working` while the file moves, `idle <age>` once it stops. Linear states are cached for `linear_state_ttl_seconds` (default 300) to keep status fast; `--no-linear` skips the refresh entirely.
 
 `gw status` also adopts any agent transcripts it finds on disk under a worktree that aren't yet recorded as sessions — useful after spawning an agent outside of `gw`, or after a session record was deleted.
 
@@ -766,7 +766,7 @@ Three things headless mode won't do:
 - **Take input.** `gw session send` refuses — there's no prompt sitting there to type into.
 - **Ask permission.** Keep `unsafe = true` (the default). Without it the agent stops at its first approval prompt with nobody to answer, which looks like a hang; `gw` warns but doesn't refuse.
 
-Also note that `agent-done` and `agent-needs-you` need a transcript gw can read, which today means claude and codex. A headless gemini or antigravity run falls back to `agent-idle` off the file's mtime.
+Also note that `agent-done` and `agent-needs-you` need a transcript gw can read, which today means claude, codex, and antigravity. A headless gemini run falls back to `agent-idle` off the file's mtime.
 
 ### Talk to a running agent
 
@@ -789,13 +789,14 @@ Inline windowing has no pane to address — the agent owns the terminal it was l
 | **claude** (Claude Code) | `claude --session-id <uuid> "<prompt>"` | `claude --resume <id>` / `--continue` | Full — reads `~/.claude/projects/<encoded-cwd>/*.jsonl` for ids, summaries, turn counts |
 | **codex** | `codex "<prompt>"` | `codex resume` (codex's own picker) | Full — walks `~/.codex/sessions/**/rollout-*.jsonl`, matches tasks on `session_meta.cwd`, parses ids, summaries, turn counts |
 | **gemini** | `gemini -p "<prompt>"` | `gemini --continue` | None — cwd-scoped checkpoints, no stable id; `list_sessions` / `read_transcript` are stubs, so sessions carry no summary |
-| **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Partial — conversation id recovered from `~/.gemini/antigravity-cli/cache/last_conversations.json`; transcripts live in SQLite and aren't parsed |
+| **antigravity** (Google Antigravity, binary `agy`) | `agy --prompt-interactive "<prompt>"` | `agy --conversation <id>` / `--continue` | Full — maps cwd via `~/.gemini/antigravity-cli/cache/last_conversations.json`, parses JSONL transcripts in `~/.gemini/antigravity-cli/brain/` |
 
 For unattended runs (`--windowing headless`) each agent is launched in its print mode instead of the spawn column above: `claude -p`, `codex exec`, `agy -p`, `gemini -p`.
 
 Only claude can be handed its session id at spawn time; for the others `gw` records a synthesized placeholder and reconciles it to the agent's real id after the process exits. Tmux mode returns before the agent has written anything, so there the placeholder sticks — codex transcripts are then found by falling back to the newest rollout for the worktree, which is correct as long as one codex session per worktree is active.
 
-`gw doctor` checks which binaries are on PATH and resolves the Linear key. It also warns, per agent, when `gw` can't parse that agent's transcripts — gemini and antigravity keep their history somewhere `gw` doesn't read, so their sessions have no rolling summary, no LLM description, no turn count, and can never report `◆ needs you` or `✓ done` — only the blunter mtime reading.
+`gw doctor` checks which binaries are on PATH and resolves the Linear key. It also warns, per agent, when `gw` can't parse that agent's transcripts — gemini keeps its history somewhere `gw` doesn't read, so its sessions have no rolling summary, no LLM description, no turn count, and can never report `◆ needs you` or `✓ done` — only the blunter mtime reading.
+
 
 ### State drift (`gw doctor --repair`)
 

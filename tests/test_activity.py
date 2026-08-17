@@ -187,7 +187,7 @@ def test_unparseable_transcript_falls_back_to_mtime(tmp_path: Path) -> None:
 
 def test_agents_without_readable_transcripts_use_mtime(tmp_path: Path) -> None:
     path = _write(tmp_path / "t.jsonl", [_assistant(_text("Which one?"))])
-    for agent in ("gemini", "antigravity", "managed"):
+    for agent in ("gemini", "managed"):
         act = _classify(path, agent)
         assert act.source == "mtime", agent
         assert act.state == "working", agent
@@ -411,8 +411,8 @@ def test_read_tail_returns_none_for_agents_without_transcripts(tmp_path: Path) -
 
     path = _write(tmp_path / "t.jsonl", [_assistant(_text("hi"))])
     assert GeminiAgent().read_tail(path) is None
-    assert AntigravityAgent().read_tail(path) is None
     assert ManagedAgent().read_tail(path) is None
+    assert AntigravityAgent().read_tail(path) is not None
     assert ClaudeAgent().read_tail(path) is not None
     assert CodexAgent().read_tail(tmp_path / "absent.jsonl") is None
 

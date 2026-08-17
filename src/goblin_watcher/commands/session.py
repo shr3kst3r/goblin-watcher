@@ -204,7 +204,7 @@ def show(
 def _print_usage(s: SessionRecord) -> None:
     """Token and cost lines, when the agent's transcript carried usage.
 
-    Agents whose transcripts gw can't read (gemini, antigravity) print a
+    Agents whose transcripts gw can't read (gemini) print a
     placeholder rather than a misleading zero.
     """
     rollup = usage.for_session(s)

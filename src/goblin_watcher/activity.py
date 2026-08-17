@@ -18,7 +18,7 @@ assistant text ends on a question is *needs-you*; anything else that completed
 is *done*. Two states exist for the cases the transcript can't answer:
 
 * **idle** — quiet, but we can't say why. Agents whose transcripts gw can't
-  parse (gemini, antigravity, managed) land here once their file stops moving,
+  parse (gemini, managed) land here once their file stops moving,
   which is exactly the old mtime behaviour, and so does a session the
   transcript calls "working" that has written nothing for `stalled_after`
   seconds — an agent killed mid-tool-call, whose pending call would otherwise

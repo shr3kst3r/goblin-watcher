@@ -52,13 +52,14 @@ def test_doctor_warns_about_unparseable_transcripts(
     # Rich wraps the detail cell, so collapse whitespace and assert on
     # fragments short enough not to span a wrap boundary.
     flat = " ".join(res.output.split())
-    for agent in ("gemini", "antigravity", "managed"):
+    for agent in ("gemini", "managed"):
         assert f"{agent} transcripts" in flat
     assert "not parseable" in flat
     assert "idle notifications will be blank" in flat
     # Agents that do parse their transcripts get no row.
     assert "claude transcripts" not in flat
     assert "codex transcripts" not in flat
+    assert "antigravity transcripts" not in flat
 
 
 def test_transcript_warning_does_not_fail_doctor(
