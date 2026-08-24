@@ -24,14 +24,21 @@ class GeminiAgent:
         parseable=False,
         reason="the CLI keeps cwd-scoped checkpoints with no stable session ids",
     )
+    supports_remote_control: bool = False
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del cwd, session_id
+        del cwd, session_id, remote_control
         return [*self._prefix(unsafe), "-p", prompt]
 
     def headless_command(
@@ -47,9 +54,14 @@ class GeminiAgent:
         return None
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del session_id, cwd
+        del session_id, cwd, remote_control
         return [*self._prefix(unsafe), "--continue"]
 
     def env(self) -> dict[str, str]:

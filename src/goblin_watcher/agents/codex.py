@@ -48,14 +48,21 @@ class CodexAgent:
     binary = "codex"
     unsafe_flags: tuple[str, ...] = ("--dangerously-bypass-approvals-and-sandbox",)
     transcripts: TranscriptCapability = PARSEABLE_TRANSCRIPTS
+    supports_remote_control: bool = False
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del cwd, session_id
+        del cwd, session_id, remote_control
         return [*self._prefix(unsafe), prompt]
 
     def headless_command(
@@ -75,12 +82,17 @@ class CodexAgent:
         return None
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
         # We can't reliably round-trip synthesized ids back to `codex resume
         # <id>`; the launcher rewrites them to the real codex UUID only on
         # inline mode. Always fall back to codex's own picker.
-        del cwd, session_id
+        del cwd, session_id, remote_control
         return [*self._prefix(unsafe), "resume"]
 
     def env(self) -> dict[str, str]:

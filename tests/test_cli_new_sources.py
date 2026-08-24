@@ -1030,3 +1030,78 @@ def test_new_ticketless_task_is_never_classified(
         res = runner.invoke(app, ["new", "--branch-name", "spike/foo"])
     assert res.exit_code == 0, res.output
     assert run_llm.call_count == 0
+
+
+# ---------- `--remote-control` (issue #65)
+
+
+def test_new_remote_control_names_the_session_after_the_task(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--remote-control"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] == "spike-foo"
+    assert "remote control" in res.output
+
+
+def test_new_without_remote_control_leaves_it_off(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(app, ["new", "--branch-name", "spike/foo"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] is None
+
+
+def test_new_remote_control_refuses_an_agent_without_it(isolated_xdg: Path, tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.new.launch") as launch:
+        res = runner.invoke(
+            app,
+            ["new", "--branch-name", "spike/foo", "--remote-control", "--agent", "codex"],
+        )
+    assert res.exit_code != 0
+    assert "no remote-control mode" in str(res.exception)
+    launch.assert_not_called()
+
+
+def test_new_remote_control_refuses_headless_windowing(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Print mode exits when the turn is done; there would be nothing to
+    remote control."""
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        [
+            "new",
+            "--branch-name",
+            "spike/foo",
+            "--remote-control",
+            "--windowing",
+            "headless",
+        ],
+    )
+    assert res.exit_code != 0
+    assert "needs an interactive session" in str(res.exception)

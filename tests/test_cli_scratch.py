@@ -276,3 +276,13 @@ def test_project_pull_skips_scratch(isolated_xdg: Path) -> None:
     res = runner.invoke(app, ["project", "pull"])
     assert res.exit_code == 0, res.output
     assert "scratch — skipped" in res.output
+
+
+def test_scratch_remote_control_names_the_session_after_the_space(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.scratch.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(app, ["scratch", "poking-at-things", "--remote-control"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] == "poking-at-things"

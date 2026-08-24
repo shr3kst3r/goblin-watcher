@@ -20,7 +20,12 @@ from goblin_watcher import (
     worktree_setup,
 )
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
-from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
+from goblin_watcher.agents.launcher import (
+    Fresh,
+    build_seed_prompt,
+    launch,
+    resolve_remote_control,
+)
 from goblin_watcher.commands.task import destroy_task, dirty_worktrees
 from goblin_watcher.completion_enumerators import complete_modes, complete_projects
 from goblin_watcher.console import agent_badge, console, print_settings, print_success
@@ -357,6 +362,14 @@ def new(
         help="Run the agent with its bypass-permission flag (e.g. claude's "
         "--dangerously-skip-permissions). Overrides defaults.unsafe in config.",
     ),
+    remote_control: bool | None = typer.Option(
+        None,
+        "--remote-control/--no-remote-control",
+        help="Start the session with Claude Code's Remote Control enabled, so you can "
+        "pick it up from claude.ai/code or the Claude app. Named after the task. "
+        "Interactive only (not --windowing headless); claude only. "
+        "Overrides defaults.remote_control in config.",
+    ),
     prompt: str | None = typer.Option(
         None,
         "--prompt",
@@ -493,6 +506,12 @@ def new(
     agent_name = agent or (cfg.defaults.agent) or "claude"
     windowing_mode = windowing or cfg.defaults.windowing
     unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
+    remote_control_name = resolve_remote_control(
+        requested=remote_control,
+        default=cfg.defaults.remote_control,
+        agent=get_agent(agent_name),
+        task=task,
+    )
     source_label = _source_label(linear, issue, branch, branch_name, branch_auto, dir, pr, task)
 
     print_success(f"Created task {task.id!r} on branch {task.branch!r}")
@@ -522,6 +541,7 @@ def new(
         ("agent", agent_name),
         ("windowing", windowing_mode),
         ("unsafe", str(unsafe_mode).lower()),
+        ("remote control", remote_control_name or "off"),
         ("no_launch", str(no_launch).lower()),
         ("mode", mode_spec.name if mode_spec is not None else "(default)"),
     ]
@@ -570,6 +590,7 @@ def new(
         choice=choice,
         windower=windower,
         unsafe=unsafe_mode,
+        remote_control=remote_control_name,
     )
     if exit_code != 0:
         raise typer.Exit(code=exit_code)

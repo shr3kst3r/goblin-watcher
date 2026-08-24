@@ -346,3 +346,75 @@ def test_headless_command_uses_print_mode() -> None:
         "-p",
         "do it",
     ]
+
+
+# ---------- Remote Control (`--remote-control [name]`)
+
+
+def test_spawn_command_names_the_remote_control_session() -> None:
+    a = ClaudeAgent()
+    assert a.spawn_command(prompt="hi", cwd=Path("/tmp"), remote_control="eng-123") == [
+        "claude",
+        "--remote-control",
+        "eng-123",
+        "hi",
+    ]
+
+
+def test_spawn_command_remote_control_never_swallows_the_prompt() -> None:
+    """`--remote-control [name]` takes an optional value, so a bare flag would
+    consume the trailing prompt argument as the session name. The name is what
+    keeps the prompt positional."""
+    a = ClaudeAgent()
+    cmd = a.spawn_command(
+        prompt="do the thing", cwd=Path("/tmp"), unsafe=True, session_id="uuid", remote_control="t"
+    )
+    assert cmd == [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--remote-control",
+        "t",
+        "--session-id",
+        "uuid",
+        "do the thing",
+    ]
+    assert cmd[cmd.index("--remote-control") + 1] == "t"
+    assert cmd[-1] == "do the thing"
+
+
+def test_spawn_command_without_remote_control_is_unchanged() -> None:
+    a = ClaudeAgent()
+    assert "--remote-control" not in a.spawn_command(prompt="hi", cwd=Path("/tmp"))
+    assert "--remote-control" not in a.spawn_command(
+        prompt="hi", cwd=Path("/tmp"), remote_control=None
+    )
+
+
+def test_resume_command_carries_remote_control() -> None:
+    a = ClaudeAgent()
+    assert a.resume_command(session_id="abc", cwd=Path("/tmp"), remote_control="eng-123") == [
+        "claude",
+        "--remote-control",
+        "eng-123",
+        "--resume",
+        "abc",
+    ]
+    assert a.resume_command(session_id=None, cwd=Path("/tmp"), remote_control="eng-123") == [
+        "claude",
+        "--remote-control",
+        "eng-123",
+        "--continue",
+    ]
+
+
+def test_headless_command_has_no_remote_control_parameter() -> None:
+    """Print mode exits when the turn is done, so there is nothing to remote
+    control. The parameter's absence is what makes that refusal structural."""
+    import inspect
+
+    params = inspect.signature(ClaudeAgent().headless_command).parameters
+    assert "remote_control" not in params
+
+
+def test_claude_declares_remote_control_support() -> None:
+    assert ClaudeAgent().supports_remote_control is True

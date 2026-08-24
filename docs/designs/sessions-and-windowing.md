@@ -54,6 +54,26 @@ What the mode deliberately does *not* do:
 
 Two caveats worth knowing before scheduling one. An unattended run wants `unsafe = true` (the default) — without it the agent stalls at its first permission prompt with nobody to answer, so `launch` prints a warning. And the transcript-derived events (`agent-done`, `agent-needs-you`) only fire for agents whose transcripts gw can parse; a gemini or antigravity run gets the blunter `agent-idle` off its file mtime, or has to be checked by hand (`is_live`, or the log). See ADR 0010.
 
+### Remote control (claude only)
+
+`--remote-control` on `gw new` / `gw run` / `gw scratch`, or `defaults.remote_control` in config, starts the session with Claude Code's Remote Control mode on: the agent runs here, and claude.ai/code or the Claude mobile app drives it. Local execution is the point — the worktree, the MCP servers, and the plugin/skill config are all still this machine's.
+
+Declared, not detected. `Agent.supports_remote_control` sits alongside `transcripts: TranscriptCapability`, and `spawn_command` / `resume_command` take a `remote_control: str | None` naming the session; agents without the feature ignore it the way they already ignore `session_id`. `launcher.resolve_remote_control` is the one decision point:
+
+| request | agent supports it | outcome |
+|---|---|---|
+| `--remote-control` | yes | on, session named `task.id` |
+| `--remote-control` | no | `GoblinError` — the flag's whole point is reaching the session, and one you can't reach is worse than none |
+| `defaults.remote_control = true` | no | one muted line, session starts without it — the config value is global while the agent varies per task |
+| `--no-remote-control` | either | off, overriding config |
+
+Two invariants:
+
+- **The name is always passed, and it is the task id.** `--remote-control [name]` takes an *optional* value, so a bare flag would swallow `spawn_command`'s trailing prompt argument as the session name — silently, since the session would still start. The task id also beats claude's hostname-derived default, which distinguishes nothing when six agents share a laptop: the app's session list reads `eng-123`, `gh-42`, exactly as `gw status` does.
+- **Interactive only.** `launch` refuses a headless windower before anything is persisted or spawned, next to the headless-resume refusal — print mode exits when the turn is done, so there is nothing left to control. `headless_command` takes no `remote_control` parameter at all, which is what keeps that refusal structural. `--windowing tmux` is the pairing worth reaching for: the session dies with its terminal, and a tmux pane survives one.
+
+Nothing is persisted, so `gw status` can't report it (same reasoning as ADR 0010's refusal to cache activity state). Mid-session, `gw session send <task-id> "/remote-control"` types the slash command into a live pane and carries the conversation over. See ADR 0013.
+
 ### Sending input to a running session
 
 `Windower.send(task=…, text=…, session_id=…, enter=…)` types into a live agent, backing `gw session send <task-id> "also fix the tests"`. Supervising several agents shouldn't require attaching to each pane in turn.
@@ -74,13 +94,15 @@ Text and Enter are two `send-keys` calls: `-l --` sends the message literally (s
 ## Agent abstraction
 
 `Agent` protocol (`agents/base.py`) has seven methods:
-- `spawn_command(prompt, cwd)` — argv for a fresh interactive session.
+- `spawn_command(prompt, cwd, …, remote_control)` — argv for a fresh interactive session.
 - `headless_command(prompt, cwd)` — argv for the same, in the CLI's non-interactive print/exec mode.
-- `resume_command(session_id, cwd)` — argv for resume; `session_id=None` for cwd-scoped continue.
+- `resume_command(session_id, cwd, …, remote_control)` — argv for resume; `session_id=None` for cwd-scoped continue.
 - `capture_session_id(cwd)` — newest session id at `cwd`, or `None`.
 - `list_sessions(cwd)` — for the path-driven picker.
 - `read_transcript(session_id, cwd)` — for summary refresh.
 - `env()` — extra environment overlay.
+
+Plus two declared class attributes: `transcripts` (below) and `supports_remote_control` (above), both there so a missing feature announces itself instead of quietly doing nothing.
 
 Four concrete impls in `agents/{claude,codex,gemini,antigravity}.py`. Static registry in `agents/registry.py`. **No plugin system.** Adding another agent is a small documented checklist in root `AGENTS.md`.
 

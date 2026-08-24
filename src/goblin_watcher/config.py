@@ -68,6 +68,13 @@ class DefaultsConfig(BaseModel):
     windowing: Windowing = "inline"
     summary_ttl_seconds: int = 30
     unsafe: bool = True  # Default to bypass-permission mode; set `unsafe = false` to opt out.
+    # Start interactive sessions with the agent's Remote Control mode on, so the
+    # session can be picked up from claude.ai/code or the Claude mobile app.
+    # Off by default: most gw sessions are headless fleet runs, which can't use
+    # it at all, and it is claude-only — an agent without it says so once and
+    # launches anyway (`launcher.resolve_remote_control`). `--remote-control` /
+    # `--no-remote-control` overrides this per invocation.
+    remote_control: bool = False
     # LLM-generated session descriptions (lazy, background-refreshed).
     description_ttl_seconds: int = 900  # 15 minutes
     description_agent: str = "claude"  # "claude" | "codex" | "off"

@@ -581,3 +581,25 @@ def test_run_address_review_does_not_fetch_before_cheaper_checks_fail(
         )
     assert res.exit_code != 0
     collect.assert_not_called()
+
+
+def test_run_remote_control_reaches_the_launcher(isolated_xdg: Path, tmp_path: Path) -> None:
+    """`gw run --remote-control` is the "keep going on this from the couch" case."""
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.run.launch_agent", return_value=(0, None)) as launch:
+        res = runner.invoke(
+            app,
+            ["run", "spike-foo", "--project", "alpha", "--new", "--remote-control"],
+        )
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] == "spike-foo"
+
+
+def test_run_remote_control_defaults_off(isolated_xdg: Path, tmp_path: Path) -> None:
+    _bootstrap_two_projects(tmp_path)
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.run.launch_agent", return_value=(0, None)) as launch:
+        res = runner.invoke(app, ["run", "spike-foo", "--project", "alpha", "--new"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] is None
