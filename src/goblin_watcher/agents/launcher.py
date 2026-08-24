@@ -87,7 +87,60 @@ def _persist_record(
         return updated
 
 
-def _check_headless(choice: SessionChoice, unsafe: bool) -> None:
+def resolve_remote_control(
+    *, requested: bool | None, default: bool, agent: Agent, windower: Windower
+) -> bool:
+    """Whether this launch starts the session with remote control on.
+
+    `requested` is the tri-state CLI flag (None = "not mentioned"), `default`
+    the `defaults.remote_control` config value it overrides.
+
+    Call this **before** creating a task, worktree, or scratch directory: both
+    refusals below are decidable from the flags alone, and a command that
+    builds a checkout and then rejects its own arguments is the failure
+    `--research`'s ticket check already refuses to be (ADR 0006).
+
+    Both refusals split on where the request came from, and for the same
+    reason. Asking explicitly and getting something you can't reach from your
+    phone is worse than not launching, so it raises. Inheriting the same value
+    from config is not an error: `defaults.remote_control` is global while the
+    agent and the windower vary per task, and a default that breaks a subset of
+    launches is a default nobody can set.
+
+    `launch` names the session; see it for why the name is the task id.
+    """
+    enabled = default if requested is None else requested
+    if not enabled:
+        return False
+    if not agent.supports_remote_control:
+        if requested:
+            raise GoblinError(
+                f"The {agent.name!r} agent has no remote-control mode.",
+                hint="Remote Control is a Claude Code feature — use `--agent claude`, "
+                "or drop --remote-control.",
+            )
+        console.print(
+            f"[muted]defaults.remote_control is on, but {agent.name!r} has no "
+            "remote-control mode — starting without it.[/]"
+        )
+        return False
+    if windower.headless:
+        if requested:
+            raise GoblinError(
+                "Remote control needs an interactive session, and headless windowing runs "
+                "the agent's print mode, which exits when the turn is done.",
+                hint="Use --windowing tmux (which also survives a closed terminal), "
+                "or drop --remote-control.",
+            )
+        # Inherited from config, and silently: a headless fleet run is exactly
+        # what someone with `defaults.remote_control = true` also does all day,
+        # and nobody reads an unattended run's log to be told a flag they never
+        # typed didn't apply.
+        return False
+    return True
+
+
+def _check_headless(choice: SessionChoice, unsafe: bool, remote_control: bool) -> None:
     """Guard the headless path before anything is persisted or spawned.
 
     Resume is refused rather than approximated: an agent's print mode is
@@ -95,7 +148,21 @@ def _check_headless(choice: SessionChoice, unsafe: bool) -> None:
     to say would either hang on stdin or burn a turn to no effect. Starting a
     fresh headless run with the follow-up as its prompt is the honest
     equivalent.
+
+    Remote control is refused for the mirror-image reason: it enables an
+    *interactive* session, and print mode exits the moment the turn is done.
+    You would be handed a phone window onto a process that is already gone.
     """
+    if remote_control:
+        # Backstop. The command layer refuses this before it creates anything
+        # (`resolve_remote_control`); this is what covers a programmatic caller
+        # and what makes `headless_command`'s missing parameter safe.
+        raise GoblinError(
+            "Remote control needs an interactive session, and headless windowing runs "
+            "the agent's print mode, which exits when the turn is done.",
+            hint="Use --windowing tmux (which also survives a closed terminal), "
+            "or drop --remote-control.",
+        )
     if isinstance(choice, Resume):
         raise GoblinError(
             "Headless windowing can only start a fresh session, not resume one.",
@@ -120,10 +187,14 @@ def launch(
     choice: SessionChoice,
     windower: Windower,
     unsafe: bool = False,
+    remote_control: bool = False,
 ) -> tuple[int, Task]:
-    """Run the agent for `task`. Returns (exit_code, updated_task)."""
+    """Run the agent for `task`. Returns (exit_code, updated_task).
+
+    `remote_control` is `resolve_remote_control`'s answer for this launch.
+    """
     if windower.headless:
-        _check_headless(choice, unsafe)
+        _check_headless(choice, unsafe, remote_control)
     # A multi-repo task launches in its workspace (each repo is a subdir);
     # a single-repo task launches directly in its worktree.
     cwd = task.agent_cwd
@@ -131,6 +202,13 @@ def launch(
     # os.environ itself, tmux injects them into the pane command (the pane's
     # shell can't inherit this process's environment).
     extra_env = agent.env()
+
+    # The remote-control session is named after the task, so the Claude app's
+    # session list reads `eng-123` / `gh-42` — the same ids `gw status` prints —
+    # instead of claude's hostname-derived default, which distinguishes nothing
+    # when several agents share one machine. Named here rather than at the call
+    # sites so the three spawn commands can't drift on it.
+    rc_name = task.id if remote_control else None
 
     # Agents that accept a caller-chosen session id (claude's `--session-id`)
     # get one up-front, so the record we save before dispatch already carries
@@ -142,10 +220,28 @@ def launch(
         # A headless windower has no terminal to draw a TUI on, so the agent
         # runs its print/exec mode instead (`_check_headless` has already
         # ruled out the resume branch).
-        build = agent.headless_command if windower.headless else agent.spawn_command
-        cmd = build(prompt=choice.prompt, cwd=cwd, unsafe=unsafe, session_id=preassigned)
+        if windower.headless:
+            # `headless_command` takes no `remote_control` at all — `_check_headless`
+            # has already refused the combination, and leaving the parameter off
+            # keeps that refusal structural rather than a convention to remember.
+            cmd = agent.headless_command(
+                prompt=choice.prompt, cwd=cwd, unsafe=unsafe, session_id=preassigned
+            )
+        else:
+            cmd = agent.spawn_command(
+                prompt=choice.prompt,
+                cwd=cwd,
+                unsafe=unsafe,
+                session_id=preassigned,
+                remote_control=rc_name,
+            )
     else:
-        cmd = agent.resume_command(session_id=choice.session_id, cwd=cwd, unsafe=unsafe)
+        cmd = agent.resume_command(
+            session_id=choice.session_id,
+            cwd=cwd,
+            unsafe=unsafe,
+            remote_control=rc_name,
+        )
 
     console.print(f"[muted]$ {' '.join(shlex.quote(arg) for arg in cmd)}  (cwd={cwd})[/]")
 

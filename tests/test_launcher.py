@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 from goblin_watcher import state
 from goblin_watcher.agents.base import RawSession, TranscriptSummary
-from goblin_watcher.agents.launcher import Fresh, Resume, launch
+from goblin_watcher.agents.launcher import Fresh, Resume, launch, resolve_remote_control
 from goblin_watcher.cli import app
 from goblin_watcher.errors import GoblinError
 from goblin_watcher.models import Task
@@ -17,6 +17,7 @@ from goblin_watcher.review_feed import ReviewFeed
 class _StubAgent:
     name = "claude"
     binary = "stub"
+    supports_remote_control = True
 
     def __init__(self, captured_id: str | None = None, preassign_id: str | None = None) -> None:
         self._captured = captured_id
@@ -24,12 +25,20 @@ class _StubAgent:
         self.capture_calls = 0
         self.spawn_session_ids: list[str | None] = []
         self.headless_session_ids: list[str | None] = []
+        self.remote_control_names: list[str | None] = []
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
         del prompt, cwd, unsafe
         self.spawn_session_ids.append(session_id)
+        self.remote_control_names.append(remote_control)
         return ["stub", "spawn"]
 
     def headless_command(
@@ -43,9 +52,15 @@ class _StubAgent:
         return self._preassign
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
         del session_id, cwd, unsafe
+        self.remote_control_names.append(remote_control)
         return ["stub", "resume"]
 
     def env(self) -> dict[str, str]:
@@ -872,3 +887,149 @@ def test_address_review_prompt_survives_backticks_in_the_evidence(
     # The comment after the hunk is still outside any fence.
     assert "Wrong language tag." in seed
     assert "````\nexpected:" in seed
+
+
+# ---------- Remote Control
+
+
+class _NoRemoteControlAgent(_StubAgent):
+    name = "codex"
+    supports_remote_control = False
+
+
+def test_resolve_remote_control_off_by_default() -> None:
+    assert not resolve_remote_control(
+        requested=None, default=False, agent=_StubAgent(), windower=_InlineWindower()
+    )
+
+
+def test_resolve_remote_control_on_from_flag_or_config() -> None:
+    assert resolve_remote_control(
+        requested=True, default=False, agent=_StubAgent(), windower=_InlineWindower()
+    )
+    assert resolve_remote_control(
+        requested=None, default=True, agent=_StubAgent(), windower=_InlineWindower()
+    )
+
+
+def test_no_remote_control_overrides_the_config_default() -> None:
+    assert not resolve_remote_control(
+        requested=False, default=True, agent=_StubAgent(), windower=_InlineWindower()
+    )
+
+
+def test_explicit_remote_control_on_an_unsupported_agent_is_an_error() -> None:
+    """Silently launching a session you can't reach from your phone is worse
+    than not launching one."""
+    with pytest.raises(GoblinError) as exc:
+        resolve_remote_control(
+            requested=True,
+            default=False,
+            agent=_NoRemoteControlAgent(),
+            windower=_InlineWindower(),
+        )
+    assert "no remote-control mode" in str(exc.value)
+
+
+def test_config_remote_control_on_an_unsupported_agent_just_warns(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`defaults.remote_control` is global while the agent varies per task, so
+    inheriting it somewhere it can't apply must not block the launch."""
+    assert not resolve_remote_control(
+        requested=None, default=True, agent=_NoRemoteControlAgent(), windower=_InlineWindower()
+    )
+    assert "no remote-control mode" in capsys.readouterr().out
+
+
+def test_explicit_remote_control_on_a_headless_windower_is_an_error() -> None:
+    """Print mode exits when the turn is done — a phone window onto a process
+    that is already gone."""
+    with pytest.raises(GoblinError) as exc:
+        resolve_remote_control(
+            requested=True, default=False, agent=_StubAgent(), windower=_HeadlessWindower()
+        )
+    assert "needs an interactive session" in str(exc.value)
+
+
+def test_config_remote_control_is_silently_off_when_headless(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A headless fleet run is exactly what someone with the config default set
+    also does all day; erroring would break every one of them."""
+    assert not resolve_remote_control(
+        requested=None, default=True, agent=_StubAgent(), windower=_HeadlessWindower()
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_launch_names_the_remote_control_session_after_the_task(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The name is what makes the Claude app's session list read like `gw status`."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    agent = _StubAgent(preassign_id="pre-id")
+    launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Fresh(prompt="kick off"),
+        windower=_InlineWindower(),
+        remote_control=True,
+    )
+    assert agent.remote_control_names == [task.id]
+
+
+def test_launch_passes_no_name_when_remote_control_is_off(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    agent = _StubAgent(preassign_id="pre-id")
+    launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Fresh(prompt="kick off"),
+        windower=_InlineWindower(),
+    )
+    assert agent.remote_control_names == [None]
+
+
+def test_remote_control_name_reaches_a_resume(isolated_xdg: Path, tmp_path: Path) -> None:
+    """ "Keep going on this from the couch" is the case resume exists for."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    agent = _StubAgent()
+    launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Resume(session_id="sess-1"),
+        windower=_InlineWindower(),
+        remote_control=True,
+    )
+    assert agent.remote_control_names == [task.id]
+
+
+def test_launch_backstops_the_headless_refusal(isolated_xdg: Path, tmp_path: Path) -> None:
+    """The command layer refuses this before it creates anything; `launch` is
+    what covers a programmatic caller and makes `headless_command`'s missing
+    parameter safe."""
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    windower = _HeadlessWindower()
+
+    with pytest.raises(GoblinError) as exc:
+        launch(
+            project=proj,
+            task=task,
+            agent=_StubAgent(),
+            choice=Fresh(prompt="kick off"),
+            windower=windower,
+            remote_control=True,
+        )
+    assert "needs an interactive session" in str(exc.value)
+    assert windower.observed_cmd is None
+    assert state.list_tasks(proj)[0].sessions == []

@@ -50,14 +50,21 @@ class AntigravityAgent:
     binary = "agy"
     unsafe_flags: tuple[str, ...] = ("--dangerously-skip-permissions",)
     transcripts: TranscriptCapability = PARSEABLE_TRANSCRIPTS
+    supports_remote_control: bool = False
 
     def _prefix(self, unsafe: bool) -> list[str]:
         return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del cwd, session_id
+        del cwd, session_id, remote_control
         return [*self._prefix(unsafe), "--prompt-interactive", prompt]
 
     def headless_command(
@@ -76,9 +83,14 @@ class AntigravityAgent:
         return None
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del cwd
+        del cwd, remote_control
         if session_id and _CONVERSATION_ID.match(session_id):
             return [*self._prefix(unsafe), "--conversation", session_id]
         # No usable id: `--continue` resumes the most recent conversation for

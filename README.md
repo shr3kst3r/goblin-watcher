@@ -649,6 +649,7 @@ agent = "claude"                  # "claude" | "codex" | "gemini" | "antigravity
 windowing = "inline"              # "inline" | "tmux" | "headless" (see Headless windowing below)
 summary_ttl_seconds = 30          # how long a session summary is considered fresh
 unsafe = true                     # spawn agents with their bypass-permission flag (see below)
+remote_control = false            # start interactive claude sessions with Remote Control on (see below)
 activity_active_seconds = 120     # mtime fallback for agents gw can't classify: newer → `● working`, older → `idle`
 activity_grace_seconds = 900      # how long a session stays on `gw status --active`, and how long a
                                   # transcript claiming to be mid tool call is believed before silence wins
@@ -826,6 +827,28 @@ Any drift makes `gw doctor` exit non-zero, so it works as a scripted health gate
 
 The agents will execute everything they decide to do without asking. If you'd rather be prompted, set `defaults.unsafe = false` in your config.
 
+### Remote Control (pick a session up on your phone)
+
+`--remote-control` on `gw new`, `gw run`, and `gw scratch` starts the session with [Claude Code's Remote Control](https://code.claude.com/docs/en/remote-control) enabled: start a task at your desk, then answer the agent's question from claude.ai/code or the Claude mobile app. Execution stays local — same worktree, same MCP servers, same plugins — the phone is only a window onto the session.
+
+```bash
+gw ENG-123 --remote-control --windowing tmux   # start it, walk away, answer from the couch
+gw run eng-123 --remote-control                # same, resuming an existing session
+gw config set defaults.remote_control true     # on for every interactive spawn
+```
+
+`gw` names the session after the task, so the Claude app's session list reads `eng-123`, `gh-42` — the same ids `gw status` shows — instead of claude's hostname-derived default.
+
+Four things worth knowing:
+
+- **The local process has to stay up.** Close the terminal and the session goes offline. Pair it with `--windowing tmux`, which survives a closed terminal and an SSH disconnect.
+- **Interactive only.** `--windowing headless` is refused: print mode exits when the turn is done, so there would be nothing left to control.
+- **claude only.** codex, gemini, and antigravity have no equivalent.
+- **An explicit flag refuses; the config default declines.** `--remote-control` on an agent or windowing mode that can't use it is an error, so you never get a session you can't reach. The same value inherited from `defaults.remote_control` just turns itself off for that launch — otherwise setting it once would break every codex task and every headless fleet run.
+- **Needs a claude.ai login** (`/login`) — API keys aren't supported — and on Team/Enterprise an Owner has to enable Remote Control first.
+
+Already mid-session? `gw session send <task-id> "/remote-control"` types the slash command into a live tmux pane, carrying the conversation over.
+
 ## Commands reference
 
 ```text
@@ -837,11 +860,13 @@ gw new --linear|--issue|--pr|--branch|--branch-name|--branch-auto|--dir
        [--mode NAME] [--research] [--adversarial-review]
        [--rm|--rm-force] [--no-launch] [--no-setup] [--no-classify]
        [--windowing inline|tmux|headless] [--unsafe|--no-unsafe]
+       [--remote-control|--no-remote-control]
 gw run [PATH|TASK-ID] [--session [ID]] [--new] [--agent ...] [--prompt ...]
        [--research] [--adversarial-review] [--address-review]
        [--project NAME] [--windowing ...] [--unsafe|--no-unsafe]
+       [--remote-control|--no-remote-control]
 gw scratch [NAME] [--agent ...] [--prompt ...] [--no-launch] [--no-setup]
-           [--windowing ...] [--unsafe|--no-unsafe]
+           [--windowing ...] [--unsafe|--no-unsafe] [--remote-control|--no-remote-control]
 gw cd  [PATH|TASK-ID] [--project NAME]      # prints worktree path; pair with spg's gwcd/gwcode/gwobsidian/gwfinder shell functions
 gw status [--project NAME] [--no-linear] [--no-cache] [--cost] [--diffstat]
           [--active] [--watch|-w] [--interval SECONDS]      # tree view of projects → tasks → sessions

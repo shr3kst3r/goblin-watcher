@@ -37,15 +37,33 @@ class ClaudeAgent:
     binary = "claude"
     unsafe_flags: tuple[str, ...] = ("--dangerously-skip-permissions",)
     transcripts: TranscriptCapability = PARSEABLE_TRANSCRIPTS
+    supports_remote_control: bool = True
 
-    def _prefix(self, unsafe: bool) -> list[str]:
-        return [self.binary, *self.unsafe_flags] if unsafe else [self.binary]
+    def _prefix(self, unsafe: bool, remote_control: str | None = None) -> list[str]:
+        cmd = [self.binary]
+        if unsafe:
+            cmd += list(self.unsafe_flags)
+        if remote_control:
+            # `--remote-control [name]` takes an *optional* value, so the name
+            # is never left off: a bare flag would swallow the trailing prompt
+            # argument of `spawn_command` as the session name. Passing it also
+            # beats claude's own default (a hostname-derived name), which says
+            # nothing when six agents share one machine — the task id is what
+            # the phone's session list should read.
+            cmd += ["--remote-control", remote_control]
+        return cmd
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
         del cwd
-        cmd = self._prefix(unsafe)
+        cmd = self._prefix(unsafe, remote_control)
         if session_id:
             cmd += ["--session-id", session_id]
         return [*cmd, prompt]
@@ -69,12 +87,18 @@ class ClaudeAgent:
         return str(uuid.uuid4())
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
         del cwd
+        prefix = self._prefix(unsafe, remote_control)
         if session_id:
-            return [*self._prefix(unsafe), "--resume", session_id]
-        return [*self._prefix(unsafe), "--continue"]
+            return [*prefix, "--resume", session_id]
+        return [*prefix, "--continue"]
 
     def env(self) -> dict[str, str]:
         return {}

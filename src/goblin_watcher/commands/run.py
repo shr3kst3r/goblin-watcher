@@ -5,7 +5,12 @@ import typer
 
 from goblin_watcher import config, linear_transitions, review_feed, sessions, state
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
-from goblin_watcher.agents.launcher import Fresh, Resume, build_seed_prompt
+from goblin_watcher.agents.launcher import (
+    Fresh,
+    Resume,
+    build_seed_prompt,
+    resolve_remote_control,
+)
 from goblin_watcher.agents.launcher import launch as launch_agent
 from goblin_watcher.commands.task import rematerialize_task
 from goblin_watcher.completion_enumerators import (
@@ -55,6 +60,14 @@ def run(
         "--unsafe/--no-unsafe",
         help="Run the agent with its bypass-permission flag (e.g. claude's "
         "--dangerously-skip-permissions). Overrides defaults.unsafe in config.",
+    ),
+    remote_control: bool | None = typer.Option(
+        None,
+        "--remote-control/--no-remote-control",
+        help="Start the session with Claude Code's Remote Control enabled, so you can "
+        "pick it up from claude.ai/code or the Claude app. Named after the task. "
+        "Interactive only (not --windowing headless); claude only. "
+        "Overrides defaults.remote_control in config.",
     ),
     project: str | None = typer.Option(
         None,
@@ -256,6 +269,15 @@ def run(
         task = refreshed_task
 
     session_label = f"resume {choice.session_id}" if isinstance(choice, Resume) else "fresh"
+    # After the picker: resuming a session recorded under a different agent
+    # rebinds `agent_obj`, and remote control is a property of the agent that
+    # actually launches.
+    remote_control_on = resolve_remote_control(
+        requested=remote_control,
+        default=cfg.defaults.remote_control,
+        agent=agent_obj,
+        windower=windower,
+    )
     print_settings(
         [
             ("task", task.id),
@@ -264,6 +286,7 @@ def run(
             ("agent", agent_name),
             ("windowing", windowing_mode),
             ("unsafe", str(unsafe_mode).lower()),
+            ("remote control", task.id if remote_control_on else "off"),
         ]
     )
     # Opt-in and fail-open (ADR 0012): unset config is a no-op, and a Linear that
@@ -282,6 +305,7 @@ def run(
         choice=choice,
         windower=windower,
         unsafe=unsafe_mode,
+        remote_control=remote_control_on,
     )
     if exit_code != 0:
         raise typer.Exit(code=exit_code)

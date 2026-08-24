@@ -149,14 +149,21 @@ class ManagedAgent:
         parseable=False,
         reason="no backend is wired yet, so nothing is written locally; see ADR 0002",
     )
+    supports_remote_control: bool = False
 
     def __init__(self, client: ManagedClient | None = None) -> None:
         self.client: ManagedClient = client or NotConfiguredClient()
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del prompt, cwd, unsafe, session_id
+        del prompt, cwd, unsafe, session_id, remote_control
         raise _LAUNCHER_NOT_WIRED
 
     def headless_command(
@@ -172,9 +179,14 @@ class ManagedAgent:
         return None
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
-        del session_id, cwd, unsafe
+        del session_id, cwd, unsafe, remote_control
         raise _LAUNCHER_NOT_WIRED
 
     def capture_session_id(self, cwd: Path) -> str | None:

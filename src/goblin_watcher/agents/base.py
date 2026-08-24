@@ -107,15 +107,28 @@ class Agent(Protocol):
     name: str
     binary: str
     transcripts: TranscriptCapability
+    supports_remote_control: bool
 
     def spawn_command(
-        self, *, prompt: str, cwd: Path, unsafe: bool = False, session_id: str | None = None
+        self,
+        *,
+        prompt: str,
+        cwd: Path,
+        unsafe: bool = False,
+        session_id: str | None = None,
+        remote_control: str | None = None,
     ) -> list[str]:
         """Argv to start a fresh interactive session seeded with `prompt`.
 
         When `unsafe` is true, prepend the agent's bypass-permission flag.
         `session_id` (from `new_session_id`) preassigns the session's id;
         agents whose CLI can't accept one ignore it.
+
+        `remote_control`, when set, is the *name* to give the session in the
+        agent's remote-control surface (gw passes the task id). Only agents
+        declaring `supports_remote_control` act on it; the rest ignore it, and
+        the command layer refuses the flag for them, so it is never silently
+        dropped on someone who asked for it.
         """
         ...
 
@@ -147,13 +160,19 @@ class Agent(Protocol):
         ...
 
     def resume_command(
-        self, *, session_id: str | None, cwd: Path, unsafe: bool = False
+        self,
+        *,
+        session_id: str | None,
+        cwd: Path,
+        unsafe: bool = False,
+        remote_control: str | None = None,
     ) -> list[str]:
         """Argv to resume a session.
 
         If `session_id` is None, the implementation should use the agent's
         "continue most recent in this cwd" mode (e.g. `gemini --continue`).
         When `unsafe` is true, prepend the agent's bypass-permission flag.
+        `remote_control` carries the same contract as in `spawn_command`.
         """
         ...
 

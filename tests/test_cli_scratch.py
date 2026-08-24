@@ -6,12 +6,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
 from goblin_watcher import paths, state
 from goblin_watcher.agents.launcher import build_seed_prompt
 from goblin_watcher.cli import app
+from goblin_watcher.errors import ProjectNotFoundError
 from goblin_watcher.models import Project, SessionRecord
 
 
@@ -276,3 +278,29 @@ def test_project_pull_skips_scratch(isolated_xdg: Path) -> None:
     res = runner.invoke(app, ["project", "pull"])
     assert res.exit_code == 0, res.output
     assert "scratch — skipped" in res.output
+
+
+def test_scratch_remote_control_names_the_session_after_the_space(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    with patch("goblin_watcher.commands.scratch.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(app, ["scratch", "poking-at-things", "--remote-control"])
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] is True
+    assert "remote control" in res.output
+    assert "poking-at-things" in res.output
+
+
+def test_scratch_remote_control_refusal_creates_no_directory(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """A refused `gw scratch` must not leave a directory and a task record
+    behind for a command that never ran."""
+    runner = CliRunner()
+    res = runner.invoke(app, ["scratch", "rc-nope", "--remote-control", "--agent", "codex"])
+    assert res.exit_code != 0
+    assert "no remote-control mode" in str(res.exception)
+    # Refused before `ensure_scratch_project`, so not even the container exists.
+    with pytest.raises(ProjectNotFoundError):
+        state.get_project("scratch")

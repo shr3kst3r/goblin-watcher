@@ -15,7 +15,12 @@ import typer
 
 from goblin_watcher import config, paths, state, worktree_setup
 from goblin_watcher.agents import AGENT_NAMES, get_agent, validate_agent_for_project
-from goblin_watcher.agents.launcher import Fresh, build_seed_prompt, launch
+from goblin_watcher.agents.launcher import (
+    Fresh,
+    build_seed_prompt,
+    launch,
+    resolve_remote_control,
+)
 from goblin_watcher.console import agent_badge, console, print_settings, print_success
 from goblin_watcher.errors import GoblinError, ProjectNotFoundError, TaskNotFoundError
 from goblin_watcher.models import Project, Task
@@ -109,6 +114,14 @@ def scratch(
         help="Run the agent with its bypass-permission flag (e.g. claude's "
         "--dangerously-skip-permissions). Overrides defaults.unsafe in config.",
     ),
+    remote_control: bool | None = typer.Option(
+        None,
+        "--remote-control/--no-remote-control",
+        help="Start the session with Claude Code's Remote Control enabled, so you can "
+        "pick it up from claude.ai/code or the Claude app. Named after the task. "
+        "Interactive only (not --windowing headless); claude only. "
+        "Overrides defaults.remote_control in config.",
+    ),
     prompt: str | None = typer.Option(
         None,
         "--prompt",
@@ -122,6 +135,20 @@ def scratch(
             "--prompt has no effect with --no-launch (no session is started).",
             hint="Drop --no-launch, or drop --prompt.",
         )
+
+    cfg = config.load()
+    agent_name = agent or cfg.defaults.agent or "claude"
+    windowing_mode = windowing or cfg.defaults.windowing
+    windower = get_windower(windowing_mode)
+    unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
+    # Above the mkdir: refusing after creating the space would leave a scratch
+    # directory and a task record behind for a command that never ran.
+    remote_control_on = resolve_remote_control(
+        requested=remote_control,
+        default=cfg.defaults.remote_control,
+        agent=get_agent(agent_name),
+        windower=windower,
+    )
 
     proj = ensure_scratch_project()
     base = slugify(name) if name else random_scratch_name()
@@ -140,11 +167,6 @@ def scratch(
     )
     state.save_task(proj, task)
 
-    cfg = config.load()
-    agent_name = agent or cfg.defaults.agent or "claude"
-    windowing_mode = windowing or cfg.defaults.windowing
-    unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
-
     print_success(f"Created scratch space {final!r}")
     print_settings(
         [
@@ -152,6 +174,7 @@ def scratch(
             ("agent", agent_name),
             ("windowing", windowing_mode),
             ("unsafe", str(unsafe_mode).lower()),
+            ("remote control", final if remote_control_on else "off"),
             ("no_launch", str(no_launch).lower()),
         ]
     )
@@ -168,7 +191,6 @@ def scratch(
 
     validate_agent_for_project(agent_name, proj)
     agent_obj = get_agent(agent_name)
-    windower = get_windower(windowing_mode)
     choice = Fresh(prompt=build_seed_prompt(task, user_prompt=prompt))
     console.print(f"Launching {agent_badge(agent_name)} (fresh) in [muted]{windowing_mode}[/]…")
     exit_code, _ = launch(
@@ -178,6 +200,7 @@ def scratch(
         choice=choice,
         windower=windower,
         unsafe=unsafe_mode,
+        remote_control=remote_control_on,
     )
     if exit_code != 0:
         raise typer.Exit(code=exit_code)

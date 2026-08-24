@@ -233,13 +233,25 @@ Five things to keep true when touching this:
 The registered set is `claude`, `codex`, `gemini`, `antigravity` (Google Antigravity's `agy` CLI), plus `managed` (scaffold; see ADR 0002 and `docs/designs/sessions-and-windowing.md`). To wire another:
 1. Create `src/goblin_watcher/agents/<name>.py` with `spawn_command`, `headless_command`, `resume_command`, `capture_session_id`, `list_sessions`, `read_transcript`, `read_tail`, `env`.
 2. Declare `transcripts: TranscriptCapability` on the class — `PARSEABLE_TRANSCRIPTS` if `read_transcript` / `render_transcript` are real, otherwise `TranscriptCapability(parseable=False, reason="…")`. Stubbing them silently empties out session summaries, descriptions, turn counts, and the transcript-derived activity states (such an agent can only report `working`/`idle` off mtime, never `needs-you` or `done`); the declaration is what `gw doctor` warns from, so it has to be honest. `tests/test_agents_transcript_capability.py` asserts the declaration matches what the methods actually return.
-3. Add it to `models.AgentName`.
-4. Add it to `agents/registry.registry`.
-5. Add a row to `commands/doctor.py`'s binary check list. Agents with no local binary (e.g. `managed`) get a custom check function instead. The per-agent transcript row is generated from the registry — no doctor edit needed for that one.
-6. If the agent has project-level prerequisites (e.g. `managed` requires a remote), extend `agents.registry.validate_agent_for_project` and call it from `commands/new.py` and `commands/run.py`.
-7. Tests under `tests/test_agents_<name>.py`.
+3. Declare `supports_remote_control` (see **Remote control** below). `False` unless the CLI has a Remote-Control-shaped mode of its own; a `True` that isn't real means someone picks up their phone to an empty session list.
+4. Add it to `models.AgentName`.
+5. Add it to `agents/registry.registry`.
+6. Add a row to `commands/doctor.py`'s binary check list. Agents with no local binary (e.g. `managed`) get a custom check function instead. The per-agent transcript row is generated from the registry — no doctor edit needed for that one.
+7. If the agent has project-level prerequisites (e.g. `managed` requires a remote), extend `agents.registry.validate_agent_for_project` and call it from `commands/new.py` and `commands/run.py`.
+8. Tests under `tests/test_agents_<name>.py`.
 
 Resist adding entry-point discovery or a plugin system — keep it static.
+
+## Remote control
+
+`--remote-control` on `gw new` / `gw run` / `gw scratch` (or `defaults.remote_control`) starts the session with Claude Code's Remote Control on, so it can be driven from claude.ai/code or the Claude app while executing here. `launcher.resolve_remote_control` is the single decision point; `launch` names the session. See ADR 0013 and `docs/designs/sessions-and-windowing.md`.
+
+Four invariants when touching this:
+
+- **Resolve before you create.** The commands call `resolve_remote_control` above the branch, worktree, or scratch directory, because both of its refusals read only flags. Refusing after creating is what the first cut did, and a live trial caught it: `gw scratch --remote-control --agent codex` left an orphan directory and task record behind. Same standard as `--research`'s ticketless refusal, which has a test asserting the worktree was never built.
+- **The name is always passed, and it is `task.id`.** `claude --remote-control [name]` takes an *optional* value, so a bare flag swallows `spawn_command`'s trailing prompt argument as the session name — and the session still starts, so nothing tells you. The task id is also the useful name: the app's session list reads like `gw status`, not like the hostname. `launch` composes it, so the three spawn commands pass a bool and can't drift.
+- **Interactive only, structurally.** `launch` refuses a headless windower as a backstop, and `Agent.headless_command` takes no `remote_control` parameter at all. Print mode exits when the turn is done; a phone window onto a dead process is the failure this prevents. Don't add the parameter there to "keep the signatures symmetric".
+- **An explicit flag refuses; an inherited default declines.** `Agent.supports_remote_control` is the capability test, in the same spirit as `TranscriptCapability` — never a name check. Explicit `--remote-control` on an unsupported agent or a headless windower is a `GoblinError`; the same value inherited from config turns itself off (one muted line for the agent, silent for headless), because `defaults.*` is global while both vary per task. Keep the two paths distinct — collapsing them either breaks every codex task and every headless run for anyone who sets the default, or silently hands someone a session they can't reach.
 
 ## Tmux mode
 
