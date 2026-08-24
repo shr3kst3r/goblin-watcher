@@ -1048,8 +1048,10 @@ def test_new_remote_control_names_the_session_after_the_task(
     with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
         res = runner.invoke(app, ["new", "--branch-name", "spike/foo", "--remote-control"])
     assert res.exit_code == 0, res.output
-    assert launch.call_args.kwargs["remote_control"] == "spike-foo"
+    assert launch.call_args.kwargs["remote_control"] is True
+    # The settings table shows the name the session will carry.
     assert "remote control" in res.output
+    assert "spike-foo" in res.output
 
 
 def test_new_without_remote_control_leaves_it_off(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -1063,7 +1065,7 @@ def test_new_without_remote_control_leaves_it_off(isolated_xdg: Path, tmp_path: 
     with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
         res = runner.invoke(app, ["new", "--branch-name", "spike/foo"])
     assert res.exit_code == 0, res.output
-    assert launch.call_args.kwargs["remote_control"] is None
+    assert launch.call_args.kwargs["remote_control"] is False
 
 
 def test_new_remote_control_refuses_an_agent_without_it(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -1082,26 +1084,56 @@ def test_new_remote_control_refuses_an_agent_without_it(isolated_xdg: Path, tmp_
     assert res.exit_code != 0
     assert "no remote-control mode" in str(res.exception)
     launch.assert_not_called()
+    # Refused before the branch/worktree was created.
+    assert state.list_tasks(state.get_project("alpha")) == []
 
 
 def test_new_remote_control_refuses_headless_windowing(isolated_xdg: Path, tmp_path: Path) -> None:
     """Print mode exits when the turn is done; there would be nothing to
     remote control."""
+    from unittest.mock import patch
+
     repo = tmp_path / "alpha"
     _init_repo(repo)
     _register_project(repo)
 
     runner = CliRunner()
-    res = runner.invoke(
-        app,
-        [
-            "new",
-            "--branch-name",
-            "spike/foo",
-            "--remote-control",
-            "--windowing",
-            "headless",
-        ],
-    )
+    with patch("goblin_watcher.commands.new.launch") as launch:
+        res = runner.invoke(
+            app,
+            [
+                "new",
+                "--branch-name",
+                "spike/foo",
+                "--remote-control",
+                "--windowing",
+                "headless",
+            ],
+        )
     assert res.exit_code != 0
     assert "needs an interactive session" in str(res.exception)
+    launch.assert_not_called()
+    # Refused before the branch/worktree was created.
+    assert state.list_tasks(state.get_project("alpha")) == []
+
+
+def test_new_config_remote_control_does_not_break_headless_runs(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """`defaults.remote_control = true` alongside a headless fleet is ordinary;
+    it turns itself off rather than refusing the run."""
+    from unittest.mock import patch
+
+    repo = tmp_path / "alpha"
+    _init_repo(repo)
+    _register_project(repo)
+
+    runner = CliRunner()
+    assert runner.invoke(app, ["config", "set", "defaults.remote_control", "true"]).exit_code == 0
+    with patch("goblin_watcher.commands.new.launch", return_value=(0, None)) as launch:
+        res = runner.invoke(
+            app,
+            ["new", "--branch-name", "spike/foo", "--windowing", "headless"],
+        )
+    assert res.exit_code == 0, res.output
+    assert launch.call_args.kwargs["remote_control"] is False

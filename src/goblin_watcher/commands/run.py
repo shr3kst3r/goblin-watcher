@@ -272,11 +272,11 @@ def run(
     # After the picker: resuming a session recorded under a different agent
     # rebinds `agent_obj`, and remote control is a property of the agent that
     # actually launches.
-    remote_control_name = resolve_remote_control(
+    remote_control_on = resolve_remote_control(
         requested=remote_control,
         default=cfg.defaults.remote_control,
         agent=agent_obj,
-        task=task,
+        windower=windower,
     )
     print_settings(
         [
@@ -286,7 +286,7 @@ def run(
             ("agent", agent_name),
             ("windowing", windowing_mode),
             ("unsafe", str(unsafe_mode).lower()),
-            ("remote control", remote_control_name or "off"),
+            ("remote control", task.id if remote_control_on else "off"),
         ]
     )
     # Opt-in and fail-open (ADR 0012): unset config is a no-op, and a Linear that
@@ -305,7 +305,7 @@ def run(
         choice=choice,
         windower=windower,
         unsafe=unsafe_mode,
-        remote_control=remote_control_name,
+        remote_control=remote_control_on,
     )
     if exit_code != 0:
         raise typer.Exit(code=exit_code)

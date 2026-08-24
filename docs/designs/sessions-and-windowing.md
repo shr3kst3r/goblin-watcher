@@ -60,17 +60,21 @@ Two caveats worth knowing before scheduling one. An unattended run wants `unsafe
 
 Declared, not detected. `Agent.supports_remote_control` sits alongside `transcripts: TranscriptCapability`, and `spawn_command` / `resume_command` take a `remote_control: str | None` naming the session; agents without the feature ignore it the way they already ignore `session_id`. `launcher.resolve_remote_control` is the one decision point:
 
-| request | agent supports it | outcome |
+| request | can this launch use it? | outcome |
 |---|---|---|
 | `--remote-control` | yes | on, session named `task.id` |
-| `--remote-control` | no | `GoblinError` — the flag's whole point is reaching the session, and one you can't reach is worse than none |
-| `defaults.remote_control = true` | no | one muted line, session starts without it — the config value is global while the agent varies per task |
+| `--remote-control` | no — agent lacks it | `GoblinError` — the flag's whole point is reaching the session, and one you can't reach is worse than none |
+| `--remote-control` | no — headless windower | `GoblinError`, same reasoning |
+| `defaults.remote_control = true` | no — agent lacks it | one muted line, session starts without it |
+| `defaults.remote_control = true` | no — headless windower | silently off; a headless fleet is what that config default also runs all day |
 | `--no-remote-control` | either | off, overriding config |
+
+The config rows are not an error on purpose: `defaults.*` is global while the agent and the windower vary per task, and a default that breaks a subset of launches is a default nobody can set. The commands call this **before** creating a task, worktree, or scratch directory — both refusals read only flags, so neither has any reason to wait until there is something on disk to orphan.
 
 Two invariants:
 
-- **The name is always passed, and it is the task id.** `--remote-control [name]` takes an *optional* value, so a bare flag would swallow `spawn_command`'s trailing prompt argument as the session name — silently, since the session would still start. The task id also beats claude's hostname-derived default, which distinguishes nothing when six agents share a laptop: the app's session list reads `eng-123`, `gh-42`, exactly as `gw status` does.
-- **Interactive only.** `launch` refuses a headless windower before anything is persisted or spawned, next to the headless-resume refusal — print mode exits when the turn is done, so there is nothing left to control. `headless_command` takes no `remote_control` parameter at all, which is what keeps that refusal structural. `--windowing tmux` is the pairing worth reaching for: the session dies with its terminal, and a tmux pane survives one.
+- **The name is always passed, and it is the task id.** `--remote-control [name]` takes an *optional* value, so a bare flag would swallow `spawn_command`'s trailing prompt argument as the session name — silently, since the session would still start. The task id also beats claude's hostname-derived default, which distinguishes nothing when six agents share a laptop: the app's session list reads `eng-123`, `gh-42`, exactly as `gw status` does. `launch` composes the name from the task it already holds, so the three spawn commands pass a bool and can't drift on it.
+- **Interactive only, in two places.** The command layer refuses it before creating anything; `launch` refuses it again next to the headless-resume check, as a backstop for programmatic callers. `headless_command` takes no `remote_control` parameter at all, so the combination can't be expressed rather than merely being rejected. `--windowing tmux` is the pairing worth reaching for: the session dies with its terminal, and a tmux pane survives one.
 
 Nothing is persisted, so `gw status` can't report it (same reasoning as ADR 0010's refusal to cache activity state). Mid-session, `gw session send <task-id> "/remote-control"` types the slash command into a live pane and carries the conversation over. See ADR 0013.
 

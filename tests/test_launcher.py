@@ -897,65 +897,76 @@ class _NoRemoteControlAgent(_StubAgent):
     supports_remote_control = False
 
 
-def test_resolve_remote_control_off_by_default(isolated_xdg: Path, tmp_path: Path) -> None:
-    task = _bootstrap(tmp_path)
-    assert (
-        resolve_remote_control(requested=None, default=False, agent=_StubAgent(), task=task) is None
+def test_resolve_remote_control_off_by_default() -> None:
+    assert not resolve_remote_control(
+        requested=None, default=False, agent=_StubAgent(), windower=_InlineWindower()
     )
 
 
-def test_resolve_remote_control_names_the_session_after_the_task(
-    isolated_xdg: Path, tmp_path: Path
-) -> None:
-    """The name is what makes the Claude app's session list read like `gw status`."""
-    task = _bootstrap(tmp_path)
-    assert (
-        resolve_remote_control(requested=True, default=False, agent=_StubAgent(), task=task)
-        == task.id
+def test_resolve_remote_control_on_from_flag_or_config() -> None:
+    assert resolve_remote_control(
+        requested=True, default=False, agent=_StubAgent(), windower=_InlineWindower()
     )
-    # Config-supplied, same answer.
-    assert (
-        resolve_remote_control(requested=None, default=True, agent=_StubAgent(), task=task)
-        == task.id
+    assert resolve_remote_control(
+        requested=None, default=True, agent=_StubAgent(), windower=_InlineWindower()
     )
 
 
-def test_no_remote_control_overrides_the_config_default(isolated_xdg: Path, tmp_path: Path) -> None:
-    task = _bootstrap(tmp_path)
-    assert (
-        resolve_remote_control(requested=False, default=True, agent=_StubAgent(), task=task) is None
+def test_no_remote_control_overrides_the_config_default() -> None:
+    assert not resolve_remote_control(
+        requested=False, default=True, agent=_StubAgent(), windower=_InlineWindower()
     )
 
 
-def test_explicit_remote_control_on_an_unsupported_agent_is_an_error(
-    isolated_xdg: Path, tmp_path: Path
-) -> None:
+def test_explicit_remote_control_on_an_unsupported_agent_is_an_error() -> None:
     """Silently launching a session you can't reach from your phone is worse
     than not launching one."""
-    task = _bootstrap(tmp_path)
     with pytest.raises(GoblinError) as exc:
         resolve_remote_control(
-            requested=True, default=False, agent=_NoRemoteControlAgent(), task=task
+            requested=True,
+            default=False,
+            agent=_NoRemoteControlAgent(),
+            windower=_InlineWindower(),
         )
     assert "no remote-control mode" in str(exc.value)
 
 
 def test_config_remote_control_on_an_unsupported_agent_just_warns(
-    isolated_xdg: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`defaults.remote_control` is global while the agent varies per task, so
     inheriting it somewhere it can't apply must not block the launch."""
-    task = _bootstrap(tmp_path)
-    assert (
-        resolve_remote_control(
-            requested=None, default=True, agent=_NoRemoteControlAgent(), task=task
-        )
-        is None
+    assert not resolve_remote_control(
+        requested=None, default=True, agent=_NoRemoteControlAgent(), windower=_InlineWindower()
     )
     assert "no remote-control mode" in capsys.readouterr().out
 
 
-def test_remote_control_name_reaches_a_fresh_spawn(isolated_xdg: Path, tmp_path: Path) -> None:
+def test_explicit_remote_control_on_a_headless_windower_is_an_error() -> None:
+    """Print mode exits when the turn is done — a phone window onto a process
+    that is already gone."""
+    with pytest.raises(GoblinError) as exc:
+        resolve_remote_control(
+            requested=True, default=False, agent=_StubAgent(), windower=_HeadlessWindower()
+        )
+    assert "needs an interactive session" in str(exc.value)
+
+
+def test_config_remote_control_is_silently_off_when_headless(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A headless fleet run is exactly what someone with the config default set
+    also does all day; erroring would break every one of them."""
+    assert not resolve_remote_control(
+        requested=None, default=True, agent=_StubAgent(), windower=_HeadlessWindower()
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_launch_names_the_remote_control_session_after_the_task(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    """The name is what makes the Claude app's session list read like `gw status`."""
     task = _bootstrap(tmp_path)
     proj = state.get_project("alpha")
     agent = _StubAgent(preassign_id="pre-id")
@@ -965,9 +976,25 @@ def test_remote_control_name_reaches_a_fresh_spawn(isolated_xdg: Path, tmp_path:
         agent=agent,
         choice=Fresh(prompt="kick off"),
         windower=_InlineWindower(),
-        remote_control="spike-foo",
+        remote_control=True,
     )
-    assert agent.remote_control_names == ["spike-foo"]
+    assert agent.remote_control_names == [task.id]
+
+
+def test_launch_passes_no_name_when_remote_control_is_off(
+    isolated_xdg: Path, tmp_path: Path
+) -> None:
+    task = _bootstrap(tmp_path)
+    proj = state.get_project("alpha")
+    agent = _StubAgent(preassign_id="pre-id")
+    launch(
+        project=proj,
+        task=task,
+        agent=agent,
+        choice=Fresh(prompt="kick off"),
+        windower=_InlineWindower(),
+    )
+    assert agent.remote_control_names == [None]
 
 
 def test_remote_control_name_reaches_a_resume(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -981,14 +1008,15 @@ def test_remote_control_name_reaches_a_resume(isolated_xdg: Path, tmp_path: Path
         agent=agent,
         choice=Resume(session_id="sess-1"),
         windower=_InlineWindower(),
-        remote_control="spike-foo",
+        remote_control=True,
     )
-    assert agent.remote_control_names == ["spike-foo"]
+    assert agent.remote_control_names == [task.id]
 
 
-def test_headless_refuses_remote_control(isolated_xdg: Path, tmp_path: Path) -> None:
-    """Print mode exits when the turn is done — a phone window onto a process
-    that is already gone. Refused before anything is persisted or spawned."""
+def test_launch_backstops_the_headless_refusal(isolated_xdg: Path, tmp_path: Path) -> None:
+    """The command layer refuses this before it creates anything; `launch` is
+    what covers a programmatic caller and makes `headless_command`'s missing
+    parameter safe."""
     task = _bootstrap(tmp_path)
     proj = state.get_project("alpha")
     windower = _HeadlessWindower()
@@ -1000,7 +1028,7 @@ def test_headless_refuses_remote_control(isolated_xdg: Path, tmp_path: Path) -> 
             agent=_StubAgent(),
             choice=Fresh(prompt="kick off"),
             windower=windower,
-            remote_control="spike-foo",
+            remote_control=True,
         )
     assert "needs an interactive session" in str(exc.value)
     assert windower.observed_cmd is None

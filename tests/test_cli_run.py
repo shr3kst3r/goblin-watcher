@@ -593,7 +593,7 @@ def test_run_remote_control_reaches_the_launcher(isolated_xdg: Path, tmp_path: P
             ["run", "spike-foo", "--project", "alpha", "--new", "--remote-control"],
         )
     assert res.exit_code == 0, res.output
-    assert launch.call_args.kwargs["remote_control"] == "spike-foo"
+    assert launch.call_args.kwargs["remote_control"] is True
 
 
 def test_run_remote_control_defaults_off(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -602,4 +602,4 @@ def test_run_remote_control_defaults_off(isolated_xdg: Path, tmp_path: Path) -> 
     with patch("goblin_watcher.commands.run.launch_agent", return_value=(0, None)) as launch:
         res = runner.invoke(app, ["run", "spike-foo", "--project", "alpha", "--new"])
     assert res.exit_code == 0, res.output
-    assert launch.call_args.kwargs["remote_control"] is None
+    assert launch.call_args.kwargs["remote_control"] is False

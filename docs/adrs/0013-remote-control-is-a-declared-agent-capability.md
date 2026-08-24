@@ -54,24 +54,37 @@ Three parts.
    session *name*; agents that don't support it accept and ignore it, exactly as
    they already do for `session_id`.
 
-2. **`launcher.resolve_remote_control` is the single decision point**, and it
-   splits on where the request came from. An explicit `--remote-control` against
-   an agent without the feature is a `GoblinError` — the point of the flag is
-   reaching the session from a phone, and quietly launching one you can't reach
-   is worse than not launching. The same value inherited from
-   `defaults.remote_control` costs one muted line and the session starts anyway.
+2. **`launcher.resolve_remote_control` is the single decision point**, called
+   by the command layer *before* it creates a task, worktree, or scratch
+   directory. Both of its refusals are decidable from the flags alone, and a
+   command that builds a checkout and then rejects its own arguments is the
+   failure `--research`'s ticket check already refuses to be (ADR 0006).
+
+   It splits on where the request came from. An explicit `--remote-control`
+   against an agent without the feature — or against a headless windower — is a
+   `GoblinError`: the point of the flag is reaching the session from a phone,
+   and quietly launching one you can't reach is worse than not launching. The
+   same value inherited from `defaults.remote_control` is not an error, because
+   that value is global while the agent and the windower vary per task. An
+   unsupported agent costs one muted line; a headless run turns it off silently,
+   since a headless fleet is exactly what someone with the default set also runs
+   all day and nobody reads an unattended log to be told a flag they never typed
+   didn't apply.
 
 3. **The name is always passed, and it is `task.id`.** Never omitted, because of
    the prompt-swallowing hazard above; `task.id` because claude's own default is
    derived from the hostname, which distinguishes nothing when six agents share
    one laptop. The Claude app's session list then reads `eng-123`, `gh-42` — the
-   same identifiers `gw status` prints.
+   same identifiers `gw status` prints. `launch` composes it, from the task it
+   already holds, so the three spawn commands pass a bool and cannot drift on
+   the naming.
 
-Remote control is **interactive only**. `launch` refuses the combination with a
-headless windower before anything is persisted or spawned, next to the existing
-refusal of headless + resume. `Agent.headless_command` does not take a
-`remote_control` parameter at all, so the refusal is structural rather than a
-convention someone has to remember.
+Remote control is **interactive only**, and that holds in two places. The
+command layer refuses it up front, as above. `launch` refuses it again next to
+the existing headless + resume check — a backstop for programmatic callers, and
+what makes it safe that `Agent.headless_command` does not take a
+`remote_control` parameter at all. The missing parameter is the structural half:
+the combination cannot be expressed, not merely rejected.
 
 Resume carries the flag too: "keep going on this from the couch" is the case
 resume exists for.
@@ -124,10 +137,17 @@ would mean a round trip per session on every render.
   silent degradation `TranscriptCapability` exists to prevent, and here the user
   finds out by picking up their phone and finding nothing there.
 
-- **Error for an unsupported agent regardless of where the request came from.**
-  Rejected as hostile to the config path: `defaults.remote_control = true` would
-  then break every codex task, and a global default that breaks a subset of
-  launches is a default nobody can set.
+- **Error for an unsupported agent or windower regardless of where the request
+  came from.** Rejected as hostile to the config path:
+  `defaults.remote_control = true` would then break every codex task and every
+  headless fleet run, and a global default that breaks a subset of launches is a
+  default nobody can set.
+
+- **Refuse inside `launch` only, and skip the command-layer check.** This is
+  what the first implementation did, and a live trial found it: `gw scratch
+  --remote-control --agent codex` created the directory and the task record,
+  then errored. Both refusals read only flags, so there is no reason for either
+  to wait until there is something on disk to orphan.
 
 - **Make it work headless by keeping the process alive.** Rejected — that is the
   resident supervisor ADR 0005 and ADR 0007 both declined, arrived at from a new

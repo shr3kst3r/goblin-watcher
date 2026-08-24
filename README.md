@@ -843,7 +843,8 @@ Four things worth knowing:
 
 - **The local process has to stay up.** Close the terminal and the session goes offline. Pair it with `--windowing tmux`, which survives a closed terminal and an SSH disconnect.
 - **Interactive only.** `--windowing headless` is refused: print mode exits when the turn is done, so there would be nothing left to control.
-- **claude only.** codex, gemini, and antigravity have no equivalent. Asking for it explicitly with one of those is an error; inheriting it from `defaults.remote_control` costs one muted line and the session starts without it.
+- **claude only.** codex, gemini, and antigravity have no equivalent.
+- **An explicit flag refuses; the config default declines.** `--remote-control` on an agent or windowing mode that can't use it is an error, so you never get a session you can't reach. The same value inherited from `defaults.remote_control` just turns itself off for that launch — otherwise setting it once would break every codex task and every headless fleet run.
 - **Needs a claude.ai login** (`/login`) — API keys aren't supported — and on Team/Enterprise an Owner has to enable Remote Control first.
 
 Already mid-session? `gw session send <task-id> "/remote-control"` types the slash command into a live tmux pane, carrying the conversation over.

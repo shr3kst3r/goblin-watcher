@@ -465,6 +465,20 @@ def new(
             ),
         )
 
+    # Resolved above the source branch, and so above anything on disk: both of
+    # remote control's refusals are decidable from the flags alone, and a `gw new`
+    # that builds a branch and worktree before rejecting its own arguments is the
+    # failure the ticketless-mode check already refuses to be.
+    agent_name = agent or (cfg.defaults.agent) or "claude"
+    windowing_mode = windowing or cfg.defaults.windowing
+    windower = get_windower(windowing_mode)
+    remote_control_on = resolve_remote_control(
+        requested=remote_control,
+        default=cfg.defaults.remote_control,
+        agent=get_agent(agent_name),
+        windower=windower,
+    )
+
     # --rm-force implies --rm; `force` lets removal proceed past a dirty worktree.
     remove = rm or rm_force
     if linear is not None:
@@ -503,15 +517,7 @@ def new(
         r for r in task.all_repos() if r.project != task.project or created.materialized
     ]
 
-    agent_name = agent or (cfg.defaults.agent) or "claude"
-    windowing_mode = windowing or cfg.defaults.windowing
     unsafe_mode = cfg.defaults.unsafe if unsafe is None else unsafe
-    remote_control_name = resolve_remote_control(
-        requested=remote_control,
-        default=cfg.defaults.remote_control,
-        agent=get_agent(agent_name),
-        task=task,
-    )
     source_label = _source_label(linear, issue, branch, branch_name, branch_auto, dir, pr, task)
 
     print_success(f"Created task {task.id!r} on branch {task.branch!r}")
@@ -541,7 +547,7 @@ def new(
         ("agent", agent_name),
         ("windowing", windowing_mode),
         ("unsafe", str(unsafe_mode).lower()),
-        ("remote control", remote_control_name or "off"),
+        ("remote control", task.id if remote_control_on else "off"),
         ("no_launch", str(no_launch).lower()),
         ("mode", mode_spec.name if mode_spec is not None else "(default)"),
     ]
@@ -567,7 +573,6 @@ def new(
 
     validate_agent_for_project(agent_name, proj)
     agent_obj = get_agent(agent_name)
-    windower = get_windower(windowing_mode)
 
     # A seed mode's message is used verbatim: `/codex:adversarial-review` only
     # fires if it is the entire user message, so it can't go through the seed
@@ -590,7 +595,7 @@ def new(
         choice=choice,
         windower=windower,
         unsafe=unsafe_mode,
-        remote_control=remote_control_name,
+        remote_control=remote_control_on,
     )
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
