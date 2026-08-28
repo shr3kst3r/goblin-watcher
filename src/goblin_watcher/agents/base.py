@@ -226,3 +226,26 @@ class Agent(Protocol):
     def env(self) -> dict[str, str]:
         """Extra env vars to inject when spawning. Rarely needed."""
         ...
+
+    def pretrust_workspace(self, cwd: Path) -> bool:
+        """Pre-accept this agent's first-run "do you trust this folder?" prompt.
+
+        Declared per agent for the same reason `transcripts` and
+        `supports_remote_control` are: the answer varies, and a name check at
+        the call site would go stale the moment a fifth CLI grew one. An agent
+        with no such prompt — or no way to record the answer that isn't
+        reverse-engineering its config — returns False.
+
+        This matters more for gw than for a person at a terminal. gw hands
+        every task a directory the agent has never seen (a fresh worktree, a
+        multi-repo workspace, a scratch space), so a per-directory trust gate
+        is a gate on *every* task, and a headless fleet run meets it with
+        nobody there to answer.
+
+        Return True only when trust was actually recorded — an already-trusted
+        directory is False, so the common path can be a pure read.
+        Implementations write the agent's own config file and therefore own
+        its format; raising is fine, `workspace_trust.apply` is the fail-open
+        wrapper (ADR 0014).
+        """
+        ...

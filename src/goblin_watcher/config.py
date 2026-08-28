@@ -75,6 +75,14 @@ class DefaultsConfig(BaseModel):
     # launches anyway (`launcher.resolve_remote_control`). `--remote-control` /
     # `--no-remote-control` overrides this per invocation.
     remote_control: bool = False
+    # Pre-accept the agent's first-run "do you trust this folder?" prompt for
+    # the directory a task launches in (ADR 0014). On by default: gw makes that
+    # directory itself, out of a repo the user already trusted, and a prompt on
+    # every new task is the one piece of friction that survives
+    # `unsafe = true` — a headless run meets it with nobody there to answer.
+    # Set false to leave every agent's config alone and answer the dialog
+    # yourself.
+    trust_workspaces: bool = True
     # LLM-generated session descriptions (lazy, background-refreshed).
     description_ttl_seconds: int = 900  # 15 minutes
     description_agent: str = "claude"  # "claude" | "codex" | "off"

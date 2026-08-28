@@ -95,6 +95,11 @@ class CodexAgent:
         del cwd, session_id, remote_control
         return [*self._prefix(unsafe), "resume"]
 
+    def pretrust_workspace(self, cwd: Path) -> bool:
+        # No-op: the CLI keeps its own approval flow and gw does not write `~/.codex`.
+        del cwd
+        return False
+
     def env(self) -> dict[str, str]:
         return {}
 

@@ -18,9 +18,10 @@ The list-of-sessions shape is the load-bearing piece. It enables the headline UX
 
 1. **Source resolution** (`commands/new.py`) — a Task is born from one of four sources: `--linear`, `--branch-name`, `--branch`, `--dir`. Each path normalizes to (project, branch, worktree, optional LinearIssue).
 2. **Spawn decision** (`agents/launcher.py`) — fresh vs resume. The CLI picks based on flags (`--session`, `--new`) and `task.sessions`. With multiple candidates, `picker.choose_session` shows a questionary picker.
-3. **Run** (`agents/launcher.launch`) — invokes `agent.spawn_command(prompt=...)` or `agent.resume_command(session_id=...)`, hands the argv off to a `Windower`.
-4. **Capture** — after the agent process returns, `agent.capture_session_id(cwd)` reads the agent's session store for the newest entry; falls back to a synthesized UUID for agents that don't expose stable ids.
-5. **Summary refresh** (`sessions.refresh_summary`) — parses the agent's transcript file for turn count and last-message snippets. Lazy-refresh on read; eager refresh on session exit. Stale threshold defaults to 30s (`config.defaults.summary_ttl_seconds`).
+3. **Pre-trust** (`workspace_trust.apply`) — records the launch directory as trusted with the agent, so a brand-new worktree or scratch space doesn't open on a "do you trust this folder?" dialog (below).
+4. **Run** (`agents/launcher.launch`) — invokes `agent.spawn_command(prompt=...)` or `agent.resume_command(session_id=...)`, hands the argv off to a `Windower`.
+5. **Capture** — after the agent process returns, `agent.capture_session_id(cwd)` reads the agent's session store for the newest entry; falls back to a synthesized UUID for agents that don't expose stable ids.
+6. **Summary refresh** (`sessions.refresh_summary`) — parses the agent's transcript file for turn count and last-message snippets. Lazy-refresh on read; eager refresh on session exit. Stale threshold defaults to 30s (`config.defaults.summary_ttl_seconds`).
 
 ## Windowing
 
@@ -97,7 +98,7 @@ Text and Enter are two `send-keys` calls: `-l --` sends the message literally (s
 
 ## Agent abstraction
 
-`Agent` protocol (`agents/base.py`) has seven methods:
+`Agent` protocol (`agents/base.py`) has eight methods:
 - `spawn_command(prompt, cwd, …, remote_control)` — argv for a fresh interactive session.
 - `headless_command(prompt, cwd)` — argv for the same, in the CLI's non-interactive print/exec mode.
 - `resume_command(session_id, cwd, …, remote_control)` — argv for resume; `session_id=None` for cwd-scoped continue.
@@ -105,6 +106,7 @@ Text and Enter are two `send-keys` calls: `-l --` sends the message literally (s
 - `list_sessions(cwd)` — for the path-driven picker.
 - `read_transcript(session_id, cwd)` — for summary refresh.
 - `env()` — extra environment overlay.
+- `pretrust_workspace(cwd)` — pre-accept this agent's first-run trust prompt for `cwd`; `False` for agents that have none.
 
 Plus two declared class attributes: `transcripts` (below) and `supports_remote_control` (above), both there so a missing feature announces itself instead of quietly doing nothing.
 
@@ -126,6 +128,14 @@ The declaration is currently advisory only — nothing in the summary-refresh or
 
 Antigravity (`agy`) maps workspaces via `~/.gemini/antigravity-cli/cache/last_conversations.json` (a map of absolute workspace path → most recent conversation id) and reads JSONL transcripts under `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl`. Note that `agy -p` is *headless* print mode — spawning an interactive session uses `--prompt-interactive`, and `-p` is what `headless_command` returns.
 
+
+### Workspace trust (claude only)
+
+Claude Code asks once per directory whether you trust it, and persists the answer at `projects["<dir>"].hasTrustDialogAccepted` in `~/.claude.json`. Nothing skips the dialog — not `--dangerously-skip-permissions`, and there is no env var — so for `gw`, whose every task launches in a directory the agent has never seen, it is a prompt per task and a hard stop for an unattended run.
+
+`launcher.launch` therefore calls `workspace_trust.apply(agent, cwd)` before dispatch. The module is the config gate (`defaults.trust_workspaces`, default `true`) and a fail-open wrapper; the write itself is `Agent.pretrust_workspace`, a third declared capability alongside `transcripts` and `supports_remote_control`. Only claude implements it — the other four return `False` with a comment naming why.
+
+The write is deliberately timid: it never creates `.claude.json` (a missing one means claude has never run on this machine, and that file holds its auth), it returns without writing when the key is already `true`, and it runs under a `gw` lock on a `.claude.json.gw.lock` sidecar so parallel launches don't lose each other's keys. Both the literal and the `resolve()`d `cwd` are seeded, since node resolves symlinks in `process.cwd()`. Anything that goes wrong costs one muted line and the dialog you would have had anyway. See ADR 0014.
 
 ### Managed agent (scaffold only)
 

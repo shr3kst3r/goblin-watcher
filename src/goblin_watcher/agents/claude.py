@@ -9,11 +9,13 @@ replaces `/` with `-` and prefixes with `-` (e.g. `/tmp/foo` becomes
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goblin_watcher import locks, state
 from goblin_watcher.agents._tail import tail_records, tail_text
 from goblin_watcher.agents._usage import BucketAccumulator, as_int, local_day
 from goblin_watcher.agents.base import (
@@ -102,6 +104,9 @@ class ClaudeAgent:
 
     def env(self) -> dict[str, str]:
         return {}
+
+    def pretrust_workspace(self, cwd: Path) -> bool:
+        return _pretrust_workspace(cwd)
 
     # ----- session discovery / transcript parsing ------------------------------
 
@@ -477,3 +482,84 @@ def _render_transcript(path: Path) -> str | None:
     if not parts:
         return None
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# First-run workspace trust.
+#
+# Claude Code gates the first run in any directory behind a "Quick safety
+# check: is this a project you created or one you trust?" dialog and persists
+# the answer in its global config under
+# `projects["<dir>"].hasTrustDialogAccepted`. There is no flag and no env var
+# that skips it — `--dangerously-skip-permissions` does not — and the key is
+# the remedy claude's own error messages name ("Run Claude Code in that folder
+# once and accept the trust dialog, or set
+# projects[...].hasTrustDialogAccepted: true in ~/.claude.json"). See ADR 0014.
+
+_TRUST_KEY = "hasTrustDialogAccepted"
+
+
+def _global_config_path() -> Path:
+    """Where claude keeps `.claude.json` — `$CLAUDE_CONFIG_DIR` or `$HOME`."""
+    root = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(root) if root else Path.home()) / ".claude.json"
+
+
+def _trust_keys(cwd: Path) -> list[str]:
+    """The path strings claude might key this directory's config on.
+
+    Node resolves symlinks in `process.cwd()`, so a directory reached through a
+    symlinked parent (`/tmp` -> `/private/tmp` on macOS) is keyed on the
+    physical path rather than the one gw passed. Seeding both when they differ
+    costs one extra key and removes the guess.
+    """
+    literal = str(cwd)
+    try:
+        resolved = str(cwd.resolve())
+    except OSError:
+        return [literal]
+    return [resolved] if resolved == literal else [resolved, literal]
+
+
+def _pretrust_workspace(cwd: Path) -> bool:
+    """Mark `cwd` trusted in claude's global config. True when a write happened.
+
+    Read-modify-write of the whole document, under a gw lock so parallel
+    launches don't lose each other's keys. claude does not take that lock, so
+    the residual race is a claude write landing between this read and this
+    write; the window is one small mutation wide, and the already-trusted path
+    — every resume, and every launch after the first in a directory — returns
+    without writing at all.
+
+    A missing config file is left alone rather than created: `.claude.json` is
+    where claude's onboarding and auth state live, and inventing one is not
+    gw's business.
+    """
+    path = _global_config_path()
+    if not path.exists():
+        return False
+    keys = _trust_keys(cwd)
+    lock = path.parent / f"{path.name}.gw.lock"
+    with locks.exclusive(lock):
+        raw = json.loads(path.read_text())
+        if not isinstance(raw, dict):
+            return False
+        projects = raw.get("projects")
+        if projects is None:
+            projects = {}
+            raw["projects"] = projects
+        if not isinstance(projects, dict):
+            return False
+        wrote = False
+        for key in keys:
+            entry = projects.get(key)
+            if not isinstance(entry, dict):
+                entry = {}
+                projects[key] = entry
+            if entry.get(_TRUST_KEY) is not True:
+                entry[_TRUST_KEY] = True
+                wrote = True
+        if not wrote:
+            return False
+        state.write_json_atomic(path, raw)
+    return True

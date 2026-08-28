@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from goblin_watcher import gh, modes, prompt_addition, sessions, state
+from goblin_watcher import gh, modes, prompt_addition, sessions, state, workspace_trust
 from goblin_watcher.agents.base import Agent
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, TaskNotFoundError
@@ -198,6 +198,11 @@ def launch(
     # A multi-repo task launches in its workspace (each repo is a subdir);
     # a single-repo task launches directly in its worktree.
     cwd = task.agent_cwd
+    # Every gw task hands the agent a directory it has never seen, so an agent
+    # that gates a new directory behind a trust dialog gates every task behind
+    # one — and a headless run stalls on it outright (ADR 0014). One call site,
+    # because `launch` is the one place a session starts.
+    workspace_trust.apply(agent, cwd)
     # Windowers receive only the agent's *extra* vars; inline merges them into
     # os.environ itself, tmux injects them into the pane command (the pane's
     # shell can't inherit this process's environment).

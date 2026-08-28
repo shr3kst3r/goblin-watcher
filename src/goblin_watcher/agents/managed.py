@@ -211,5 +211,10 @@ class ManagedAgent:
         del transcript_path
         return None
 
+    def pretrust_workspace(self, cwd: Path) -> bool:
+        # No-op: nothing runs locally, so no local directory is ever trusted.
+        del cwd
+        return False
+
     def env(self) -> dict[str, str]:
         return {}
