@@ -64,6 +64,11 @@ class GeminiAgent:
         del session_id, cwd, remote_control
         return [*self._prefix(unsafe), "--continue"]
 
+    def pretrust_workspace(self, cwd: Path) -> bool:
+        # No-op: the CLI has no persisted per-directory trust gate gw can pre-answer.
+        del cwd
+        return False
+
     def env(self) -> dict[str, str]:
         return {}
 

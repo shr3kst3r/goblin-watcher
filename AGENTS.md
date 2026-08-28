@@ -23,6 +23,13 @@ Multiple sessions per task are allowed (e.g. two claude conversations on the sam
 ## Safety
 
 - Never commit secrets. `LINEAR_API_KEY` lives in your shell or in `~/.config/goblin-watcher/config.toml` (literal or `op://...` reference). `.env*` is gitignored as a fallback.
+- **`gw` writes one key outside its own storage**: to stop every new worktree
+  and scratch space from meeting Claude Code's "do you trust this folder?"
+  dialog, `gw` pre-accepts it for the directory a task launches in, by setting
+  `projects["<dir>"].hasTrustDialogAccepted` in `~/.claude.json` — the remedy
+  claude's own error messages name. Deliberate exception to the write boundary
+  below; see **Workspace trust** and ADR 0014. `gw config set
+  defaults.trust_workspaces false` turns it off.
 - **`defaults.unsafe = true` is the default**: agents launch with their bypass-permission flag (e.g. claude's `--dangerously-skip-permissions`) unless you set `unsafe = false` in config (`gw config set defaults.unsafe false`) or pass `--no-unsafe`. Deliberate — gw is built for parallel autonomous agents — but know what you're opting into.
 
 ## Architecture map (top-level)
@@ -53,6 +60,7 @@ src/goblin_watcher/
 ├── usage.py               # token rollups + list-price cost estimates (docs/designs/token-usage-and-cost.md)
 ├── workspace.py           # multi-repo task workspaces (promote + attach repos)
 ├── worktree_setup.py      # [setup] copy/link/run bootstrap applied to new worktrees (ADR 0007)
+├── workspace_trust.py     # pre-accepts the agent's first-run trust prompt (ADR 0014)
 ├── picker.py              # questionary-backed interactive session picker
 ├── linear/                # GraphQL client + queries (httpx)
 ├── agents/                # Agent protocol + claude/codex/gemini/antigravity impls + launcher
@@ -71,7 +79,7 @@ src/goblin_watcher/
 - **Atomic writes**: state JSON via temp file + `Path.replace()`.
 - **Branch ops** go through `git.py`. Don't reach into `git._run` from elsewhere.
 - **Agent registry is static.** Don't add a plugin system.
-- **Two-tier storage**: global registry under `$XDG_DATA_HOME/goblin-watcher/`; per-project records under `<project_root>/.goblin/`. Worktrees at `<project_root>/.worktrees/<branch>/`. New clones (via `--repo`) land in `~/goblin/<project>/`; `--dir` adopts an existing checkout in place. Never touch the user's tracked `.gitignore` — append patterns to `.git/info/exclude` instead.
+- **Two-tier storage**: global registry under `$XDG_DATA_HOME/goblin-watcher/`; per-project records under `<project_root>/.goblin/`. Worktrees at `<project_root>/.worktrees/<branch>/`. New clones (via `--repo`) land in `~/goblin/<project>/`; `--dir` adopts an existing checkout in place. Never touch the user's tracked `.gitignore` — append patterns to `.git/info/exclude` instead. The one write outside all of that is the trust key in `~/.claude.json` (see **Workspace trust**).
 
 ## Toolchain
 
@@ -227,6 +235,39 @@ Five things to keep true when touching this:
 - **Declining is free, acting is rate-limited.** A handler returns `ActionResult(ran=False, …)` to decline; that journals `action-skipped`, starts no cooldown, and spends none of `max_actions_per_pass`. Only work that actually happened is charged. Guards can therefore be conservative without ever wedging a rule.
 
 `prune` calls `engine.prune_blocker` and `merge_detection` rather than reimplementing the safety checks, so the configured prune can't be weaker than the automatic one. Keep it that way.
+
+## Workspace trust
+
+Claude Code gates the first run in any directory behind a "Quick safety check:
+is this a project you created or one you trust?" dialog. gw hands the agent a
+directory it has never seen on *every* task — a fresh worktree, a workspace, a
+scratch space — so that is a prompt per task, and a headless run meets it with
+nobody there to answer. No flag skips it: `--dangerously-skip-permissions`
+doesn't, and there is no env var. gw therefore pre-accepts it, by setting
+`projects["<dir>"].hasTrustDialogAccepted` in `~/.claude.json` before launch.
+`defaults.trust_workspaces` (default `true`) is the switch. See ADR 0014.
+
+Four invariants when touching this:
+
+- **`Agent.pretrust_workspace` is a declared capability, never a name check.**
+  Same spirit as `TranscriptCapability` and `supports_remote_control`: the agent
+  owns the write because it owns the file format, and the four agents with no
+  such prompt return False with a comment saying why.
+- **`workspace_trust.apply` never raises, and `launcher.launch` is its only call
+  site.** The dialog is two keystrokes to answer by hand, so a failed
+  bookkeeping write does not get to veto the session — the posture of
+  `linear_transitions.apply` and `classify.advise`. `launch` is where every
+  session starts (`gw new`, `gw run`, `gw scratch`, interactive and headless), so
+  one call covers all of them.
+- **Never create `.claude.json`, and never write when the key is already set.**
+  A missing file means claude has never run here and its auth state is not gw's
+  to invent. The already-trusted path being a pure read is also what keeps the
+  read-modify-write race with claude down to the first launch in a directory —
+  the write itself is atomic, under a gw lock on a `.claude.json.gw.lock`
+  sidecar (ADR 0004), which claude does not take.
+- **Seed the resolved path as well as the literal one.** Node resolves symlinks
+  in `process.cwd()`, so a directory reached through a symlinked parent
+  (`/tmp` -> `/private/tmp`) is keyed on the physical path, not the one gw passed.
 
 ## Adding an agent
 
