@@ -152,3 +152,19 @@ def workspace_root() -> Path:
 def task_workspace(task_id: str) -> Path:
     """Workspace directory for a multi-repo task; each repo's worktree is a subdir."""
     return workspace_root() / task_id
+
+
+def pane_scripts_dir() -> Path:
+    """Spilled tmux pane commands, for spawns whose argv exceeds tmux's message cap."""
+    return data_dir() / "panes"
+
+
+def pane_script_file(task_id: str, session_id: str | None) -> Path:
+    """Script holding one pane's launch command.
+
+    Keyed by task and session so a re-spawn overwrites its own file rather than
+    accumulating one per launch. Read once, at pane startup — but kept
+    afterwards, because with the command spilled out of tmux's argv this file is
+    the only record of what the pane actually ran.
+    """
+    return pane_scripts_dir() / f"{task_id}-{session_id or 'nosession'}.sh"
