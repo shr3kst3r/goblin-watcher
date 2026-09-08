@@ -1,12 +1,30 @@
+import os
+import shlex
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from goblin_watcher import paths
 from goblin_watcher.errors import GoblinError
 from goblin_watcher.models import Task
-from goblin_watcher.windowing.tmux import TmuxWindower
+from goblin_watcher.windowing.tmux import (
+    _SCRIPT_TTL_SECONDS,
+    TmuxWindower,
+    _argv_size,
+    _prune_pane_scripts,
+)
+
+# tmux's client refuses a command whose argv exceeds MAX_IMSGSIZE. Asserting
+# against the real ceiling (rather than gw's budget) is what makes these tests
+# about the failure they prevent.
+_TMUX_MESSAGE_CAP = 16 * 1024
+
+# Shaped like the seed prompt that first hit this: long, and dense with
+# apostrophes, which shell-quoting inflates ~1.7x on the way into tmux.
+_LONG_PROMPT = "the worker pod's ephemeral-storage limit is 4Gi today. " * 400
 
 
 def _task(tmp_path: Path, task_id: str = "eng-123") -> Task:
@@ -508,3 +526,130 @@ def test_rename_window_without_tmux_binary(
 ) -> None:
     monkeypatch.setattr("goblin_watcher.windowing.tmux.shutil.which", lambda _: None)
     assert TmuxWindower().rename_window("eng-123", "eng-456") is False
+
+
+def test_tmux_run_spills_an_over_budget_pane_command_to_a_script(
+    isolated_xdg: Path, tmp_path: Path, fake_tmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prompt too long for tmux's message cap rides in a file, not the argv.
+
+    Before this, `gw new` on a ticket with a long description died on
+    `new-window` with "command too long" and the agent was never spawned.
+    """
+    monkeypatch.setenv("TMUX", "tmux-1234,1,0")
+    rc = TmuxWindower().run(
+        task=_task(tmp_path),
+        cmd=["claude", "--dangerously-skip-permissions", _LONG_PROMPT],
+        cwd=tmp_path,
+        env={},
+        session_id="sess-abc",
+    )
+
+    assert rc == 0
+    new_window = next(c for c in fake_tmux if "new-window" in c)
+    assert _argv_size(new_window) < _TMUX_MESSAGE_CAP
+
+    script = paths.pane_script_file("eng-123", "sess-abc")
+    assert new_window[-1] == f"exec /bin/sh {shlex.quote(str(script))}"
+    body = script.read_text()
+    assert body.startswith("#!/bin/sh\n")
+    # The script holds the command tmux would otherwise have carried, whole.
+    assert "DISABLE_AUTO_UPDATE=true" in body
+    assert "--dangerously-skip-permissions" in body
+    assert len(body) > _TMUX_MESSAGE_CAP
+
+
+def test_tmux_run_keeps_a_short_pane_command_inline(
+    isolated_xdg: Path, tmp_path: Path, fake_tmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary case is unchanged: the command stays in tmux's argv, and no
+    file is written. `#{pane_start_command}` remains readable."""
+    monkeypatch.setenv("TMUX", "tmux-1234,1,0")
+    TmuxWindower().run(
+        task=_task(tmp_path),
+        cmd=["claude", "hi"],
+        cwd=tmp_path,
+        env={},
+        session_id="sess-abc",
+    )
+
+    new_window = next(c for c in fake_tmux if "new-window" in c)
+    assert "claude hi" in new_window[-1]
+    assert not paths.pane_scripts_dir().exists()
+
+
+def test_tmux_run_spills_on_the_split_path_too(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget covers a second session on the same task, which spawns through
+    the longer `split-window` form."""
+    calls = _patch_inside_tmux_with_existing_window(monkeypatch)
+
+    TmuxWindower().run(
+        task=_task(tmp_path),
+        cmd=["claude", _LONG_PROMPT],
+        cwd=tmp_path,
+        env={},
+        session_id="sess-def",
+    )
+
+    split = next(c for c in calls if "split-window" in c)
+    assert _argv_size(split) < _TMUX_MESSAGE_CAP
+    assert paths.pane_script_file("eng-123", "sess-def").exists()
+
+
+def test_pane_script_is_keyed_by_session_so_a_respawn_overwrites(
+    isolated_xdg: Path, tmp_path: Path, fake_tmux, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two spawns of the same session reuse one file; a different session gets its own."""
+    monkeypatch.setenv("TMUX", "tmux-1234,1,0")
+    for session_id in ("sess-abc", "sess-abc", "sess-def"):
+        TmuxWindower().run(
+            task=_task(tmp_path),
+            cmd=["claude", _LONG_PROMPT],
+            cwd=tmp_path,
+            env={},
+            session_id=session_id,
+        )
+
+    assert sorted(p.name for p in paths.pane_scripts_dir().glob("*.sh")) == [
+        "eng-123-sess-abc.sh",
+        "eng-123-sess-def.sh",
+    ]
+    # No temp files left behind by the atomic write.
+    assert not list(paths.pane_scripts_dir().glob("*.tmp"))
+
+
+def test_pane_scripts_are_pruned_once_past_their_ttl(isolated_xdg: Path) -> None:
+    """Nothing live reads a pane script after startup, so old ones just go."""
+    directory = paths.pane_scripts_dir()
+    directory.mkdir(parents=True)
+    fresh = directory / "eng-1-sess.sh"
+    stale = directory / "eng-2-sess.sh"
+    fresh.write_text("#!/bin/sh\n")
+    stale.write_text("#!/bin/sh\n")
+    old = time.time() - _SCRIPT_TTL_SECONDS - 60
+    os.utime(stale, (old, old))
+
+    _prune_pane_scripts(directory)
+
+    assert fresh.exists()
+    assert not stale.exists()
+
+
+def test_send_chunks_text_too_long_for_one_tmux_message(
+    isolated_xdg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single `send-keys` over tmux's cap fails outright, so long text is typed
+    in pieces — in order, and reassembling to exactly the original."""
+    calls = _fake_tmux_panes(monkeypatch, [("%3", "sess-abc")])
+    text = "".join(chr(0x61 + i % 26) for i in range(20_000))
+
+    TmuxWindower().send(task=_task(tmp_path), text=text, session_id="sess-abc")
+
+    typed = [c for c in calls if c[1] == "send-keys" and "-l" in c]
+    assert len(typed) > 1
+    assert all(_argv_size(c) < _TMUX_MESSAGE_CAP for c in typed)
+    assert "".join(c[-1] for c in typed) == text
+    # Still exactly one Enter, after the last chunk.
+    assert [c for c in calls if c[-1] == "Enter"] == [["tmux", "send-keys", "-t", "%3", "Enter"]]

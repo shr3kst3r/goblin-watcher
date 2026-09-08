@@ -96,6 +96,18 @@ Fallbacks and refusals, in order:
 
 Text and Enter are two `send-keys` calls: `-l --` sends the message literally (so a message reading `Enter` or `C-c`, or one starting with `-`, is typed rather than interpreted), while Enter has to go as a key name to submit. `--no-enter` leaves the text sitting in the agent's input box.
 
+### tmux's 16 KiB message ceiling
+
+Everything gw asks tmux to do travels from the tmux *client* to the tmux server as one imsg, capped at `MAX_IMSGSIZE` (16 KiB) — the whole argv, `new-window` and its flags included. Past the cap the client refuses with `command too long` (or, just under it, `failed to send command`) and the window is never created. gw's spawn is exactly the shape that hits it: the seed prompt carries a Linear description verbatim, and the pane command quotes it *twice* — once for `$SHELL -lic`, once for the `/bin/sh -c` tmux itself runs — which inflates an apostrophe-heavy description by roughly 1.7x. A ~10 KB ticket body is enough to lose the spawn.
+
+So the pane command is measured, not assumed. `run` builds the full argv first, and if it is over `_ARGV_BUDGET` the pane command is written to `<data>/panes/<task>-<session>.sh` and tmux is handed `exec /bin/sh <path>` — a few dozen bytes regardless of the prompt's size. Three details worth keeping:
+
+- **The budget covers the whole argv, not just the pane command**, because `split-window -t goblin:<task>` is longer than `new-window`: a prompt that just fits for the first session must not overflow for the second.
+- **The write is atomic** (temp file + `replace`), so a pane starting up can never read a half-written script.
+- **The script is kept, not deleted after launch.** With the command out of tmux's argv, `#{pane_start_command}` shows only a path — that file is the only record of what the pane actually ran, which is precisely what you want when a pane dies on startup. A 7-day TTL, pruned on the next write, keeps the directory from growing forever.
+
+`send` has the same ceiling and takes the other option available to it: `send-keys` can be called repeatedly, so long text is typed in chunks (2048 characters each, at most 8 KiB of UTF-8). Order is preserved because each call completes before the next is issued.
+
 ## Agent abstraction
 
 `Agent` protocol (`agents/base.py`) has eight methods:

@@ -22,6 +22,12 @@ oh-my-zsh's update prompt would otherwise *block* the pane waiting for a keypres
 (its `read` never returns), stalling the agent launch; suppressing it lets the
 shell proceed straight to the agent.
 
+Both the launch command and `send`'s text are bounded by tmux's client→server
+message size (one 16 KiB imsg): past that the client dies with "command too
+long" and the spawn is simply lost. A seed prompt built from a long ticket
+description clears that bar easily, so `run` spills the pane command to a
+script file when the argv would not fit, and `send` types its text in chunks.
+
 `send` is the one place we *do* type into a pane — that's the whole point of
 `gw session send`, which delivers a follow-up instruction to an agent already at
 its prompt. Panes are addressed by the `@gw_session` pane option we stamp on
@@ -35,10 +41,11 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from goblin_watcher import config
+from goblin_watcher import config, paths
 from goblin_watcher.console import console
 from goblin_watcher.errors import GoblinError, MissingDependencyError
 from goblin_watcher.models import Task
@@ -48,6 +55,24 @@ from goblin_watcher.models import Task
 # to `-F` formats as `#{@name}` — so the mapping is queryable without gw
 # recording pane ids anywhere.
 _SESSION_OPTION = "@gw_session"
+
+# tmux ships the client's whole argv to the server in a single imsg, capped at
+# MAX_IMSGSIZE (16 KiB). Over the cap the client refuses with "command too
+# long"; just under it, imsg itself fails with "failed to send command". Either
+# way the pane is never created. The budget below is that ceiling with room for
+# tmux's own framing, and it is compared against the *whole* argv (`new-window`
+# and its flags included), not just the pane command.
+_ARGV_BUDGET = 12 * 1024
+
+# Chunk size for `send`, in characters rather than bytes so the arithmetic stays
+# obvious: 2048 characters is at most 8 KiB of UTF-8, comfortably inside the
+# same message cap.
+_SEND_CHUNK = 2048
+
+# How long a spilled pane script is kept. It is read once, at pane startup, so
+# nothing live depends on it after that — it survives only so there is
+# something to read when a pane dies on launch and you need to see what it ran.
+_SCRIPT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -80,6 +105,51 @@ def _run_tmux(*args: str) -> subprocess.CompletedProcess[str]:
 
 def _describe(panes: list[_Pane]) -> str:
     return ", ".join(p.session_id or f"{p.pane_id} (untagged)" for p in panes)
+
+
+def _argv_size(args: list[str]) -> int:
+    """Bytes tmux's client counts for a command: every argument, NUL-terminated."""
+    return sum(len(a.encode()) + 1 for a in args)
+
+
+def _chunks(text: str, size: int = _SEND_CHUNK) -> list[str]:
+    """Split `text` for `send-keys`, preserving the empty string as one send."""
+    if len(text) <= size:
+        return [text]
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _prune_pane_scripts(directory: Path) -> None:
+    """Drop pane scripts past their TTL. Best-effort — hygiene, never a spawn blocker."""
+    cutoff = time.time() - _SCRIPT_TTL_SECONDS
+    try:
+        stale = list(directory.glob("*.sh"))
+    except OSError:
+        return
+    for script in stale:
+        try:
+            if script.stat().st_mtime < cutoff:
+                script.unlink()
+        except OSError:
+            continue
+
+
+def _spill_pane_command(pane_cmd: str, *, task_id: str, session_id: str | None) -> str:
+    """Move an over-budget pane command into a script and return a command that runs it.
+
+    The prompt is what makes these commands long, and it is the one part we
+    cannot shorten — so instead of trimming it we stop sending it through tmux
+    at all. `/bin/sh <path>` is a handful of bytes whatever the prompt's size.
+    """
+    path = paths.pane_script_file(task_id, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _prune_pane_scripts(path.parent)
+    # Atomic, so a pane starting up can never read a half-written script.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(f"#!/bin/sh\n{pane_cmd}\n")
+    tmp.replace(path)
+    console.print(f"[muted]Launch command exceeds tmux's message limit; running it from {path}.[/]")
+    return f"exec /bin/sh {shlex.quote(str(path))}"
 
 
 class TmuxWindower:
@@ -156,24 +226,26 @@ class TmuxWindower:
         pane_cmd = self._pane_command(cmd, extra_env=env)
         # `-P -F '#{pane_id}'` makes tmux print the new pane's id (`%12`) so we
         # can stamp the session id on it below.
-        print_pane = ("-P", "-F", "#{pane_id}")
+        print_pane = ["-P", "-F", "#{pane_id}"]
         if self._window_exists(task.id):
             # Add a pane to the existing window for this additional session.
             # `-v` stacks top/bottom, `-h` places side-by-side. `vertical` ==
             # panes-stacked-vertically matches tmux's `-v` flag letter.
             split_flag = "-h" if config.load().tmux.split == "horizontal" else "-v"
-            res = _run_tmux(
-                "split-window", split_flag, "-t", target, "-c", str(cwd), *print_pane, pane_cmd
-            )
+            args = ["split-window", split_flag, "-t", target, "-c", str(cwd), *print_pane]
         else:
             # `-a` inserts the window *after* the session's current window and
             # shifts the rest up. Without it, `new-window -t <session>` targets
             # the current window's index and fails with "index N in use"
             # whenever that slot is occupied (the common case once the session
             # has windows) — silently leaving the agent unspawned.
-            res = _run_tmux(
-                "new-window", "-a", "-t", s, "-n", task.id, "-c", str(cwd), *print_pane, pane_cmd
-            )
+            args = ["new-window", "-a", "-t", s, "-n", task.id, "-c", str(cwd), *print_pane]
+        # Measured with the flags in place, because they are part of the same
+        # message: a prompt that only just fits on `new-window` would otherwise
+        # overflow on the longer `split-window` form for the second session.
+        if _argv_size(["tmux", *args, pane_cmd]) > _ARGV_BUDGET:
+            pane_cmd = _spill_pane_command(pane_cmd, task_id=task.id, session_id=session_id)
+        res = _run_tmux(*args, pane_cmd)
         if res.returncode != 0:
             raise GoblinError(
                 f"tmux failed to open a window/pane for task '{task.id}': "
@@ -265,13 +337,20 @@ class TmuxWindower:
         # message that looks like a key name — "Enter", "C-c" — is typed, not
         # interpreted), while Enter has to be sent *as* a key name to submit.
         # `--` keeps a message starting with `-` out of tmux's option parser.
-        res = _run_tmux("send-keys", "-t", pane.pane_id, "-l", "--", text)
-        if res.returncode != 0:
-            raise GoblinError(
-                f"tmux failed to send input to pane {pane.pane_id}: "
-                f"{res.stderr.strip() or 'unknown error'}",
-                hint=f"The pane may have just closed. Check `tmux list-panes -t {s}:{task.id}`.",
-            )
+        #
+        # Long text goes in chunks: one `send-keys` carrying more than tmux's
+        # message cap fails outright, and a review feed or a pasted traceback
+        # gets there. Order is preserved because each call completes before the
+        # next is issued, and the agent is typing into an input box either way.
+        for chunk in _chunks(text):
+            res = _run_tmux("send-keys", "-t", pane.pane_id, "-l", "--", chunk)
+            if res.returncode != 0:
+                raise GoblinError(
+                    f"tmux failed to send input to pane {pane.pane_id}: "
+                    f"{res.stderr.strip() or 'unknown error'}",
+                    hint="The pane may have just closed. Check "
+                    f"`tmux list-panes -t {s}:{task.id}`.",
+                )
         if enter:
             res = _run_tmux("send-keys", "-t", pane.pane_id, "Enter")
             if res.returncode != 0:
